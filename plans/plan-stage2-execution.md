@@ -259,8 +259,9 @@ Turn 4:  docker_manager.start(...); jellyfin_api.wait_healthy()
 Turn 5:  jellyfin_api.authenticate() if any steps require auth
 Turn 6-N: For each step: dispatch tool → evaluate criteria → log result
          (screenshot on fail steps if UI-related)
-Turn N+1: docker_manager.logs(); scan for failure_indicators
-Turn N+2: Assess overall_result; docker_manager.stop()
+Turn N+1: docker_manager.logs(); find trigger step in execution_log; assess overall_result
+          from trigger step outcome (pass→reproduced, fail→not_reproduced, not reached→inconclusive)
+Turn N+2: docker_manager.stop()
 Turn N+3: Build ExecutionResult JSON; send_message(channel="execution_done", ...)
 Turn N+4: Emit EXECUTION_COMPLETE
 ```
