@@ -139,7 +139,7 @@ async def run_issue(issue_url: str, container_version: str):
       }
     }
   ],
-  "success_criteria": "string",
+  "reproduction_goal": "string",
   "failure_indicators": ["string"],
   "confidence": "high | medium | low",
   "ambiguities": ["string"],
@@ -159,7 +159,7 @@ For `trigger` steps, `success_criteria` deliberately describes observing the bug
 
 **`success_criteria` evaluation (deterministic, no LLM):**
 
-`success_criteria` is a structured object — never free text — so Stage 2 can evaluate it programmatically and produce reproducible outcomes. The shape is `{ "all_of": [<assertion>, ...] }` or `{ "any_of": [<assertion>, ...] }` (mutually exclusive at the top level; nested combinators are not supported in v1).
+Per-step `success_criteria` is a structured object — never free text — so Stage 2 can evaluate it programmatically and produce reproducible outcomes. The shape is `{ "all_of": [<assertion>, ...] }` or `{ "any_of": [<assertion>, ...] }` (mutually exclusive at the top level; nested combinators are not supported in v1).
 
 Supported assertion types:
 
@@ -175,7 +175,7 @@ Supported assertion types:
 | `log_matches`    | `pattern: string`, `since_step_start: bool = true` | Regex against `docker logs` since step began |
 | `screenshot_present` | `label: string`             | A screenshot was captured under this label |
 
-A step passes iff its `success_criteria` evaluates to true under this DSL. There is no LLM-based judgment in the loop; the agent's job is to dispatch the tool call, not to interpret the result.
+A step passes iff its `success_criteria` evaluates to true under this DSL. There is no LLM-based judgment in the loop; the agent's job is to dispatch the tool call, not to interpret the result. The top-level `reproduction_goal` is human-readable context only and must not be used by Stage 2 for pass/fail decisions.
 
 **Step variable binding (`capture` + `${var}` interpolation):**
 
