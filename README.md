@@ -20,9 +20,12 @@ python -m venv .venv
 cp .env.example .env
 ```
 
-Edit `.env` with any local API keys or runtime overrides. The CLI loads it
-automatically when present, without overriding variables already exported in the
-shell.
+Authenticate LLM providers with KohakuTerrarium's normal login flow, for
+example `.venv/bin/kt login openrouter` for the OpenRouter presets. The CLI
+loads `.env` automatically when present for project runtime settings, without
+overriding variables already exported in the shell. Provider API keys should
+only be added to `.env` when you explicitly want this process environment to
+supply provider auth instead of relying on KohakuTerrarium's saved login store.
 
 ```bash
 .venv/bin/python main.py https://github.com/jellyfin/jellyfin/issues/XXXX 10.9.7

@@ -188,6 +188,33 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(os.environ["GITHUB_TOKEN"], "from-env")
                 self.assertEqual(os.environ["JF_AUTO_TESTER_BROWSER_HEADLESS"], "true")
 
+    def test_load_env_file_ignores_blank_provider_auth_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dotenv_path = Path(temp_dir) / ".env"
+            dotenv_path.write_text(
+                "OPENROUTER_API_KEY=\n"
+                "ANTHROPIC_API_KEY=\n"
+                "JF_AUTO_TESTER_BROWSER_HEADLESS=false\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertTrue(load_env_file(dotenv_path))
+
+                self.assertNotIn("OPENROUTER_API_KEY", os.environ)
+                self.assertNotIn("ANTHROPIC_API_KEY", os.environ)
+                self.assertEqual(os.environ["JF_AUTO_TESTER_BROWSER_HEADLESS"], "false")
+
+    def test_load_env_file_loads_non_empty_provider_auth_override(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dotenv_path = Path(temp_dir) / ".env"
+            dotenv_path.write_text("OPENROUTER_API_KEY=sk-or-test\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertTrue(load_env_file(dotenv_path))
+
+                self.assertEqual(os.environ["OPENROUTER_API_KEY"], "sk-or-test")
+
     def test_load_env_file_missing_file_is_noop(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, {}, clear=True):

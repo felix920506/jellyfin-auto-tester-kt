@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import inspect
 import json
+import os
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,6 +17,15 @@ REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_RECIPE_PATH = REPO_ROOT / "terrarium.yaml"
 DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
 TERMINAL_CHANNELS = ("final_report", "human_review_queue")
+PROVIDER_AUTH_ENV_VARS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GEMINI_API_KEY",
+        "MIMO_API_KEY",
+    }
+)
 PIPELINE_PAYLOAD_KEYS = {
     "report_path",
     "run_id",
@@ -60,7 +70,8 @@ def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
     """Load environment variables from ``.env`` if it exists.
 
     Values already present in the process environment win over values in the
-    file. Missing files are not an error.
+    file. Blank provider auth values are ignored so KohakuTerrarium can keep
+    using its default saved-provider login store.
     """
 
     dotenv_path = Path(path).expanduser()
@@ -68,14 +79,22 @@ def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
         return False
 
     try:
-        from dotenv import load_dotenv
+        from dotenv import dotenv_values
     except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
         raise RuntimeError(
             "python-dotenv is required to load .env files. "
             "Install dependencies with: .venv/bin/python -m pip install -r requirements.txt"
         ) from exc
 
-    return bool(load_dotenv(dotenv_path=dotenv_path, override=False))
+    loaded = False
+    for key, value in dotenv_values(dotenv_path).items():
+        if not key or value is None or key in os.environ:
+            continue
+        if key in PROVIDER_AUTH_ENV_VARS and not value.strip():
+            continue
+        os.environ[key] = value
+        loaded = True
+    return loaded
 
 
 def execution_turn_budget(step_count: int) -> tuple[int, int]:
