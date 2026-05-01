@@ -63,7 +63,7 @@ class FakeContainers:
         self.fail_ports = set()
 
     def list(self, all=False, filters=None):
-        return self.running
+        return [container for container in self.running if not container.removed]
 
     def get(self, key):
         if key not in self.items:
@@ -150,7 +150,11 @@ class DockerManagerTests(unittest.TestCase):
 
     def test_start_enforces_running_container_limit(self):
         client = FakeClient()
-        client.containers.running = [FakeContainer("one"), FakeContainer("two")]
+        one = FakeContainer("one")
+        two = FakeContainer("two")
+        one.attrs["Created"] = "2999-01-01T00:00:00Z"
+        two.attrs["Created"] = "2999-01-01T00:00:00Z"
+        client.containers.running = [one, two]
         manager = docker_manager.DockerManager(client=client)
 
         with self.assertRaises(RuntimeError):
@@ -161,6 +165,28 @@ class DockerManagerTests(unittest.TestCase):
                 env_vars={},
                 run_id="abcdef12",
             )
+
+    def test_start_removes_same_name_container_before_limit_check(self):
+        client = FakeClient()
+        stale = FakeContainer("stale", "jf-test-abcdef12")
+        other = FakeContainer("other", "jf-test-other")
+        stale.attrs["Created"] = "2999-01-01T00:00:00Z"
+        other.attrs["Created"] = "2999-01-01T00:00:00Z"
+        client.containers.items[stale.name] = stale
+        client.containers.running = [stale, other]
+        manager = docker_manager.DockerManager(client=client)
+
+        with patch.object(docker_manager, "_register_cleanup"):
+            result = manager.start(
+                image="jellyfin/jellyfin:10.9.7",
+                ports={},
+                volumes=[],
+                env_vars={},
+                run_id="abcdef123456",
+            )
+
+        self.assertTrue(stale.removed)
+        self.assertEqual(result["name"], "jf-test-abcdef12")
 
     def test_exec_uses_shell_and_splits_demuxed_output(self):
         client = FakeClient()

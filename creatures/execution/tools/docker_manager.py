@@ -78,6 +78,9 @@ class DockerManager:
             raise ValueError("run_id is required")
 
         self._reap_stale_containers()
+        name = f"jf-test-{run_id[:8]}"
+        self._remove_container_by_name(name, run_id)
+
         running = self.client.containers.list(
             filters={"label": f"{LABEL_KEY}={LABEL_VALUE}", "status": "running"}
         )
@@ -85,9 +88,6 @@ class DockerManager:
             raise RuntimeError(
                 f"refusing to start more than {MAX_RUNNING_CONTAINERS} managed containers"
             )
-
-        name = f"jf-test-{run_id[:8]}"
-        self._remove_container_by_name(name, run_id)
 
         container_port, preferred_host_port = _port_mapping(ports)
         docker_volumes = _volume_mapping(volumes)
