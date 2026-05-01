@@ -131,7 +131,9 @@ async def run_issue(issue_url: str, container_version: str):
   "success_criteria": "string",
   "failure_indicators": ["string"],
   "confidence": "high | medium | low",
-  "ambiguities": ["string"]
+  "ambiguities": ["string"],
+  "is_verification": false,
+  "original_run_id": null
 }
 ```
 
