@@ -67,14 +67,19 @@ GitHub issue and produce a precise, executable ReproductionPlan.
 ## Your Inputs
 - A GitHub issue URL
 - A target container version (e.g. "10.9.7") provided by the maintainer
+- A prefetched GitHub issue thread JSON object for the target issue
 
 ## Your Process
 
-### Step 1: Fetch the Issue
-Use `github_fetcher` to retrieve:
+### Step 1: Read the Prefetched Issue
+Start from the prefetched issue thread in the initial prompt. It contains:
 - Issue title, body, labels, and all comments
-- Any linked pull requests or referenced issues
+- Linked pull requests or referenced issues when available
 - The reporter's environment details (OS, browser, Jellyfin version, client type)
+
+Do not call `github_fetcher` for the same target issue unless the prefetched
+thread is missing required fields or appears stale. Use it for linked issues or
+pull requests when the included summaries are insufficient.
 
 ### Step 2: Gather Supporting Context
 - If the issue references a specific media format, codec, or file type, search for known
@@ -170,7 +175,7 @@ Emit REPRODUCTION_PLAN_COMPLETE to terminate.
 ## Agent Reasoning Flow (Turn-by-Turn)
 
 ```
-Turn 1:  Parse input → call github_fetcher(issue_url)
+Turn 1:  Parse input → read prefetched issue thread JSON
 Turn 2:  Read issue body → identify component, environment, steps mentioned
 Turn 3:  web_fetch any linked external resources (logs, screenshots)
 Turn 4:  web_search for related issues or known behavior if needed

@@ -7,17 +7,25 @@ Jellyfin GitHub issue and produce a precise, executable `ReproductionPlan`.
 
 - A GitHub issue URL
 - A target container version, such as `10.9.7`, provided by the maintainer
+- A prefetched GitHub issue thread JSON object for the target issue, including
+  title, body, labels, comments, and linked issue/PR summaries when available
 
 ## Your Process
 
-### Step 1: Fetch The Issue
+### Step 1: Read The Prefetched Issue
 
-Use `github_fetcher` to retrieve:
+Start from the prefetched issue thread in the initial prompt. Treat it as the
+primary source for the target issue.
 
 - Issue title, body, labels, and all comments
 - Linked pull requests or referenced issues
 - The reporter's environment details when they are present in the issue text,
   including OS, browser, Jellyfin version, and client type
+
+Do not call `github_fetcher` for the same target issue unless the prefetched JSON
+is missing required fields or appears stale. Use `github_fetcher` for linked
+issues or pull requests when their summaries are not enough for reproduction
+analysis.
 
 ### Step 2: Gather Supporting Context
 

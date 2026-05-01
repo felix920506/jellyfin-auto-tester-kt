@@ -159,6 +159,7 @@ async def run_issue(
     timeout_s: float | None = 60 * 60,
     stream: TextIO | None = sys.stdout,
     engine_factory: Callable[[str], Any] | None = None,
+    issue_fetcher: Callable[..., Any] | None = None,
 ) -> PipelineResult:
     """Run the full Stage 1 -> Stage 2 -> Stage 3 pipeline.
 
@@ -169,13 +170,14 @@ async def run_issue(
     """
 
     load_env_file()
+    issue_thread = await _prefetch_issue_thread(issue_url, issue_fetcher)
     engine = await _load_engine(recipe_path, engine_factory=engine_factory)
     _apply_default_execution_budget(engine)
 
     terminal_task = asyncio.create_task(_wait_for_terminal_message(engine))
     analysis_output: list[str] = []
     try:
-        prompt = _analysis_prompt(issue_url, container_version)
+        prompt = _analysis_prompt(issue_url, container_version, issue_thread)
         analysis_agent = _get_agent(engine, "analysis_agent")
         _suppress_default_output(analysis_agent)
         async for chunk in _chat(analysis_agent, prompt):
@@ -221,6 +223,7 @@ async def run_analysis_stage(
     timeout_s: float | None = 10 * 60,
     stream: TextIO | None = sys.stdout,
     engine_factory: Callable[[str], Any] | None = None,
+    issue_fetcher: Callable[..., Any] | None = None,
 ) -> StageDebugResult:
     """Run Stage 1 only and write a disk handoff folder.
 
@@ -232,6 +235,7 @@ async def run_analysis_stage(
     """
 
     load_env_file()
+    issue_thread = await _prefetch_issue_thread(issue_url, issue_fetcher)
     output_dir = _prepare_output_dir(out_dir)
     _write_json_file(
         output_dir / "input.json",
@@ -239,6 +243,7 @@ async def run_analysis_stage(
             "stage": "analysis",
             "issue_url": issue_url,
             "container_version": container_version,
+            "prefetched_issue_thread": issue_thread,
         },
     )
 
@@ -248,7 +253,8 @@ async def run_analysis_stage(
     try:
         analysis_agent = _get_agent(engine, "analysis_agent")
         _suppress_default_output(analysis_agent)
-        async for chunk in _chat(analysis_agent, _analysis_prompt(issue_url, container_version)):
+        prompt = _analysis_prompt(issue_url, container_version, issue_thread)
+        async for chunk in _chat(analysis_agent, prompt):
             text = _chunk_text(chunk)
             transcript_parts.append(text)
             if stream is not None:
@@ -472,8 +478,66 @@ async def _load_stage_engine(
     return await _maybe_await(Terrarium.from_recipe(recipe))
 
 
-def _analysis_prompt(issue_url: str, container_version: str) -> str:
-    return f"Issue: {issue_url}\nTarget version: {container_version}"
+async def _prefetch_issue_thread(
+    issue_url: str,
+    issue_fetcher: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Fetch the target GitHub issue before starting the analysis agent."""
+
+    fetcher = issue_fetcher or _default_issue_fetcher()
+    if issue_fetcher is None:
+        issue_thread = await asyncio.to_thread(
+            fetcher,
+            issue_url=issue_url,
+            include_comments=True,
+            include_linked=True,
+        )
+    else:
+        issue_thread = fetcher(
+            issue_url=issue_url,
+            include_comments=True,
+            include_linked=True,
+        )
+        issue_thread = await _maybe_await(issue_thread)
+
+    if not isinstance(issue_thread, dict):
+        raise TypeError("issue prefetcher must return a dictionary")
+    return issue_thread
+
+
+def _default_issue_fetcher() -> Callable[..., Any]:
+    from creatures.analysis.tools.github_fetcher import github_fetcher
+
+    return github_fetcher
+
+
+def _analysis_prompt(
+    issue_url: str,
+    container_version: str,
+    issue_thread: dict[str, Any] | None = None,
+) -> str:
+    prompt = f"Issue: {issue_url}\nTarget version: {container_version}"
+    if issue_thread is None:
+        return prompt
+
+    issue_json = json.dumps(
+        issue_thread,
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    return (
+        f"{prompt}\n\n"
+        "Prefetched GitHub issue thread JSON:\n"
+        "```json\n"
+        f"{issue_json}\n"
+        "```\n\n"
+        "Use the prefetched issue thread as the primary source for this target "
+        "issue. Do not call github_fetcher for the same target issue unless "
+        "the supplied JSON is missing required fields or appears stale. Use "
+        "tools only for linked issues, external resources, documentation, and "
+        "additional supporting context."
+    )
 
 
 def _apply_default_execution_budget(engine: Any) -> None:

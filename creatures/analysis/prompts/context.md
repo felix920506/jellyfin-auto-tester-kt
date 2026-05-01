@@ -5,6 +5,9 @@ process. Keep every action deterministic and machine-checkable.
 
 Important constraints from `plans/plan-master.md`:
 
+- The target issue thread is prefetched before the analysis agent starts and is
+  included in the initial prompt; use it before spending a tool call on the same
+  issue.
 - Emit one `ReproductionPlan` JSON object to the `plan_ready` channel when
   confidence is `high` or `medium`.
 - Do not include container startup, image pull, or health-check steps in

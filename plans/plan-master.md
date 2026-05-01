@@ -87,13 +87,19 @@ root_agent: "analysis_agent"
 ### Programmatic Entry Point
 
 ```python
+import json
+
 from kohaku_terrarium import Terrarium
+from creatures.analysis.tools.github_fetcher import github_fetcher
 
 async def run_issue(issue_url: str, container_version: str):
     engine = await Terrarium.from_recipe("terrarium.yaml")
     analysis = engine["analysis_agent"]
+    issue_thread = github_fetcher(issue_url, include_comments=True, include_linked=True)
     async for chunk in analysis.chat(
-        f"Issue: {issue_url}\nTarget version: {container_version}"
+        f"Issue: {issue_url}\n"
+        f"Target version: {container_version}\n\n"
+        f"Prefetched GitHub issue thread JSON:\n{json.dumps(issue_thread)}"
     ):
         print(chunk, end="")
 ```

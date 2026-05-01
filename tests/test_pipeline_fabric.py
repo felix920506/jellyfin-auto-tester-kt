@@ -187,6 +187,30 @@ def _sample_plan():
     }
 
 
+def _sample_issue_thread():
+    return {
+        "title": "Debug issue",
+        "body": "Steps to reproduce the debug issue.",
+        "labels": ["bug"],
+        "state": "open",
+        "created_at": "2026-01-01T00:00:00Z",
+        "author": "reporter",
+        "comments": [
+            {
+                "author": "maintainer",
+                "body": "Confirmed on the target version.",
+                "created_at": "2026-01-02T00:00:00Z",
+            }
+        ],
+        "linked_issues": [],
+        "linked_prs": [],
+    }
+
+
+def _sample_issue_fetcher(**_kwargs):
+    return _sample_issue_thread()
+
+
 def _sample_execution_entry(plan):
     step = plan["reproduction_steps"][0]
     return {
@@ -238,6 +262,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             "10.9.7",
             stream=stream,
             engine_factory=lambda recipe: engine,
+            issue_fetcher=_sample_issue_fetcher,
         )
 
         self.assertEqual(result.status, "complete")
@@ -248,6 +273,8 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             engine.analysis_agent.prompts[0],
         )
         self.assertIn("Target version: 10.9.7", engine.analysis_agent.prompts[0])
+        self.assertIn("Prefetched GitHub issue thread JSON", engine.analysis_agent.prompts[0])
+        self.assertIn("Debug issue", engine.analysis_agent.prompts[0])
         self.assertIn(
             "Final report: /tmp/artifacts/run-1/report.md",
             stream.getvalue(),
@@ -270,11 +297,38 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             "10.9.7",
             stream=stream,
             engine_factory=lambda recipe: engine,
+            issue_fetcher=_sample_issue_fetcher,
         )
 
         self.assertEqual(analysis_agent.original_default_output.streamed, [])
         self.assertEqual(stream.getvalue().count("analysis started"), 1)
         self.assertEqual(stream.getvalue().count("REPRODUCTION_PLAN_COMPLETE"), 1)
+
+    async def test_run_issue_prefetches_issue_before_loading_engine(self):
+        events = []
+        payload = {"report_path": "/tmp/artifacts/run-1/report.md"}
+        engine = FakeEngine(
+            ["analysis started\n", "REPRODUCTION_PLAN_COMPLETE\n"],
+            channels={"final_report": FakeChannel({"content": payload})},
+        )
+
+        def issue_fetcher(**_kwargs):
+            events.append("issue_fetch")
+            return _sample_issue_thread()
+
+        def engine_factory(_recipe):
+            events.append("engine_load")
+            return engine
+
+        await run_issue(
+            "https://github.com/jellyfin/jellyfin/issues/1",
+            "10.9.7",
+            stream=None,
+            engine_factory=engine_factory,
+            issue_fetcher=issue_fetcher,
+        )
+
+        self.assertEqual(events[:2], ["issue_fetch", "engine_load"])
 
     async def test_run_issue_stops_on_insufficient_information(self):
         engine = FakeEngine(["INSUFFICIENT_INFORMATION\nmissing steps\n"])
@@ -284,6 +338,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             "10.9.7",
             stream=None,
             engine_factory=lambda recipe: engine,
+            issue_fetcher=_sample_issue_fetcher,
         )
 
         self.assertEqual(result.status, "insufficient_information")
@@ -317,11 +372,14 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 temp_dir,
                 stream=None,
                 engine_factory=lambda stage: engine,
+                issue_fetcher=_sample_issue_fetcher,
             )
 
             self.assertEqual(result.status, "plan_ready")
             self.assertEqual(result.output_file, "plan.json")
             self.assertEqual(json.loads((Path(temp_dir) / "plan.json").read_text()), plan)
+            input_payload = json.loads((Path(temp_dir) / "input.json").read_text())
+            self.assertEqual(input_payload["prefetched_issue_thread"]["title"], "Debug issue")
             self.assertIn(
                 "analysis started",
                 (Path(temp_dir) / "transcript.txt").read_text(encoding="utf-8"),
