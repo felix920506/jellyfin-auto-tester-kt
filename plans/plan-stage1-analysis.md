@@ -115,6 +115,12 @@ Each step must have a `tool` field specifying how Stage 2 should execute it:
 - `"screenshot"` — capture browser state at this step
 - `"docker_exec"` — command inside the already-running container
 
+When a step needs a value produced by an earlier step (e.g. an item ID returned by a
+library scan), declare a `capture` block on the producing step and reference the
+variable as `${name}` inside any later step's `input`. See plan-master.md for the
+capture/interpolation rules. Never embed placeholder strings like `{item_id}` —
+they will be sent to Jellyfin verbatim.
+
 Send the plan to the `plan_ready` channel using `send_message`.
 Emit REPRODUCTION_PLAN_COMPLETE to terminate.
 
@@ -208,7 +214,10 @@ The agent sends a `ReproductionPlan` JSON to the `plan_ready` channel. See the m
         "body": { "Name": "TestLib", "CollectionType": "movies", "Paths": ["/media"] }
       },
       "expected_outcome": "HTTP 204; library scan triggered",
-      "success_criteria": { "all_of": [ { "type": "status_code", "equals": 204 } ] }
+      "success_criteria": { "all_of": [ { "type": "status_code", "equals": 204 } ] },
+      "capture": {
+        "item_id": { "from": "body_json_path", "path": "$.Items[0].Id" }
+      }
     },
     {
       "step_id": 2,
@@ -217,7 +226,7 @@ The agent sends a `ReproductionPlan` JSON to the `plan_ready` channel. See the m
       "tool": "http_request",
       "input": {
         "method": "POST",
-        "path": "/Items/{item_id}/PlaybackInfo",
+        "path": "/Items/${item_id}/PlaybackInfo",
         "body": { "DeviceProfile": { "MaxStreamingBitrate": 2000000 } }
       },
       "expected_outcome": "HTTP 500 or TranscodingInfo.IsVideoDirect=false with error in logs",

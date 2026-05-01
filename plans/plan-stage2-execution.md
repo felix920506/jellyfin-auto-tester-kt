@@ -100,13 +100,17 @@ A `run_id` (UUID) for artifact namespacing.
 ### Phase 2: Step Execution
 For each step in `reproduction_steps`, in order:
 1. Log the step start time; record `step.role` in the execution log entry
-2. Dispatch to the appropriate tool based on `step.tool`:
+2. Resolve `${var_name}` references in `step.input` (and in any
+   string-valued criterion fields) against the per-run variable scope
+   populated by previous steps' `capture` blocks. Unresolved references
+   short-circuit the step to `fail` with reason `"unbound variable: <name>"`.
+3. Dispatch to the appropriate tool based on `step.tool`:
    - `bash` → run command on host or via `docker exec`
    - `http_request` → call `jellyfin_api.request()`
    - `screenshot` → call `screenshot.capture()`
    - `docker_exec` → run command inside container via `docker_manager.exec()`
-3. Capture stdout, stderr, exit code, and HTTP response body/status
-4. Evaluate `step.success_criteria` deterministically using the structured
+4. Capture stdout, stderr, exit code, and HTTP response body/status
+5. Evaluate `step.success_criteria` deterministically using the structured
    assertion DSL defined in plan-master.md (status_code, body_contains,
    body_matches, body_json_path, exit_code, stdout_contains, stderr_contains,
    log_matches, screenshot_present, combined via `all_of`/`any_of`).
@@ -117,10 +121,14 @@ For each step in `reproduction_steps`, in order:
    - If a criterion references a tool channel that did not run for this step
      (e.g. `status_code` on a bash step) → mark step `fail` with reason
      "criterion not applicable to step.tool"
-5. After any `fail` step, immediately capture:
+6. If the step passed and declares a `capture` block, evaluate each entry
+   against the step result and bind the resulting values into the per-run
+   variable scope. Capture-extraction failures (JSONPath miss, regex no-match)
+   downgrade the step to `fail` with reason `"capture failed: <var>"`.
+7. After any `fail` step, immediately capture:
    - Full Jellyfin server logs: `docker logs <container_id>`
    - A screenshot of current state (if UI is involved)
-6. Log step end time
+8. Log step end time
 
 ### Phase 3: Assessment
 After all steps:

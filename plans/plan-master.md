@@ -124,6 +124,9 @@ async def run_issue(issue_url: str, container_version: str):
       "action": "string",
       "tool": "bash | http_request | screenshot | docker_exec",
       "input": {},
+      "capture": {
+        "item_id": { "from": "body_json_path", "path": "$.Items[0].Id" }
+      },
       "expected_outcome": "string",
       "success_criteria": {
         "all_of": [
@@ -172,6 +175,23 @@ Supported assertion types:
 | `screenshot_present` | `label: string`             | A screenshot was captured under this label |
 
 A step passes iff its `success_criteria` evaluates to true under this DSL. There is no LLM-based judgment in the loop; the agent's job is to dispatch the tool call, not to interpret the result.
+
+**Step variable binding (`capture` + `${var}` interpolation):**
+
+Steps may declare a `capture` map: `{ "<var_name>": { "from": <source>, ... } }`. After the step runs, each entry is evaluated against the step's result and stored in a per-run variable scope. Subsequent steps can reference the variable anywhere inside their `input` (and inside `success_criteria` value/pattern fields) using `${var_name}`. Interpolation is string-substitution; nested expressions are not supported.
+
+Supported `from` sources mirror the assertion DSL:
+
+| `from`              | Extra fields            | Returns |
+|---|---|---|
+| `body_json_path`    | `path: string`          | Value at JSONPath in response body |
+| `body_regex`        | `pattern: string`, `group: int = 1` | Capture group from response body regex |
+| `header`            | `name: string`          | HTTP response header value |
+| `stdout_regex`      | `pattern: string`, `group: int = 1` | Capture group from stdout |
+| `stdout_trimmed`    | (none)                  | Whole stdout, stripped |
+| `exit_code`         | (none)                  | Integer exit code |
+
+Resolution rules: variables are scoped to the run; later steps overwrite earlier captures with the same name; referencing an undefined variable marks the step `fail` with reason `"unbound variable: <name>"`. Capture failures (e.g. JSONPath misses) mark the step `fail` with reason `"capture failed: <var>"` and do not bind the variable.
 
 ### ExecutionResult (Stage 2 → Stage 3)
 
