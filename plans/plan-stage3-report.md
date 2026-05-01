@@ -114,11 +114,19 @@ Await the result (Stage 2 will re-run and emit to `execution_done`).
 
 ### If `is_verification = true` (second run): Finalize
 
-**Step 1: Compare results**
+**Step 1: Reload first-run context**
+- Read `execution_result.original_run_id`. If it is missing, route to
+  `human_review_queue` because the verification result cannot be tied back to
+  the report being verified.
+- Load `/artifacts/<original_run_id>/result.json` and
+  `/artifacts/<original_run_id>/report.md`. These files are the durable state
+  needed after Report Agent restarts; do not rely on in-memory first-pass state.
+
+**Step 2: Compare results**
 - Did the verification run reproduce the issue using only the written steps?
 - Are the results consistent with the first run?
 
-**Step 2: Decide routing**
+**Step 3: Decide routing**
 - If verification PASSED (issue reproduced consistently):
   → Attach verification metadata to the report
   → Send final report to `final_report` channel
@@ -293,11 +301,12 @@ Turn 8:  send_message(channel="verification_request", content=<verification_plan
 
 ```
 Turn 1:  Receive ExecutionResult; check is_verification flag → true
-Turn 2:  Compare verification result to first run
-Turn 3a: If consistent → report_writer.generate() with verification metadata
+Turn 2:  Read artifacts/<original_run_id>/result.json and report.md
+Turn 3:  Compare verification result to first run
+Turn 4a: If consistent → report_writer.generate() with verification metadata
          send_message(channel="final_report", content=<report_path>)
          Emit REPORT_COMPLETE
-Turn 3b: If inconsistent → append verification failure section
+Turn 4b: If inconsistent → append verification failure section
          send_message(channel="human_review_queue", content=<report + reason>)
          Emit QUEUED_FOR_REVIEW
 ```
@@ -339,7 +348,10 @@ The channel message contains:
 
 ## State Tracking: Distinguishing First vs. Second Pass
 
-State is carried entirely inside the `ExecutionResult` payload — no external state, session variables, or channel metadata are needed.
+State linkage is carried inside the `ExecutionResult` payload — no session
+variables or channel metadata are needed. The first-run payload and draft report
+are persisted under `artifacts/<original_run_id>/` and must be reloaded during
+verification finalization.
 
 **Data flow:**
 
@@ -352,7 +364,16 @@ State is carried entirely inside the `ExecutionResult` payload — no external s
 
 3. Stage 2 receives the verification plan, runs it, and echoes `is_verification: true` and `original_run_id` into the `ExecutionResult` it emits to `execution_done`.
 
-4. The Report Agent reads `execution_result.is_verification` on every incoming message. There is no ambiguity: a first-pass result always has `is_verification: false`; a verification result always has `is_verification: true`. No other flag is consulted.
+4. The Report Agent reads `execution_result.is_verification` on every incoming
+   message. There is no ambiguity: a first-pass result always has
+   `is_verification: false`; a verification result always has
+   `is_verification: true`. No other flag is consulted.
+
+5. On verification results, the Report Agent uses `original_run_id` to reload
+   `/artifacts/<original_run_id>/result.json` and
+   `/artifacts/<original_run_id>/report.md` before comparing outcomes. This is
+   required for restart safety because the verification `ExecutionResult` does
+   not embed the full first-run result.
 
 **What prevents double-queuing:** The Report Agent's system prompt instructs it to halt after routing (either to `final_report` or `human_review_queue`) and never send another `verification_request` once `is_verification` is true. The `max_iterations: 30` cap in `config.yaml` provides a hard backstop.
 
