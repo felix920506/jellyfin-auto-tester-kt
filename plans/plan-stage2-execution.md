@@ -86,8 +86,16 @@ A `run_id` (UUID) for artifact namespacing.
 1. Create artifacts directory: `/artifacts/<run_id>/`
 2. Pull the Docker image specified in the plan (with progress logging)
 3. Prepare all prerequisites:
-   - Generate or download required media files
-   - Create host volume directories
+   - Resolve the prerequisite cache directory:
+     `prereq_dir = /artifacts/<original_run_id or run_id>/media/`
+     (verification runs reuse the first-run directory so generation is not
+     repeated and inputs are byte-identical to what produced the original
+     result.)
+   - For each prerequisite: if the target file already exists in `prereq_dir`,
+     skip generation; otherwise generate or download into `prereq_dir`.
+   - Create any host volume directories referenced by `plan.environment.volumes`.
+   - Mount `prereq_dir` into the container at the path the steps expect
+     (default `/media`).
 4. Start the Jellyfin container using `docker_manager.start()`
 5. Wait for Jellyfin to become healthy: poll `GET /health` up to 60s
 6. Complete the first-run StartupWizard so an admin account exists:

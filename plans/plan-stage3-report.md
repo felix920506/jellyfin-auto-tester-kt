@@ -266,6 +266,10 @@ The `report_writer` tool generates a Markdown file with this structure:
 - Log excerpts are filtered: only lines containing `ERROR`, `WARN`, or matching `failure_indicators` are included (max 50 lines)
 - Screenshot paths in the report use relative paths from the artifacts directory
 - `build_verification_plan` preserves the original `docker_image` and `environment` but replaces `reproduction_steps` with the distilled written steps
+- `prerequisites` are copied verbatim from the original plan. Stage 2 reuses the
+  first run's `/artifacts/<original_run_id>/media/` directory (resolved via
+  `original_run_id`), so already-generated files are not regenerated and the
+  verification sees byte-identical inputs to the original
 
 ---
 
