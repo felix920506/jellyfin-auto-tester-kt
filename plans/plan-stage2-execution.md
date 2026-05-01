@@ -62,6 +62,12 @@ memory:
 compact:
   threshold_tokens: 12000
   strategy: "summarize"
+  pin:
+    # Raw Jellyfin server logs and the structured execution_log MUST survive
+    # compaction verbatim — Stage 3 needs exact stack traces and outcome rows
+    # to write the report. Summarization would silently drop them.
+    - "jellyfin_logs"
+    - "execution_log"
 
 termination:
   keywords: ["EXECUTION_COMPLETE"]
