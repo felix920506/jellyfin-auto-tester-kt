@@ -171,17 +171,26 @@ The `report_writer` tool generates a Markdown file with this structure:
 | Host OS | `<from docker inspect>` |
 | Architecture | `<from docker inspect>` |
 
+## Prerequisites
+
+- Docker installed and running
+- Jellyfin `<version>` started and healthy:
+  ```bash
+  docker run -d --name jf-test -p 8096:8096 \
+    -v /tmp/jellyfin-media:/media \
+    jellyfin/jellyfin:<version>
+  # wait until: curl -s http://localhost:8096/health returns "Healthy"
+  ```
+- Any media files or library state described in the plan's `prerequisites` section prepared
+
 ## Reproduction Steps
 
-> These steps were verified to reproduce the issue.
+> Steps begin after Jellyfin is healthy. Each step was executed and verified by the automated pipeline.
 
-1. **Pull and start Jellyfin**
-   ```bash
-   docker run -d --name jf-test -p 8096:8096 jellyfin/jellyfin:<version>
-   ```
-   Wait for: `curl http://localhost:8096/health` returns `Healthy`
+1. **<First post-startup action>**
+   ...
 
-2. **<Next step>**
+2. **<Trigger step — expected to exhibit the bug>**
    ...
 
 ## Evidence
