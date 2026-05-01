@@ -66,6 +66,37 @@ class PipelineTimeoutError(TimeoutError):
     """Raised when the pipeline does not reach a terminal channel in time."""
 
 
+class _NullOutput:
+    """Output sink used when the pipeline fabric owns stdout streaming."""
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def write(self, _content: str) -> None:
+        pass
+
+    async def write_stream(self, _chunk: str) -> None:
+        pass
+
+    async def flush(self) -> None:
+        pass
+
+    async def on_processing_start(self) -> None:
+        pass
+
+    async def on_processing_end(self) -> None:
+        pass
+
+    def on_activity(self, _activity_type: str, _detail: str) -> None:
+        pass
+
+    def reset(self) -> None:
+        pass
+
+
 def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
     """Load environment variables from ``.env`` if it exists.
 
@@ -130,6 +161,7 @@ async def run_issue(
     try:
         prompt = _analysis_prompt(issue_url, container_version)
         analysis_agent = _get_agent(engine, "analysis_agent")
+        _suppress_default_output(analysis_agent)
         async for chunk in _chat(analysis_agent, prompt):
             text = _chunk_text(chunk)
             analysis_output.append(text)
@@ -402,6 +434,27 @@ def _get_agent(engine: Any, name: str) -> Any:
         return agents[name]
 
     raise KeyError(f"Terrarium engine does not expose agent {name!r}")
+
+
+def _suppress_default_output(creature_or_agent: Any) -> None:
+    """Prevent KohakuTerrarium's default stdout output from duplicating chat.
+
+    ``Creature.chat()`` streams text by adding a secondary output callback, but
+    leaves the default output active. In this pipeline, ``run_issue`` also
+    writes every yielded chat chunk to its own stream, so the default output must
+    be muted to keep the transcript single-sourced.
+    """
+
+    agent = getattr(creature_or_agent, "agent", creature_or_agent)
+    output_router = getattr(agent, "output_router", None)
+    if output_router is None or not hasattr(output_router, "default_output"):
+        return
+
+    default_output = getattr(output_router, "default_output")
+    if isinstance(default_output, _NullOutput):
+        return
+
+    setattr(output_router, "default_output", _NullOutput())
 
 
 async def _chat(agent: Any, prompt: str):

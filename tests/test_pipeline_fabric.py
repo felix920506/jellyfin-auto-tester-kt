@@ -26,6 +26,38 @@ class FakeAnalysisAgent:
             yield chunk
 
 
+class FakeDefaultOutput:
+    def __init__(self):
+        self.streamed = []
+
+    async def write_stream(self, chunk):
+        self.streamed.append(chunk)
+
+
+class FakeOutputRouter:
+    def __init__(self):
+        self.default_output = FakeDefaultOutput()
+
+
+class FakeInnerAgent:
+    def __init__(self):
+        self.output_router = FakeOutputRouter()
+
+
+class DefaultWritingAnalysisAgent:
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.prompts = []
+        self.agent = FakeInnerAgent()
+        self.original_default_output = self.agent.output_router.default_output
+
+    async def chat(self, prompt):
+        self.prompts.append(prompt)
+        for chunk in self.chunks:
+            await self.agent.output_router.default_output.write_stream(chunk)
+            yield chunk
+
+
 class FakeExecutionAgent:
     def __init__(self):
         self.max_iterations = 1
@@ -41,8 +73,8 @@ class FakeChannel:
 
 
 class FakeEngine:
-    def __init__(self, analysis_chunks, channels=None):
-        self.analysis_agent = FakeAnalysisAgent(analysis_chunks)
+    def __init__(self, analysis_chunks, channels=None, analysis_agent=None):
+        self.analysis_agent = analysis_agent or FakeAnalysisAgent(analysis_chunks)
         self.execution_agent = FakeExecutionAgent()
         self.channels = channels or {}
 
@@ -130,6 +162,29 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             "Final report: /tmp/artifacts/run-1/report.md",
             stream.getvalue(),
         )
+
+    async def test_run_issue_silences_analysis_default_stdout_output(self):
+        payload = {"report_path": "/tmp/artifacts/run-1/report.md"}
+        analysis_agent = DefaultWritingAnalysisAgent(
+            ["analysis started\n", "REPRODUCTION_PLAN_COMPLETE\n"]
+        )
+        engine = FakeEngine(
+            [],
+            channels={"final_report": FakeChannel({"content": payload})},
+            analysis_agent=analysis_agent,
+        )
+        stream = io.StringIO()
+
+        await run_issue(
+            "https://github.com/jellyfin/jellyfin/issues/1",
+            "10.9.7",
+            stream=stream,
+            engine_factory=lambda recipe: engine,
+        )
+
+        self.assertEqual(analysis_agent.original_default_output.streamed, [])
+        self.assertEqual(stream.getvalue().count("analysis started"), 1)
+        self.assertEqual(stream.getvalue().count("REPRODUCTION_PLAN_COMPLETE"), 1)
 
     async def test_run_issue_stops_on_insufficient_information(self):
         engine = FakeEngine(["INSUFFICIENT_INFORMATION\nmissing steps\n"])
