@@ -241,8 +241,14 @@ The `report_writer` tool generates a Markdown file with this structure:
 #     verification_result: dict = None,
 #     artifacts_base: str = "/artifacts"
 # ) -> dict
-#   Generates the Markdown report and writes it to:
-#     /artifacts/<run_id>/report.md
+#   Generates the Markdown report and writes it under the *original* run's
+#   artifacts directory, not the verification run's:
+#     output_run_id = execution_result["original_run_id"]
+#                     if execution_result["is_verification"]
+#                     else execution_result["run_id"]
+#     path = f"{artifacts_base}/{output_run_id}/report.md"
+#   This keeps the final report colocated with the first-run artifacts
+#   (server logs, screenshots, http_log) that it references.
 #   Returns {path: str, word_count: int}
 
 # report_writer.build_verification_plan(
