@@ -39,6 +39,33 @@ class TerrariumRecipeTests(unittest.TestCase):
             ["verification_request", "final_report", "human_review_queue"],
         )
 
+    def test_creature_llm_selectors_resolve_to_provider_profiles(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        creature_paths = [
+            repo_root / "creatures" / "analysis",
+            repo_root / "creatures" / "execution",
+            repo_root / "creatures" / "report",
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_home:
+            with patch.dict(os.environ, {"HOME": temp_home}, clear=False):
+                from kohakuterrarium.core.config import load_agent_config
+                from kohakuterrarium.llm.profiles import resolve_controller_llm
+
+                for creature_path in creature_paths:
+                    config = load_agent_config(creature_path)
+                    controller_data = {
+                        "llm": config.llm_profile,
+                        "model": config.model,
+                        "provider": config.provider,
+                        "temperature": config.temperature,
+                    }
+                    profile = resolve_controller_llm(controller_data)
+
+                    self.assertIsNotNone(profile, creature_path.name)
+                    self.assertEqual(profile.provider, "openrouter")
+                    self.assertEqual(profile.api_key_env, "OPENROUTER_API_KEY")
+
 
 if __name__ == "__main__":
     unittest.main()

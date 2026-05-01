@@ -2,7 +2,7 @@ name: "report_agent"
 version: "1.0"
 
 controller:
-  model: "claude-opus-4-7"
+  llm: "openrouter/claude-opus-4.7"
   temperature: 0.3
 
 system_prompt_file: "prompts/system.md"
