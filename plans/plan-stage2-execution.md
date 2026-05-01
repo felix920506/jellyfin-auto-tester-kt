@@ -97,7 +97,11 @@ A `run_id` (UUID) for artifact namespacing.
    - Mount `prereq_dir` into the container at the path the steps expect
      (default `/media`).
 4. Start the Jellyfin container using `docker_manager.start()`
-5. Wait for Jellyfin to become healthy: poll `GET /health` up to 60s
+5. Wait for Jellyfin to become healthy via `jellyfin_api.wait_healthy()` (60s).
+   The probe tries `GET /health` first (modern builds, ≥10.8) and falls back
+   to `GET /System/Info/Public` (older builds and forks that don't expose
+   `/health`). Either a 200 from `/health` with body containing `"Healthy"`
+   or any 200 from `/System/Info/Public` counts as healthy.
 6. Complete the first-run StartupWizard so an admin account exists:
    - `POST /Startup/Configuration` with `{ "UICulture": "en-US", "MetadataCountryCode": "US", "PreferredMetadataLanguage": "en" }`
    - `POST /Startup/User` with `{ "Name": "admin", "Password": "admin" }`
@@ -256,8 +260,8 @@ Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 #   (status_code assertion), evaluated by the criteria DSL — not here.
 
 # jellyfin_api.wait_healthy(timeout_s: int = 60) -> dict
-#   Polls /health until 200 or timeout
-#   Returns {healthy: bool, elapsed_s: float}
+#   Polls /health (preferred); on 404 falls back to /System/Info/Public.
+#   Returns {healthy: bool, elapsed_s: float, endpoint_used: str}
 
 # jellyfin_api.authenticate(username: str = "admin", password: str = "admin") -> dict
 #   Posts to /Users/AuthenticateByName
