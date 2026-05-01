@@ -56,6 +56,7 @@ creatures:
     config: "creatures/execution/config.yaml"
     listen:
       - channel: "plan_ready"
+      - channel: "verification_request"
     can_send:
       - "execution_done"
 
