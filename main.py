@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ DEFAULT_RECIPE_PATH = REPO_ROOT / "terrarium.yaml"
 DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
 TERMINAL_CHANNELS = ("final_report", "human_review_queue")
 STAGE_CHOICES = ("analysis", "execution", "report")
+STAGE_CHANNEL_GRACE_S = 2.0
 STAGE_HANDOFF_FILES = {
     "analysis": ("plan.json", "reproduction_plan.json"),
     "execution": ("result.json", "execution_result.json"),
@@ -40,6 +42,14 @@ PIPELINE_PAYLOAD_KEYS = {
     "verified",
     "issue_url",
     "reason",
+}
+REPRODUCTION_PLAN_KEYS = {
+    "issue_url",
+    "target_version",
+    "docker_image",
+    "reproduction_steps",
+    "is_verification",
+    "original_run_id",
 }
 
 
@@ -278,10 +288,28 @@ async def run_analysis_stage(
                 )
             )
 
-        try:
-            _, plan = await asyncio.wait_for(plan_task, timeout=timeout_s)
-        except asyncio.TimeoutError as exc:
-            raise PipelineTimeoutError("timed out waiting for plan_ready") from exc
+        plan, plan_source = await _resolve_analysis_stage_plan(
+            plan_task,
+            transcript,
+            timeout_s=timeout_s,
+        )
+        if plan is None:
+            plan_task.cancel()
+            await _cancel_task(plan_task)
+            return _write_stage_result(
+                StageDebugResult(
+                    stage="analysis",
+                    status="no_plan",
+                    output_dir=str(output_dir),
+                    output_file="transcript.txt",
+                    metadata={
+                        "message": (
+                            "analysis completed but no plan_ready channel message "
+                            "or ReproductionPlan JSON was found"
+                        )
+                    },
+                )
+            )
 
         _write_json_file(output_dir / "plan.json", plan)
         return _write_stage_result(
@@ -290,7 +318,7 @@ async def run_analysis_stage(
                 status="plan_ready",
                 output_dir=str(output_dir),
                 output_file="plan.json",
-                metadata={"transcript": "transcript.txt"},
+                metadata={"transcript": "transcript.txt", "source": plan_source},
             )
         )
     except BaseException:
@@ -539,6 +567,113 @@ def _analysis_prompt(
         "tools only for linked issues, external resources, documentation, and "
         "additional supporting context."
     )
+
+
+async def _resolve_analysis_stage_plan(
+    plan_task: asyncio.Task[tuple[str, Any]],
+    transcript: str,
+    *,
+    timeout_s: float | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    channel_error: BaseException | None = None
+    grace_s = _analysis_channel_grace(timeout_s)
+
+    if plan_task.done():
+        plan, channel_error = _completed_channel_plan(plan_task)
+        if plan is not None:
+            return plan, "channel"
+
+    plan = _extract_reproduction_plan(transcript)
+    if plan is not None:
+        if not plan_task.done():
+            plan_task.cancel()
+            await _cancel_task(plan_task)
+        return plan, "transcript"
+
+    if not plan_task.done():
+        try:
+            _, message = await asyncio.wait_for(
+                asyncio.shield(plan_task),
+                timeout=grace_s,
+            )
+            plan = _coerce_reproduction_plan(message)
+            if plan is not None:
+                return plan, "channel"
+        except asyncio.TimeoutError:
+            pass
+        except Exception as exc:
+            channel_error = exc
+
+    if channel_error is not None and not plan_task.done():
+        plan_task.cancel()
+        await _cancel_task(plan_task)
+    return None, None
+
+
+def _analysis_channel_grace(timeout_s: float | None) -> float:
+    if timeout_s is None:
+        return STAGE_CHANNEL_GRACE_S
+    return max(0.0, min(float(timeout_s), STAGE_CHANNEL_GRACE_S))
+
+
+def _completed_channel_plan(
+    plan_task: asyncio.Task[tuple[str, Any]],
+) -> tuple[dict[str, Any] | None, BaseException | None]:
+    try:
+        _, message = plan_task.result()
+    except Exception as exc:
+        return None, exc
+    return _coerce_reproduction_plan(message), None
+
+
+def _extract_reproduction_plan(transcript: str) -> dict[str, Any] | None:
+    for fenced in _json_fenced_blocks(transcript):
+        plan = _decode_reproduction_plan(fenced)
+        if plan is not None:
+            return plan
+
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", transcript):
+        try:
+            value, _ = decoder.raw_decode(transcript[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        plan = _coerce_reproduction_plan(value)
+        if plan is not None:
+            return plan
+    return None
+
+
+def _json_fenced_blocks(text: str) -> Iterable[str]:
+    pattern = re.compile(r"```(?:json|JSON)?\s*(.*?)```", re.DOTALL)
+    for match in pattern.finditer(text):
+        yield match.group(1).strip()
+
+
+def _decode_reproduction_plan(value: str) -> dict[str, Any] | None:
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return _coerce_reproduction_plan(decoded)
+
+
+def _coerce_reproduction_plan(value: Any) -> dict[str, Any] | None:
+    value = _decode_jsonish(value)
+    if _looks_like_reproduction_plan(value):
+        return value
+    if isinstance(value, dict):
+        for key in ("plan", "reproduction_plan", "content", "payload", "data", "message"):
+            if key not in value:
+                continue
+            plan = _coerce_reproduction_plan(value[key])
+            if plan is not None:
+                return plan
+    return None
+
+
+def _looks_like_reproduction_plan(value: Any) -> bool:
+    return isinstance(value, dict) and REPRODUCTION_PLAN_KEYS.issubset(value)
 
 
 def _apply_default_execution_budget(engine: Any) -> None:

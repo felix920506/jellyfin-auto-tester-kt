@@ -387,6 +387,54 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 (Path(temp_dir) / "transcript.txt").read_text(encoding="utf-8"),
             )
 
+    async def test_run_analysis_stage_extracts_printed_plan_without_channel(self):
+        plan = _sample_plan()
+        transcript = (
+            "analysis started\n"
+            "```json\n"
+            f"{json.dumps(plan)}\n"
+            "```\n"
+            "REPRODUCTION_PLAN_COMPLETE\n"
+        )
+        engine = FakeEngine([transcript])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/1",
+                    "10.9.7",
+                    temp_dir,
+                    timeout_s=60,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
+            )
+
+            self.assertEqual(result.status, "plan_ready")
+            self.assertEqual(result.metadata["source"], "transcript")
+            self.assertEqual(json.loads((Path(temp_dir) / "plan.json").read_text()), plan)
+
+    async def test_run_analysis_stage_returns_no_plan_instead_of_hanging(self):
+        engine = FakeEngine(["analysis started\nREPRODUCTION_PLAN_COMPLETE\n"])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/1",
+                    "10.9.7",
+                    temp_dir,
+                    timeout_s=0.01,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
+            )
+
+            self.assertEqual(result.status, "no_plan")
+            self.assertEqual(result.output_file, "transcript.txt")
+            self.assertFalse((Path(temp_dir) / "plan.json").exists())
+
     def test_run_execution_stage_reads_plan_and_writes_result_handoff(self):
         plan = _sample_plan()
         with tempfile.TemporaryDirectory() as temp_dir:
