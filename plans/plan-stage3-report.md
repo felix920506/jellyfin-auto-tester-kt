@@ -274,7 +274,7 @@ Turn 3:  Read artifacts/<run_id>/http_log.jsonl; identify failing requests
 Turn 4:  Analyze step-by-step outcomes; identify minimal reproduction steps
 Turn 5:  Determine overall_result interpretation (reproduced / not / inconclusive)
 Turn 6:  Call report_writer.generate(execution_result) → saves report.md
-Turn 7:  Call report_writer.build_verification_plan(original_plan, written_steps)
+Turn 7:  Call report_writer.build_verification_plan(execution_result, written_steps)
 Turn 8:  send_message(channel="verification_request", content=<verification_plan_json>)
          (Stage 2 wakes up, executes, emits to execution_done → triggers Turn 1 again)
 ```
