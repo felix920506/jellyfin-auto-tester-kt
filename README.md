@@ -17,7 +17,12 @@ Repository scaffold for a three-stage Jellyfin issue reproduction pipeline.
 python -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m playwright install chromium
+cp .env.example .env
 ```
+
+Edit `.env` with any local API keys or runtime overrides. The CLI loads it
+automatically when present, without overriding variables already exported in the
+shell.
 
 ```bash
 .venv/bin/python main.py https://github.com/jellyfin/jellyfin/issues/XXXX 10.9.7

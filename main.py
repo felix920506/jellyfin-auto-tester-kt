@@ -14,6 +14,7 @@ from typing import Any, Callable, Iterable, TextIO
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_RECIPE_PATH = REPO_ROOT / "terrarium.yaml"
+DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
 TERMINAL_CHANNELS = ("final_report", "human_review_queue")
 PIPELINE_PAYLOAD_KEYS = {
     "report_path",
@@ -55,6 +56,28 @@ class PipelineTimeoutError(TimeoutError):
     """Raised when the pipeline does not reach a terminal channel in time."""
 
 
+def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
+    """Load environment variables from ``.env`` if it exists.
+
+    Values already present in the process environment win over values in the
+    file. Missing files are not an error.
+    """
+
+    dotenv_path = Path(path).expanduser()
+    if not dotenv_path.exists():
+        return False
+
+    try:
+        from dotenv import load_dotenv
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+        raise RuntimeError(
+            "python-dotenv is required to load .env files. "
+            "Install dependencies with: .venv/bin/python -m pip install -r requirements.txt"
+        ) from exc
+
+    return bool(load_dotenv(dotenv_path=dotenv_path, override=False))
+
+
 def execution_turn_budget(step_count: int) -> tuple[int, int]:
     """Return Stage 2 ``(max_iterations, max_turns)`` for a plan size."""
 
@@ -79,6 +102,7 @@ async def run_issue(
     ``final_report`` or ``human_review_queue``.
     """
 
+    load_env_file()
     engine = await _load_engine(recipe_path, engine_factory=engine_factory)
     _apply_default_execution_budget(engine)
 

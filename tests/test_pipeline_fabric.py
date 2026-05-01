@@ -1,7 +1,16 @@
 import io
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from main import apply_execution_turn_budget, execution_turn_budget, run_issue
+from main import (
+    apply_execution_turn_budget,
+    execution_turn_budget,
+    load_env_file,
+    run_issue,
+)
 
 
 class FakeAnalysisAgent:
@@ -105,6 +114,27 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(budget, (96, 106))
         self.assertEqual(engine.execution_agent.max_iterations, 96)
         self.assertEqual(engine.execution_agent.termination["max_turns"], 106)
+
+    def test_load_env_file_loads_values_without_overriding_existing_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dotenv_path = Path(temp_dir) / ".env"
+            dotenv_path.write_text(
+                "GITHUB_TOKEN=from-file\n"
+                "JF_AUTO_TESTER_BROWSER_HEADLESS=true\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"GITHUB_TOKEN": "from-env"}, clear=True):
+                self.assertTrue(load_env_file(dotenv_path))
+
+                self.assertEqual(os.environ["GITHUB_TOKEN"], "from-env")
+                self.assertEqual(os.environ["JF_AUTO_TESTER_BROWSER_HEADLESS"], "true")
+
+    def test_load_env_file_missing_file_is_noop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertFalse(load_env_file(Path(temp_dir) / ".env"))
+                self.assertEqual(dict(os.environ), {})
 
 
 if __name__ == "__main__":
