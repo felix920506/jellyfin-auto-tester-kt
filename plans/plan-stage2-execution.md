@@ -122,6 +122,12 @@ A `run_id` (UUID) for artifact namespacing.
    - `POST /Startup/RemoteAccess` with `{ "EnableRemoteAccess": true, "EnableAutomaticPortMapping": false }`
    - `POST /Startup/Complete` (no body)
    This sequence is unconditional. If the wizard endpoints return 403/404 the server has already been provisioned (e.g. mounted config volume), so skip silently and proceed.
+7. Authenticate as the admin user with `jellyfin_api.authenticate()`. This is
+   unconditional after startup provisioning because most Jellyfin API endpoints
+   require a token and `ReproductionPlan` steps do not carry separate auth
+   metadata. If authentication fails, mark setup failed and emit
+   `overall_result: "inconclusive"` because subsequent API steps cannot be
+   evaluated reliably.
 
 ### Phase 2: Step Execution
 For each step in `reproduction_steps`, in order:
@@ -335,7 +341,7 @@ Turn 1:  Receive ReproductionPlan from channel; parse JSON; generate run_id (uui
 Turn 2:  Create artifacts dir; docker_manager.pull(plan.docker_image)
 Turn 3:  Prepare prerequisites (generate media files via bash/ffmpeg if needed)
 Turn 4:  docker_manager.start(...); jellyfin_api.wait_healthy()
-Turn 5:  jellyfin_api.authenticate() if any steps require auth
+Turn 5:  jellyfin_api.complete_startup_wizard(); jellyfin_api.authenticate()
 Turn 6-N: For each step: dispatch tool → evaluate criteria → log result
          (screenshot on fail steps if UI-related)
 Turn N+1: docker_manager.logs(); find trigger step in execution_log; assess overall_result
