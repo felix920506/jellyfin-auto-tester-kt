@@ -42,15 +42,15 @@ The full pipeline remains channel-driven. For debugging, each stage can also be
 run with disk handoff folders:
 
 ```bash
-.venv/bin/python main.py stage analysis \
+.venv/bin/python main.py --stage analysis \
   https://github.com/jellyfin/jellyfin/issues/XXXX 10.9.7 \
   --out debug/stage1
 
-.venv/bin/python main.py stage execution \
+.venv/bin/python main.py --stage execution \
   --input debug/stage1 \
   --out debug/stage2
 
-.venv/bin/python main.py stage report \
+.venv/bin/python main.py --stage report \
   --input debug/stage2 \
   --out debug/stage3
 ```
@@ -61,11 +61,11 @@ and Stage 3 reads `result.json` and writes `report.md` plus
 through Stage 2 and then finalize the report:
 
 ```bash
-.venv/bin/python main.py stage execution \
+.venv/bin/python main.py --stage execution \
   --input debug/stage3/verification_plan.json \
   --out debug/stage2-verify
 
-.venv/bin/python main.py stage report \
+.venv/bin/python main.py --stage report \
   --input debug/stage2 \
   --verification-result debug/stage2-verify \
   --out debug/stage3-final

@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from main import (
+    _normalize_stage_argv,
+    _parse_stage_choice,
     _receive_channel_message,
     apply_execution_turn_budget,
     execution_turn_budget,
@@ -446,6 +448,21 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
     def test_execution_turn_budget_matches_master_plan(self):
         self.assertEqual(execution_turn_budget(0), (60, 70))
         self.assertEqual(execution_turn_budget(20), (96, 106))
+
+    def test_stage_mode_is_selected_by_flag_only(self):
+        self.assertIsNone(_normalize_stage_argv(["stage", "analysis"]))
+        self.assertEqual(
+            _normalize_stage_argv(["--stage", "analysis"]),
+            ["--stage", "analysis"],
+        )
+        self.assertEqual(
+            _normalize_stage_argv(["--stage=execution"]),
+            ["--stage=execution"],
+        )
+        self.assertEqual(
+            _parse_stage_choice(["--stage=report", "--input", "x", "--out", "y"]),
+            "report",
+        )
 
     def test_apply_execution_turn_budget_updates_execution_agent(self):
         engine = FakeEngine([])

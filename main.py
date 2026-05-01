@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_RECIPE_PATH = REPO_ROOT / "terrarium.yaml"
 DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
 TERMINAL_CHANNELS = ("final_report", "human_review_queue")
+STAGE_CHOICES = ("analysis", "execution", "report")
 STAGE_HANDOFF_FILES = {
     "analysis": ("plan.json", "reproduction_plan.json"),
     "execution": ("result.json", "execution_result.json"),
@@ -1027,8 +1028,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the Jellyfin issue reproduction pipeline."
     )
-    parser.add_argument("issue_url", help="GitHub issue URL to reproduce")
-    parser.add_argument("container_version", help="Jellyfin container tag, e.g. 10.9.7")
+    parser.add_argument(
+        "--stage",
+        choices=STAGE_CHOICES,
+        help="Run a single stage with disk handoff files instead of the full pipeline",
+    )
+    parser.add_argument("issue_url", nargs="?", help="GitHub issue URL to reproduce")
+    parser.add_argument(
+        "container_version",
+        nargs="?",
+        help="Jellyfin container tag, e.g. 10.9.7",
+    )
     parser.add_argument(
         "--recipe",
         default=str(DEFAULT_RECIPE_PATH),
@@ -1053,60 +1063,63 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_stage_parser() -> argparse.ArgumentParser:
+def _normalize_stage_argv(argv: list[str]) -> list[str] | None:
+    for arg in argv:
+        if arg == "--stage" or arg.startswith("--stage="):
+            return argv
+    return None
+
+
+def _parse_stage_choice(argv: list[str]) -> str:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--stage", choices=STAGE_CHOICES, required=True)
+    args, _ = parser.parse_known_args(argv)
+    return args.stage
+
+
+def _build_stage_parser(stage: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="main.py stage",
+        prog=f"main.py --stage {stage}",
         description="Run one pipeline stage with disk handoff files.",
     )
-    subparsers = parser.add_subparsers(dest="stage", required=True)
-
-    analysis = subparsers.add_parser("analysis", help="Run Stage 1 only")
-    analysis.add_argument("issue_url", help="GitHub issue URL to analyze")
-    analysis.add_argument("container_version", help="Jellyfin container tag")
-    analysis.add_argument("--out", required=True, help="Output handoff directory")
-    analysis.add_argument(
-        "--timeout-s",
-        type=float,
-        default=10 * 60,
-        help="Seconds to wait for plan_ready",
-    )
-    analysis.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Do not stream analysis-agent output",
-    )
-    analysis.add_argument(
-        "--json",
-        action="store_true",
-        help="Print StageDebugResult as JSON",
-    )
-
-    execution = subparsers.add_parser("execution", help="Run Stage 2 only")
-    execution.add_argument(
-        "--input",
-        required=True,
-        help="Stage 1 handoff folder or ReproductionPlan JSON file",
-    )
-    execution.add_argument("--out", required=True, help="Output handoff directory")
-    execution.add_argument("--run-id", help="Optional deterministic run id")
-    execution.add_argument(
-        "--json",
-        action="store_true",
-        help="Print StageDebugResult as JSON",
-    )
-
-    report = subparsers.add_parser("report", help="Run Stage 3 file handoff")
-    report.add_argument(
-        "--input",
-        required=True,
-        help="Stage 2 handoff folder or ExecutionResult JSON file",
-    )
-    report.add_argument("--out", required=True, help="Output handoff directory")
-    report.add_argument(
-        "--verification-result",
-        help="Optional Stage 2 verification handoff folder or result JSON file",
-    )
-    report.add_argument(
+    parser.add_argument("--stage", choices=STAGE_CHOICES, required=True)
+    if stage == "analysis":
+        parser.add_argument("issue_url", help="GitHub issue URL to analyze")
+        parser.add_argument("container_version", help="Jellyfin container tag")
+        parser.add_argument("--out", required=True, help="Output handoff directory")
+        parser.add_argument(
+            "--timeout-s",
+            type=float,
+            default=10 * 60,
+            help="Seconds to wait for plan_ready",
+        )
+        parser.add_argument(
+            "--quiet",
+            action="store_true",
+            help="Do not stream analysis-agent output",
+        )
+    elif stage == "execution":
+        parser.add_argument(
+            "--input",
+            required=True,
+            help="Stage 1 handoff folder or ReproductionPlan JSON file",
+        )
+        parser.add_argument("--out", required=True, help="Output handoff directory")
+        parser.add_argument("--run-id", help="Optional deterministic run id")
+    elif stage == "report":
+        parser.add_argument(
+            "--input",
+            required=True,
+            help="Stage 2 handoff folder or ExecutionResult JSON file",
+        )
+        parser.add_argument("--out", required=True, help="Output handoff directory")
+        parser.add_argument(
+            "--verification-result",
+            help="Optional Stage 2 verification handoff folder or result JSON file",
+        )
+    else:  # pragma: no cover - guarded by _parse_stage_choice
+        raise ValueError(f"unknown stage: {stage}")
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print StageDebugResult as JSON",
@@ -1117,9 +1130,17 @@ def _build_stage_parser() -> argparse.ArgumentParser:
 async def _async_main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] == "stage":
-        return await _async_stage_main(raw_argv[1:])
+        parser = _build_parser()
+        parser.error("stage mode is selected with --stage, e.g. --stage analysis")
 
-    args = _build_parser().parse_args(raw_argv)
+    stage_argv = _normalize_stage_argv(raw_argv)
+    if stage_argv is not None:
+        return await _async_stage_main(stage_argv)
+
+    parser = _build_parser()
+    args = parser.parse_args(raw_argv)
+    if not args.issue_url or not args.container_version:
+        parser.error("issue_url and container_version are required unless --stage is used")
     result = await run_issue(
         args.issue_url,
         args.container_version,
@@ -1133,7 +1154,8 @@ async def _async_main(argv: list[str] | None = None) -> int:
 
 
 async def _async_stage_main(argv: list[str]) -> int:
-    args = _build_stage_parser().parse_args(argv)
+    stage = _parse_stage_choice(argv)
+    args = _build_stage_parser(stage).parse_args(argv)
     if args.stage == "analysis":
         result = await run_analysis_stage(
             args.issue_url,
