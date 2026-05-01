@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -11,7 +12,10 @@ from main import (
     apply_execution_turn_budget,
     execution_turn_budget,
     load_env_file,
+    run_analysis_stage,
+    run_execution_stage,
     run_issue,
+    run_report_stage,
 )
 
 
@@ -127,6 +131,92 @@ class FakeOnSendChannel:
             callback("final_report", {"content": message})
 
 
+class FakeStage2Runner:
+    def __init__(self, artifacts_root):
+        self.artifacts_root = Path(artifacts_root)
+        self.plans = []
+
+    def execute_plan(self, plan, run_id=None):
+        self.plans.append(plan)
+        run_id = run_id or "debug-run"
+        artifacts_dir = self.artifacts_root / run_id
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "plan": plan,
+            "run_id": run_id,
+            "is_verification": bool(plan.get("is_verification", False)),
+            "original_run_id": plan.get("original_run_id"),
+            "container_id": "container-1",
+            "execution_log": [_sample_execution_entry(plan)],
+            "overall_result": "reproduced",
+            "artifacts_dir": str(artifacts_dir),
+            "jellyfin_logs": "server log\n",
+            "error_summary": None,
+        }
+
+
+def _sample_plan():
+    return {
+        "issue_url": "https://github.com/jellyfin/jellyfin/issues/1",
+        "issue_title": "Debug issue",
+        "target_version": "10.9.7",
+        "docker_image": "jellyfin/jellyfin:10.9.7",
+        "prerequisites": [],
+        "environment": {
+            "ports": {"host": 8096, "container": 8096},
+            "volumes": [],
+            "env_vars": {},
+        },
+        "reproduction_steps": [
+            {
+                "step_id": 1,
+                "role": "trigger",
+                "action": "Call health endpoint",
+                "tool": "http_request",
+                "input": {"method": "GET", "path": "/health"},
+                "expected_outcome": "The endpoint returns Healthy.",
+                "success_criteria": {"all_of": [{"type": "status_code", "equals": 200}]},
+            }
+        ],
+        "reproduction_goal": "Observe the reported behavior.",
+        "failure_indicators": ["Health endpoint response"],
+        "confidence": "high",
+        "ambiguities": [],
+        "is_verification": False,
+        "original_run_id": None,
+    }
+
+
+def _sample_execution_entry(plan):
+    step = plan["reproduction_steps"][0]
+    return {
+        "step_id": step["step_id"],
+        "role": step["role"],
+        "action": step["action"],
+        "tool": step["tool"],
+        "stdout": "",
+        "stderr": "",
+        "exit_code": None,
+        "http": {"status_code": 200, "body": "Healthy", "headers": {}},
+        "screenshot_path": None,
+        "outcome": "pass",
+        "reason": None,
+        "criteria_evaluation": {
+            "passed": True,
+            "assertions": [
+                {
+                    "type": "status_code",
+                    "passed": True,
+                    "actual": 200,
+                    "expected": 200,
+                    "message": "status matched",
+                }
+            ],
+        },
+        "duration_ms": 10,
+    }
+
+
 class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_issue_returns_final_report_payload(self):
         payload = {
@@ -213,6 +303,87 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel_name, "final_report")
         self.assertEqual(message, payload)
         self.assertEqual(channel.callbacks, [])
+
+    async def test_run_analysis_stage_writes_plan_handoff_folder(self):
+        plan = _sample_plan()
+        engine = FakeEngine(
+            ["analysis started\n", "REPRODUCTION_PLAN_COMPLETE\n"],
+            channels={"plan_ready": FakeChannel({"content": plan})},
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await run_analysis_stage(
+                "https://github.com/jellyfin/jellyfin/issues/1",
+                "10.9.7",
+                temp_dir,
+                stream=None,
+                engine_factory=lambda stage: engine,
+            )
+
+            self.assertEqual(result.status, "plan_ready")
+            self.assertEqual(result.output_file, "plan.json")
+            self.assertEqual(json.loads((Path(temp_dir) / "plan.json").read_text()), plan)
+            self.assertIn(
+                "analysis started",
+                (Path(temp_dir) / "transcript.txt").read_text(encoding="utf-8"),
+            )
+
+    def test_run_execution_stage_reads_plan_and_writes_result_handoff(self):
+        plan = _sample_plan()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            result = run_execution_stage(
+                input_dir,
+                temp_path / "execution",
+                run_id="run-1",
+                runner_factory=lambda artifacts_root: FakeStage2Runner(artifacts_root),
+            )
+
+            result_path = temp_path / "execution" / "result.json"
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result.status, "reproduced")
+            self.assertEqual(result.output_file, "result.json")
+            self.assertEqual(payload["run_id"], "run-1")
+            self.assertEqual(payload["plan"], plan)
+
+    def test_run_report_stage_writes_report_and_verification_plan(self):
+        plan = _sample_plan()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            execution_dir = temp_path / "execution"
+            artifacts_dir = execution_dir / "run-1"
+            artifacts_dir.mkdir(parents=True)
+            execution_result = {
+                "plan": plan,
+                "run_id": "run-1",
+                "is_verification": False,
+                "original_run_id": None,
+                "container_id": "container-1",
+                "execution_log": [_sample_execution_entry(plan)],
+                "overall_result": "reproduced",
+                "artifacts_dir": str(artifacts_dir),
+                "jellyfin_logs": "server log\n",
+                "error_summary": None,
+            }
+            (execution_dir / "result.json").write_text(
+                json.dumps(execution_result),
+                encoding="utf-8",
+            )
+
+            result = run_report_stage(execution_dir, temp_path / "report")
+
+            verification_plan = json.loads(
+                (temp_path / "report" / "verification_plan.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(result.status, "verification_ready")
+            self.assertTrue((temp_path / "report" / "report.md").is_file())
+            self.assertTrue(verification_plan["is_verification"])
+            self.assertEqual(verification_plan["original_run_id"], "run-1")
 
     def test_execution_turn_budget_matches_master_plan(self):
         self.assertEqual(execution_turn_budget(0), (60, 70))

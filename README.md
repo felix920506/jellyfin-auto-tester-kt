@@ -35,3 +35,38 @@ The entrypoint loads `terrarium.yaml`, starts the Stage 1 analysis agent, lets
 the channel topology drive execution and reporting, then prints either the final
 report path or the human-review queue result. Use `--json` for the structured
 terminal payload.
+
+## Running Stages Individually
+
+The full pipeline remains channel-driven. For debugging, each stage can also be
+run with disk handoff folders:
+
+```bash
+.venv/bin/python main.py stage analysis \
+  https://github.com/jellyfin/jellyfin/issues/XXXX 10.9.7 \
+  --out debug/stage1
+
+.venv/bin/python main.py stage execution \
+  --input debug/stage1 \
+  --out debug/stage2
+
+.venv/bin/python main.py stage report \
+  --input debug/stage2 \
+  --out debug/stage3
+```
+
+Stage 1 writes `plan.json`, Stage 2 reads `plan.json` and writes `result.json`,
+and Stage 3 reads `result.json` and writes `report.md` plus
+`verification_plan.json`. To debug the verification pass, feed that plan back
+through Stage 2 and then finalize the report:
+
+```bash
+.venv/bin/python main.py stage execution \
+  --input debug/stage3/verification_plan.json \
+  --out debug/stage2-verify
+
+.venv/bin/python main.py stage report \
+  --input debug/stage2 \
+  --verification-result debug/stage2-verify \
+  --out debug/stage3-final
+```

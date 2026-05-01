@@ -17,6 +17,11 @@ REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_RECIPE_PATH = REPO_ROOT / "terrarium.yaml"
 DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
 TERMINAL_CHANNELS = ("final_report", "human_review_queue")
+STAGE_HANDOFF_FILES = {
+    "analysis": ("plan.json", "reproduction_plan.json"),
+    "execution": ("result.json", "execution_result.json"),
+    "report": ("result.json", "execution_result.json"),
+}
 PROVIDER_AUTH_ENV_VARS = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -64,6 +69,17 @@ class PipelineResult:
 
 class PipelineTimeoutError(TimeoutError):
     """Raised when the pipeline does not reach a terminal channel in time."""
+
+
+@dataclass(slots=True)
+class StageDebugResult:
+    """Disk handoff result for a single-stage debug run."""
+
+    stage: str
+    status: str
+    output_dir: str
+    output_file: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class _NullOutput:
@@ -197,6 +213,204 @@ async def run_issue(
         raise
 
 
+async def run_analysis_stage(
+    issue_url: str,
+    container_version: str,
+    out_dir: str | Path,
+    *,
+    timeout_s: float | None = 10 * 60,
+    stream: TextIO | None = sys.stdout,
+    engine_factory: Callable[[str], Any] | None = None,
+) -> StageDebugResult:
+    """Run Stage 1 only and write a disk handoff folder.
+
+    Output files:
+    - ``input.json``: issue URL and target version used for the run.
+    - ``transcript.txt``: analysis agent text transcript.
+    - ``plan.json``: ReproductionPlan payload for Stage 2 when available.
+    - ``stage_result.json``: machine-readable metadata for the debug run.
+    """
+
+    load_env_file()
+    output_dir = _prepare_output_dir(out_dir)
+    _write_json_file(
+        output_dir / "input.json",
+        {
+            "stage": "analysis",
+            "issue_url": issue_url,
+            "container_version": container_version,
+        },
+    )
+
+    engine = await _load_stage_engine("analysis", engine_factory=engine_factory)
+    plan_task = asyncio.create_task(_receive_channel_message(engine, "plan_ready"))
+    transcript_parts: list[str] = []
+    try:
+        analysis_agent = _get_agent(engine, "analysis_agent")
+        _suppress_default_output(analysis_agent)
+        async for chunk in _chat(analysis_agent, _analysis_prompt(issue_url, container_version)):
+            text = _chunk_text(chunk)
+            transcript_parts.append(text)
+            if stream is not None:
+                stream.write(text)
+                stream.flush()
+
+        transcript = "".join(transcript_parts)
+        (output_dir / "transcript.txt").write_text(transcript, encoding="utf-8")
+
+        if _is_insufficient_information(transcript):
+            plan_task.cancel()
+            await _cancel_task(plan_task)
+            return _write_stage_result(
+                StageDebugResult(
+                    stage="analysis",
+                    status="insufficient_information",
+                    output_dir=str(output_dir),
+                    output_file="transcript.txt",
+                    metadata={"message": transcript.strip()},
+                )
+            )
+
+        try:
+            _, plan = await asyncio.wait_for(plan_task, timeout=timeout_s)
+        except asyncio.TimeoutError as exc:
+            raise PipelineTimeoutError("timed out waiting for plan_ready") from exc
+
+        _write_json_file(output_dir / "plan.json", plan)
+        return _write_stage_result(
+            StageDebugResult(
+                stage="analysis",
+                status="plan_ready",
+                output_dir=str(output_dir),
+                output_file="plan.json",
+                metadata={"transcript": "transcript.txt"},
+            )
+        )
+    except BaseException:
+        plan_task.cancel()
+        await _cancel_task(plan_task)
+        raise
+
+
+def run_execution_stage(
+    input_path: str | Path,
+    out_dir: str | Path,
+    *,
+    run_id: str | None = None,
+    runner_factory: Callable[[Path], Any] | None = None,
+) -> StageDebugResult:
+    """Run Stage 2 only from a ReproductionPlan file or folder."""
+
+    load_env_file()
+    output_dir = _prepare_output_dir(out_dir)
+    plan_path = _resolve_stage_input_file(input_path, "analysis")
+    plan = _read_json_file(plan_path)
+    _write_json_file(output_dir / "plan.json", plan)
+
+    if runner_factory is None:
+        from creatures.execution.tools.execution_runner import ExecutionRunner
+
+        runner = ExecutionRunner(artifacts_root=output_dir)
+    else:
+        runner = runner_factory(output_dir)
+
+    result = runner.execute_plan(plan=plan, run_id=run_id)
+    _write_json_file(output_dir / "result.json", result)
+    return _write_stage_result(
+        StageDebugResult(
+            stage="execution",
+            status=str(result.get("overall_result", "complete")),
+            output_dir=str(output_dir),
+            output_file="result.json",
+            metadata={
+                "input": str(plan_path),
+                "run_id": result.get("run_id"),
+                "artifacts_dir": result.get("artifacts_dir"),
+            },
+        )
+    )
+
+
+def run_report_stage(
+    input_path: str | Path,
+    out_dir: str | Path,
+    *,
+    verification_result_path: str | Path | None = None,
+) -> StageDebugResult:
+    """Run Stage 3's file-based report handoff.
+
+    With only a first-run ``result.json``, this writes a draft ``report.md`` and
+    ``verification_plan.json`` that can be passed to Stage 2. With
+    ``verification_result_path``, this writes the verified/final routing
+    metadata as ``final_report.json`` or ``human_review_queue.json``.
+    """
+
+    load_env_file()
+    output_dir = _prepare_output_dir(out_dir)
+    result_path = _resolve_stage_input_file(input_path, "execution")
+    execution_result = _read_json_file(result_path)
+    verification_result = (
+        _read_json_file(_resolve_stage_input_file(verification_result_path, "execution"))
+        if verification_result_path is not None
+        else None
+    )
+
+    from creatures.report.tools import report_writer
+
+    written_steps = _debug_report_steps(execution_result)
+    metadata = report_writer.generate(
+        execution_result,
+        verification_result,
+        artifacts_base=output_dir,
+        written_steps=written_steps,
+    )
+    report_file = _mirror_report(metadata.get("path"), output_dir)
+    metadata["path"] = str(report_file)
+    _write_json_file(output_dir / "report_metadata.json", metadata)
+    _write_json_file(output_dir / "execution_result.json", execution_result)
+
+    if verification_result is not None:
+        _write_json_file(output_dir / "verification_result.json", verification_result)
+        route = "final_report" if metadata.get("verified") is True else "human_review_queue"
+        route_payload = dict(metadata)
+        if route == "human_review_queue":
+            route_payload.setdefault("reason", "verification failed or was inconsistent")
+        route_file = output_dir / f"{route}.json"
+        _write_json_file(route_file, route_payload)
+        return _write_stage_result(
+            StageDebugResult(
+                stage="report",
+                status=route,
+                output_dir=str(output_dir),
+                output_file=route_file.name,
+                metadata={"report": "report.md", "verified": metadata.get("verified")},
+            )
+        )
+
+    if execution_result.get("is_verification"):
+        return _write_stage_result(
+            StageDebugResult(
+                stage="report",
+                status="report_written",
+                output_dir=str(output_dir),
+                output_file="report.md",
+                metadata={"report_metadata": "report_metadata.json"},
+            )
+        )
+
+    verification_plan = report_writer.build_verification_plan(execution_result, written_steps)
+    _write_json_file(output_dir / "verification_plan.json", verification_plan)
+    return _write_stage_result(
+        StageDebugResult(
+            stage="report",
+            status="verification_ready",
+            output_dir=str(output_dir),
+            output_file="verification_plan.json",
+            metadata={"report": "report.md", "report_metadata": "report_metadata.json"},
+        )
+    )
+
+
 async def _load_engine(
     recipe_path: str | Path,
     *,
@@ -214,6 +428,47 @@ async def _load_engine(
             "Install it in this environment, then rerun main.py."
         ) from exc
 
+    return await _maybe_await(Terrarium.from_recipe(recipe))
+
+
+async def _load_stage_engine(
+    stage: str,
+    *,
+    engine_factory: Callable[[str], Any] | None,
+) -> Any:
+    if engine_factory is not None:
+        return await _maybe_await(engine_factory(stage))
+    if stage != "analysis":
+        raise ValueError(f"no isolated Terrarium recipe is defined for stage {stage!r}")
+
+    try:
+        from kohakuterrarium import Terrarium
+        from kohakuterrarium.terrarium.config import (
+            ChannelConfig,
+            CreatureConfig,
+            TerrariumConfig,
+        )
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on runtime env
+        raise RuntimeError(
+            "kohakuterrarium is required to run Stage 1. "
+            "Install it in this environment, then rerun main.py."
+        ) from exc
+
+    recipe = TerrariumConfig(
+        name="analysis_debug",
+        creatures=[
+            CreatureConfig(
+                name="analysis_agent",
+                config_data={
+                    "name": "analysis_agent",
+                    "base_config": "creatures/analysis",
+                },
+                base_dir=REPO_ROOT,
+                send_channels=["plan_ready"],
+            )
+        ],
+        channels=[ChannelConfig(name="plan_ready", channel_type="queue")],
+    )
     return await _maybe_await(Terrarium.from_recipe(recipe))
 
 
@@ -616,6 +871,94 @@ def _set_or_configure(target: Any, name: str, value: Any) -> None:
         config[name] = value
 
 
+def _prepare_output_dir(path: str | Path) -> Path:
+    output_dir = Path(path).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def _resolve_stage_input_file(path: str | Path, producer_stage: str) -> Path:
+    input_path = Path(path).expanduser()
+    candidates = STAGE_HANDOFF_FILES[producer_stage]
+    if input_path.is_file():
+        return input_path.resolve()
+    if not input_path.exists():
+        raise FileNotFoundError(f"stage input does not exist: {input_path}")
+    if not input_path.is_dir():
+        raise ValueError(f"stage input must be a file or directory: {input_path}")
+    for candidate in candidates:
+        file_path = input_path / candidate
+        if file_path.is_file():
+            return file_path.resolve()
+    expected = ", ".join(candidates)
+    raise FileNotFoundError(f"{input_path} does not contain one of: {expected}")
+
+
+def _read_json_file(path: str | Path) -> Any:
+    with Path(path).expanduser().open(encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _write_json_file(path: str | Path, value: Any) -> Path:
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(value, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def _write_stage_result(result: StageDebugResult) -> StageDebugResult:
+    _write_json_file(
+        Path(result.output_dir) / "stage_result.json",
+        asdict(result),
+    )
+    return result
+
+
+def _debug_report_steps(execution_result: dict[str, Any]) -> list[dict[str, Any]]:
+    plan = execution_result.get("plan") if isinstance(execution_result, dict) else {}
+    steps = plan.get("reproduction_steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return []
+
+    trigger_index = next(
+        (
+            index
+            for index, step in enumerate(steps)
+            if isinstance(step, dict) and step.get("role") == "trigger"
+        ),
+        None,
+    )
+    if trigger_index is None:
+        return [dict(step) for step in steps if isinstance(step, dict)]
+
+    selected: list[dict[str, Any]] = []
+    selected.extend(
+        dict(step)
+        for step in steps[:trigger_index]
+        if isinstance(step, dict) and step.get("role") == "setup"
+    )
+    selected.append(dict(steps[trigger_index]))
+    selected.extend(
+        dict(step)
+        for step in steps[trigger_index + 1 :]
+        if isinstance(step, dict) and step.get("role") == "verify"
+    )
+    return selected
+
+
+def _mirror_report(source: Any, output_dir: Path) -> Path:
+    if not source:
+        raise ValueError("report_writer did not return a report path")
+    source_path = Path(str(source)).expanduser()
+    target = output_dir / "report.md"
+    if source_path.resolve() != target.resolve():
+        target.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+    return target
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the Jellyfin issue reproduction pipeline."
@@ -646,8 +989,73 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_stage_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="main.py stage",
+        description="Run one pipeline stage with disk handoff files.",
+    )
+    subparsers = parser.add_subparsers(dest="stage", required=True)
+
+    analysis = subparsers.add_parser("analysis", help="Run Stage 1 only")
+    analysis.add_argument("issue_url", help="GitHub issue URL to analyze")
+    analysis.add_argument("container_version", help="Jellyfin container tag")
+    analysis.add_argument("--out", required=True, help="Output handoff directory")
+    analysis.add_argument(
+        "--timeout-s",
+        type=float,
+        default=10 * 60,
+        help="Seconds to wait for plan_ready",
+    )
+    analysis.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Do not stream analysis-agent output",
+    )
+    analysis.add_argument(
+        "--json",
+        action="store_true",
+        help="Print StageDebugResult as JSON",
+    )
+
+    execution = subparsers.add_parser("execution", help="Run Stage 2 only")
+    execution.add_argument(
+        "--input",
+        required=True,
+        help="Stage 1 handoff folder or ReproductionPlan JSON file",
+    )
+    execution.add_argument("--out", required=True, help="Output handoff directory")
+    execution.add_argument("--run-id", help="Optional deterministic run id")
+    execution.add_argument(
+        "--json",
+        action="store_true",
+        help="Print StageDebugResult as JSON",
+    )
+
+    report = subparsers.add_parser("report", help="Run Stage 3 file handoff")
+    report.add_argument(
+        "--input",
+        required=True,
+        help="Stage 2 handoff folder or ExecutionResult JSON file",
+    )
+    report.add_argument("--out", required=True, help="Output handoff directory")
+    report.add_argument(
+        "--verification-result",
+        help="Optional Stage 2 verification handoff folder or result JSON file",
+    )
+    report.add_argument(
+        "--json",
+        action="store_true",
+        help="Print StageDebugResult as JSON",
+    )
+    return parser
+
+
 async def _async_main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "stage":
+        return await _async_stage_main(raw_argv[1:])
+
+    args = _build_parser().parse_args(raw_argv)
     result = await run_issue(
         args.issue_url,
         args.container_version,
@@ -658,6 +1066,35 @@ async def _async_main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(asdict(result), indent=2, sort_keys=True, default=str))
     return 0 if result.status in {"complete", "human_review", "insufficient_information"} else 1
+
+
+async def _async_stage_main(argv: list[str]) -> int:
+    args = _build_stage_parser().parse_args(argv)
+    if args.stage == "analysis":
+        result = await run_analysis_stage(
+            args.issue_url,
+            args.container_version,
+            args.out,
+            timeout_s=args.timeout_s,
+            stream=None if args.quiet or args.json else sys.stdout,
+        )
+    elif args.stage == "execution":
+        result = run_execution_stage(args.input, args.out, run_id=args.run_id)
+    elif args.stage == "report":
+        result = run_report_stage(
+            args.input,
+            args.out,
+            verification_result_path=args.verification_result,
+        )
+    else:  # pragma: no cover - argparse enforces choices
+        raise ValueError(f"unknown stage: {args.stage}")
+
+    if args.json:
+        print(json.dumps(asdict(result), indent=2, sort_keys=True, default=str))
+    else:
+        output = f" -> {result.output_file}" if result.output_file else ""
+        print(f"{result.stage}: {result.status}{output}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
