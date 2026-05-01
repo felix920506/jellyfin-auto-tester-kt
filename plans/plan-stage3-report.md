@@ -93,10 +93,15 @@ Read the ExecutionResult carefully:
 - Is there screenshot evidence?
 
 **Step 2: Extract the Minimal Reproduction Steps**
-From the passed steps, distill the *minimum* set of steps a maintainer needs to reproduce
-the issue. Remove setup steps that are obvious (e.g. "start Docker") unless they have
-non-obvious parameters. Write these as numbered, imperative steps with exact commands
-and expected output.
+Distill the *minimum* set of steps a maintainer needs to reproduce the issue. Include:
+- All `setup` steps that are prerequisites for reaching the bug (even if they passed)
+- The `trigger` step that causes the observable failure (this step typically has `outcome: fail`)
+- Any `verify` steps that confirm the failure state
+
+Omit steps that are obviously universal (e.g. "create an admin account") unless the
+issue is specifically about that flow. Write the final steps as numbered, imperative
+actions with exact commands and the expected observable outcome (including the expected
+failure for the trigger step).
 
 **Step 3: Write the ReproductionReport**
 Use `report_writer.generate()` to produce a structured Markdown report. See the
