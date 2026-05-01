@@ -27,7 +27,7 @@ tools:
 
 output:
   named_outputs:
-    - name: "plan_ready"
+    plan_ready:
       type: "channel"
       channel: "plan_ready"
 
@@ -41,4 +41,3 @@ compact:
 termination:
   keywords: ["REPRODUCTION_PLAN_COMPLETE", "INSUFFICIENT_INFORMATION"]
   max_turns: 25
-

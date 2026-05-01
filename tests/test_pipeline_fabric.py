@@ -1,3 +1,4 @@
+import asyncio
 import io
 import os
 import tempfile
@@ -6,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from main import (
+    _receive_channel_message,
     apply_execution_turn_budget,
     execution_turn_budget,
     load_env_file,
@@ -50,6 +52,47 @@ class FakeEngine:
         if name == "execution_agent":
             return self.execution_agent
         raise KeyError(name)
+
+
+class FakeGraph:
+    def __init__(self, graph_id):
+        self.graph_id = graph_id
+
+
+class FakeRegistry:
+    def __init__(self, channels):
+        self.channels = channels
+
+    def get(self, channel_name):
+        return self.channels.get(channel_name)
+
+
+class FakeEnvironment:
+    def __init__(self, channels):
+        self.shared_channels = FakeRegistry(channels)
+
+
+class FakeGraphEngine:
+    def __init__(self, channels):
+        self._environments = {"graph-1": FakeEnvironment(channels)}
+
+    def list_graphs(self):
+        return [FakeGraph("graph-1")]
+
+
+class FakeOnSendChannel:
+    def __init__(self):
+        self.callbacks = []
+
+    def on_send(self, callback):
+        self.callbacks.append(callback)
+
+    def remove_on_send(self, callback):
+        self.callbacks.remove(callback)
+
+    def send(self, message):
+        for callback in list(self.callbacks):
+            callback("final_report", {"content": message})
 
 
 class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
@@ -100,6 +143,21 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, "insufficient_information")
         self.assertIn("missing steps", result.message)
+
+    async def test_channel_listener_observes_kohaku_graph_environment_channel(self):
+        channel = FakeOnSendChannel()
+        engine = FakeGraphEngine({"final_report": channel})
+        payload = {"report_path": "/tmp/artifacts/run-1/report.md"}
+
+        listener = asyncio.create_task(_receive_channel_message(engine, "final_report"))
+        await asyncio.sleep(0)
+        channel.send(payload)
+
+        channel_name, message = await asyncio.wait_for(listener, timeout=1)
+
+        self.assertEqual(channel_name, "final_report")
+        self.assertEqual(message, payload)
+        self.assertEqual(channel.callbacks, [])
 
     def test_execution_turn_budget_matches_master_plan(self):
         self.assertEqual(execution_turn_budget(0), (60, 70))

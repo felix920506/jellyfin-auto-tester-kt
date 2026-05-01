@@ -30,13 +30,13 @@ triggers:
 
 output:
   named_outputs:
-    - name: "final_report"
+    final_report:
       type: "channel"
       channel: "final_report"
-    - name: "human_review_queue"
+    human_review_queue:
       type: "channel"
       channel: "human_review_queue"
-    - name: "verification_request"
+    verification_request:
       type: "channel"
       channel: "verification_request"
 
@@ -50,4 +50,3 @@ compact:
 termination:
   keywords: ["REPORT_COMPLETE", "QUEUED_FOR_REVIEW"]
   max_turns: 35
-

@@ -42,7 +42,7 @@ triggers:
 
 output:
   named_outputs:
-    - name: "execution_done"
+    execution_done:
       type: "channel"
       channel: "execution_done"
 

@@ -2,38 +2,40 @@ version: "1.0"
 
 creatures:
   - name: "analysis_agent"
-    config: "creatures/analysis/config.yaml"
-    can_send:
-      - "plan_ready"
+    base_config: "creatures/analysis"
+    channels:
+      can_send:
+        - "plan_ready"
 
   - name: "execution_agent"
-    config: "creatures/execution/config.yaml"
-    listen:
-      - channel: "plan_ready"
-      - channel: "verification_request"
-    can_send:
-      - "execution_done"
+    base_config: "creatures/execution"
+    channels:
+      listen:
+        - "plan_ready"
+        - "verification_request"
+      can_send:
+        - "execution_done"
 
   - name: "report_agent"
-    config: "creatures/report/config.yaml"
-    listen:
-      - channel: "execution_done"
-    can_send:
-      - "verification_request"
-      - "final_report"
-      - "human_review_queue"
+    base_config: "creatures/report"
+    channels:
+      listen:
+        - "execution_done"
+      can_send:
+        - "verification_request"
+        - "final_report"
+        - "human_review_queue"
 
 channels:
-  - name: "plan_ready"
+  plan_ready:
     type: "queue"
-  - name: "execution_done"
+  execution_done:
     type: "queue"
-  - name: "verification_request"
+  verification_request:
     type: "queue"
-  - name: "final_report"
+  final_report:
     type: "broadcast"
-  - name: "human_review_queue"
+  human_review_queue:
     type: "queue"
 
 root_agent: "analysis_agent"
-

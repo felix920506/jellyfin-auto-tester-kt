@@ -243,11 +243,42 @@ async def _receive_channel_message(engine: Any, channel_name: str) -> tuple[str,
     return channel_name, _unwrap_message(message)
 
 
+async def _observe_channel_send(channel: Any) -> Any:
+    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1)
+    loop = asyncio.get_running_loop()
+
+    def callback(_channel_name: str, message: Any = None) -> None:
+        if message is None:
+            message = _channel_name
+
+        def enqueue() -> None:
+            if queue.empty():
+                queue.put_nowait(message)
+
+        loop.call_soon_threadsafe(enqueue)
+
+    unsubscribe = channel.on_send(callback)
+    try:
+        history = getattr(channel, "history", None)
+        if history:
+            return history[-1]
+        return await queue.get()
+    finally:
+        if callable(unsubscribe):
+            unsubscribe()
+        else:
+            remove = getattr(channel, "remove_on_send", None)
+            if callable(remove):
+                remove(callback)
+
+
 def _channel_receive_source(engine: Any, channel_name: str) -> Any:
     channel = _get_channel(engine, channel_name)
     if channel is not None:
         if isinstance(channel, (str, bytes, dict)):
             return channel
+        if callable(getattr(channel, "on_send", None)):
+            return _observe_channel_send(channel)
         for method_name in ("receive", "recv", "get", "next"):
             method = getattr(channel, method_name, None)
             if callable(method):
@@ -295,7 +326,41 @@ def _get_channel(engine: Any, channel_name: str) -> Any | None:
         try:
             return channels[channel_name]
         except (KeyError, TypeError, AttributeError):
-            return None
+            pass
+
+    graph_channel = _get_graph_environment_channel(engine, channel_name)
+    if graph_channel is not None:
+        return graph_channel
+    return None
+
+
+def _get_graph_environment_channel(engine: Any, channel_name: str) -> Any | None:
+    list_graphs = getattr(engine, "list_graphs", None)
+    environments = getattr(engine, "_environments", None)
+    if not callable(list_graphs) or not isinstance(environments, dict):
+        return None
+
+    try:
+        graphs = list_graphs()
+    except Exception:
+        return None
+
+    for graph in graphs:
+        graph_id = getattr(graph, "graph_id", graph)
+        environment = environments.get(graph_id)
+        registry = getattr(environment, "shared_channels", None)
+        if registry is None:
+            continue
+
+        get_channel = getattr(registry, "get", None)
+        if callable(get_channel):
+            channel = get_channel(channel_name)
+            if channel is not None:
+                return channel
+
+        registry_channels = getattr(registry, "_channels", None)
+        if isinstance(registry_channels, dict) and channel_name in registry_channels:
+            return registry_channels[channel_name]
     return None
 
 
