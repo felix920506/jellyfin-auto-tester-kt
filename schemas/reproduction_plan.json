@@ -1,7 +1,621 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jellyfin-auto-tester.local/schemas/reproduction_plan.json",
   "title": "ReproductionPlan",
   "type": "object",
-  "additionalProperties": true
+  "additionalProperties": true,
+  "required": [
+    "issue_url",
+    "issue_title",
+    "target_version",
+    "docker_image",
+    "prerequisites",
+    "environment",
+    "reproduction_steps",
+    "reproduction_goal",
+    "failure_indicators",
+    "confidence",
+    "ambiguities",
+    "is_verification",
+    "original_run_id"
+  ],
+  "properties": {
+    "issue_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "issue_title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "docker_image": {
+      "type": "string",
+      "pattern": "^jellyfin/jellyfin:[^\\s]+$"
+    },
+    "prerequisites": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/prerequisite"
+      }
+    },
+    "environment": {
+      "$ref": "#/$defs/environment"
+    },
+    "reproduction_steps": {
+      "type": "array",
+      "minItems": 1,
+      "contains": {
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "const": "trigger"
+          }
+        }
+      },
+      "minContains": 1,
+      "maxContains": 1,
+      "items": {
+        "$ref": "#/$defs/reproduction_step"
+      }
+    },
+    "reproduction_goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "failure_indicators": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "confidence": {
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "ambiguities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "is_verification": {
+      "type": "boolean"
+    },
+    "original_run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "$defs": {
+    "prerequisite": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "description"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "ports",
+        "volumes",
+        "env_vars"
+      ],
+      "properties": {
+        "ports": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "host",
+            "container"
+          ],
+          "properties": {
+            "host": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "container": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "host",
+              "container"
+            ],
+            "properties": {
+              "host": {
+                "type": "string",
+                "minLength": 1
+              },
+              "container": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "env_vars": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "reproduction_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step_id",
+        "role",
+        "action",
+        "tool",
+        "input",
+        "expected_outcome",
+        "success_criteria"
+      ],
+      "properties": {
+        "step_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "role": {
+          "enum": [
+            "setup",
+            "trigger",
+            "verify"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "enum": [
+            "bash",
+            "http_request",
+            "screenshot",
+            "docker_exec"
+          ]
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "capture": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/capture_expression"
+          }
+        },
+        "expected_outcome": {
+          "type": "string",
+          "minLength": 1
+        },
+        "success_criteria": {
+          "$ref": "#/$defs/success_criteria"
+        }
+      }
+    },
+    "success_criteria": {
+      "type": "object",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": [
+            "all_of"
+          ],
+          "properties": {
+            "all_of": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/assertion"
+              }
+            }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": [
+            "any_of"
+          ],
+          "properties": {
+            "any_of": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/assertion"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "assertion": {
+      "type": "object",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/status_code_assertion"
+        },
+        {
+          "$ref": "#/$defs/body_contains_assertion"
+        },
+        {
+          "$ref": "#/$defs/body_matches_assertion"
+        },
+        {
+          "$ref": "#/$defs/body_json_path_assertion"
+        },
+        {
+          "$ref": "#/$defs/exit_code_assertion"
+        },
+        {
+          "$ref": "#/$defs/stdout_contains_assertion"
+        },
+        {
+          "$ref": "#/$defs/stderr_contains_assertion"
+        },
+        {
+          "$ref": "#/$defs/log_matches_assertion"
+        },
+        {
+          "$ref": "#/$defs/screenshot_present_assertion"
+        }
+      ]
+    },
+    "status_code_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "equals"
+          ]
+        },
+        {
+          "required": [
+            "in"
+          ]
+        }
+      ],
+      "properties": {
+        "type": {
+          "const": "status_code"
+        },
+        "equals": {
+          "type": "integer"
+        },
+        "in": {
+          "$ref": "#/$defs/integer_list"
+        }
+      }
+    },
+    "body_contains_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "body_contains"
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "body_matches_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "pattern"
+      ],
+      "properties": {
+        "type": {
+          "const": "body_matches"
+        },
+        "pattern": {
+          "type": "string"
+        }
+      }
+    },
+    "body_json_path_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "path",
+        "equals"
+      ],
+      "properties": {
+        "type": {
+          "const": "body_json_path"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "equals": true
+      }
+    },
+    "exit_code_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "equals"
+          ]
+        },
+        {
+          "required": [
+            "in"
+          ]
+        }
+      ],
+      "properties": {
+        "type": {
+          "const": "exit_code"
+        },
+        "equals": {
+          "type": "integer"
+        },
+        "in": {
+          "$ref": "#/$defs/integer_list"
+        }
+      }
+    },
+    "stdout_contains_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "stdout_contains"
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "stderr_contains_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "stderr_contains"
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "log_matches_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "pattern"
+      ],
+      "properties": {
+        "type": {
+          "const": "log_matches"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "since_step_start": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "screenshot_present_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "label"
+      ],
+      "properties": {
+        "type": {
+          "const": "screenshot_present"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "capture_expression": {
+      "type": "object",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/body_json_path_capture"
+        },
+        {
+          "$ref": "#/$defs/body_regex_capture"
+        },
+        {
+          "$ref": "#/$defs/header_capture"
+        },
+        {
+          "$ref": "#/$defs/stdout_regex_capture"
+        },
+        {
+          "$ref": "#/$defs/stdout_trimmed_capture"
+        },
+        {
+          "$ref": "#/$defs/exit_code_capture"
+        }
+      ]
+    },
+    "body_json_path_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "path"
+      ],
+      "properties": {
+        "from": {
+          "const": "body_json_path"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "body_regex_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "pattern"
+      ],
+      "properties": {
+        "from": {
+          "const": "body_regex"
+        },
+        "pattern": {
+          "type": "string",
+          "minLength": 1
+        },
+        "group": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1
+        }
+      }
+    },
+    "header_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "name"
+      ],
+      "properties": {
+        "from": {
+          "const": "header"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "stdout_regex_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "pattern"
+      ],
+      "properties": {
+        "from": {
+          "const": "stdout_regex"
+        },
+        "pattern": {
+          "type": "string",
+          "minLength": 1
+        },
+        "group": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1
+        }
+      }
+    },
+    "stdout_trimmed_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from"
+      ],
+      "properties": {
+        "from": {
+          "const": "stdout_trimmed"
+        }
+      }
+    },
+    "exit_code_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from"
+      ],
+      "properties": {
+        "from": {
+          "const": "exit_code"
+        }
+      }
+    },
+    "integer_list": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "integer"
+      }
+    }
+  }
 }
-
