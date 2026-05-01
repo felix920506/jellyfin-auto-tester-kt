@@ -125,7 +125,14 @@ async def run_issue(issue_url: str, container_version: str):
       "tool": "bash | http_request | screenshot | docker_exec",
       "input": {},
       "expected_outcome": "string",
-      "success_criteria": "string"
+      "success_criteria": {
+        "all_of": [
+          { "type": "status_code", "equals": 500 },
+          { "type": "body_contains", "value": "Transcoding failed" },
+          { "type": "log_matches", "pattern": "HEVC decode error" },
+          { "type": "exit_code", "equals": 0 }
+        ]
+      }
     }
   ],
   "success_criteria": "string",
@@ -145,6 +152,26 @@ async def run_issue(issue_url: str, container_version: str):
 Exactly one step must have `role: "trigger"`. Stage 2 uses this to determine `overall_result` without scanning all logs or counting pass rates.
 
 For `trigger` steps, `success_criteria` deliberately describes observing the bug symptom (e.g. "response contains 'Transcoding failed'"). A `pass` on a trigger step means the defect manifested as expected; a `fail` means it did not appear. Stage 2 applies the same pass/fail evaluation uniformly to all steps—no special-casing.
+
+**`success_criteria` evaluation (deterministic, no LLM):**
+
+`success_criteria` is a structured object — never free text — so Stage 2 can evaluate it programmatically and produce reproducible outcomes. The shape is `{ "all_of": [<assertion>, ...] }` or `{ "any_of": [<assertion>, ...] }` (mutually exclusive at the top level; nested combinators are not supported in v1).
+
+Supported assertion types:
+
+| `type`           | Fields                          | Meaning |
+|---|---|---|
+| `status_code`    | `equals: int` or `in: [int]`    | HTTP response status (http_request steps only) |
+| `body_contains`  | `value: string`                 | Substring match against response body |
+| `body_matches`   | `pattern: string`               | Python regex against response body |
+| `body_json_path` | `path: string`, `equals: any`   | JSONPath into response body equals value |
+| `exit_code`      | `equals: int` or `in: [int]`    | Process/docker_exec exit code |
+| `stdout_contains`| `value: string`                 | Substring in stdout |
+| `stderr_contains`| `value: string`                 | Substring in stderr |
+| `log_matches`    | `pattern: string`, `since_step_start: bool = true` | Regex against `docker logs` since step began |
+| `screenshot_present` | `label: string`             | A screenshot was captured under this label |
+
+A step passes iff its `success_criteria` evaluates to true under this DSL. There is no LLM-based judgment in the loop; the agent's job is to dispatch the tool call, not to interpret the result.
 
 ### ExecutionResult (Stage 2 → Stage 3)
 

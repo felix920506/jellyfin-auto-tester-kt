@@ -120,7 +120,10 @@ Emit REPRODUCTION_PLAN_COMPLETE to terminate.
 
 ## Rules
 - Never invent steps the issue doesn't support. Ambiguity goes in `ambiguities`, not in steps.
-- Always include at least one `success_criteria` that is objectively verifiable.
+- `success_criteria` MUST be a structured `{all_of|any_of: [...]}` object using
+  the assertion DSL defined in plan-master.md. Never emit free-text criteria —
+  Stage 2 evaluates them programmatically, not by LLM judgment, so unstructured
+  criteria are unrunnable.
 - Prefer `http_request` over browser automation for API-level bugs.
 - Docker image must be `jellyfin/jellyfin:<version>` using the maintainer-specified version.
 ```
@@ -205,7 +208,7 @@ The agent sends a `ReproductionPlan` JSON to the `plan_ready` channel. See the m
         "body": { "Name": "TestLib", "CollectionType": "movies", "Paths": ["/media"] }
       },
       "expected_outcome": "HTTP 204; library scan triggered",
-      "success_criteria": "GET /Library/VirtualFolders returns entry with Name=TestLib"
+      "success_criteria": { "all_of": [ { "type": "status_code", "equals": 204 } ] }
     },
     {
       "step_id": 2,
@@ -218,7 +221,12 @@ The agent sends a `ReproductionPlan` JSON to the `plan_ready` channel. See the m
         "body": { "DeviceProfile": { "MaxStreamingBitrate": 2000000 } }
       },
       "expected_outcome": "HTTP 500 or TranscodingInfo.IsVideoDirect=false with error in logs",
-      "success_criteria": "Response body contains 'Transcoding failed' or server log contains 'HEVC decode error'"
+      "success_criteria": {
+        "any_of": [
+          { "type": "body_contains", "value": "Transcoding failed" },
+          { "type": "log_matches", "pattern": "HEVC decode error" }
+        ]
+      }
     }
   ],
   "confidence": "high",

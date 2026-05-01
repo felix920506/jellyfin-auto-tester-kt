@@ -106,9 +106,17 @@ For each step in `reproduction_steps`, in order:
    - `screenshot` → call `screenshot.capture()`
    - `docker_exec` → run command inside container via `docker_manager.exec()`
 3. Capture stdout, stderr, exit code, and HTTP response body/status
-4. Evaluate against `step.success_criteria`:
-   - If criteria met → mark step `pass`
-   - If criteria not met → mark step `fail`; continue to next step (do not abort)
+4. Evaluate `step.success_criteria` deterministically using the structured
+   assertion DSL defined in plan-master.md (status_code, body_contains,
+   body_matches, body_json_path, exit_code, stdout_contains, stderr_contains,
+   log_matches, screenshot_present, combined via `all_of`/`any_of`).
+   This evaluation is performed by a pure function (`evaluate_criteria(criteria, context)`),
+   never by the agent's reasoning loop:
+   - If criteria evaluate to true → mark step `pass`
+   - If criteria evaluate to false → mark step `fail`; continue to next step (do not abort)
+   - If a criterion references a tool channel that did not run for this step
+     (e.g. `status_code` on a bash step) → mark step `fail` with reason
+     "criterion not applicable to step.tool"
 5. After any `fail` step, immediately capture:
    - Full Jellyfin server logs: `docker logs <container_id>`
    - A screenshot of current state (if UI is involved)
