@@ -142,8 +142,7 @@ async def run_issue(issue_url: str, container_version: str):
 
 Exactly one step must have `role: "trigger"`. Stage 2 uses this to determine `overall_result` without scanning all logs or counting pass rates.
 
-```json
-```
+For `trigger` steps, `success_criteria` deliberately describes observing the bug symptom (e.g. "response contains 'Transcoding failed'"). A `pass` on a trigger step means the defect manifested as expected; a `fail` means it did not appear. Stage 2 applies the same pass/fail evaluation uniformly to all steps—no special-casing.
 
 ### ExecutionResult (Stage 2 → Stage 3)
 
@@ -177,7 +176,11 @@ Exactly one step must have `role: "trigger"`. Stage 2 uses this to determine `ov
 - `is_verification` and `original_run_id` are set in the `ReproductionPlan` by `report_writer.build_verification_plan()` before being sent to Stage 2 on the `verification_request` channel.
 - Stage 2 echoes both fields verbatim from the incoming plan into the `ExecutionResult` it emits.
 - The Report Agent reads `is_verification` from the `ExecutionResult`—there is no separate channel-level flag or session variable. This ensures the state marker travels with the data and is present even if the Report Agent is restarted mid-run.
-```
+
+**`overall_result` derivation (Stage 2 responsibility):**
+- `reproduced`: the `trigger` step's outcome is `pass` — its `success_criteria` (the bug symptom) was observed
+- `not_reproduced`: the `trigger` step's outcome is `fail` — the bug symptom was not observed
+- `inconclusive`: the `trigger` step could not be reached (container crash, prerequisite failure, timeout) OR no step has `role: "trigger"`
 
 ---
 

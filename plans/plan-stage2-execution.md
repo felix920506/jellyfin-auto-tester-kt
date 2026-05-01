@@ -113,11 +113,16 @@ After all steps:
 1. Retrieve full Jellyfin logs
 2. Find the step with `role: "trigger"` in the execution log
 3. Assess `overall_result` based solely on the trigger step's outcome:
-   - `reproduced`: trigger step has `outcome: "fail"` AND its actual output (stdout/stderr/HTTP
-     response) matches its `expected_outcome` description
-   - `not_reproduced`: trigger step has `outcome: "pass"` (bug did not manifest)
+   - `reproduced`: trigger step has `outcome: "pass"` — meaning its `success_criteria` was
+     met, i.e. the bug symptom was observed
+   - `not_reproduced`: trigger step has `outcome: "fail"` — meaning the bug symptom was not
+     observed (the action completed without exhibiting the defect)
    - `inconclusive`: trigger step was never reached (skipped or container crashed before it),
      no step has `role: "trigger"`, or the trigger step timed out
+
+Note: for `trigger` steps, `success_criteria` deliberately describes observing the bug
+symptom (e.g. "response contains 'Transcoding failed'"). A `pass` on a trigger step means
+the bug appeared as expected. A `fail` means it did not appear.
 
 Do not use log-scanning heuristics or pass-rate counts to determine `overall_result`.
 All log data is captured in `jellyfin_logs` and `execution_log` for Stage 3 to interpret.

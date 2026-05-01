@@ -95,7 +95,7 @@ Read the ExecutionResult carefully:
 **Step 2: Extract the Minimal Reproduction Steps**
 Distill the *minimum* set of steps a maintainer needs to reproduce the issue. Include:
 - All `setup` steps that are prerequisites for reaching the bug (even if they passed)
-- The `trigger` step that causes the observable failure (this step typically has `outcome: fail`)
+- The `trigger` step that causes the observable failure (this step typically has `outcome: pass` because its `success_criteria` describes observing the bug symptom)
 - Any `verify` steps that confirm the failure state
 
 Omit steps that are obviously universal (e.g. "create an admin account") unless the
