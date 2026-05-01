@@ -20,8 +20,16 @@ controller:
 
 system_prompt_file: "prompts/system.md"
 
-max_iterations: 60
+max_iterations: 60       # baseline; raised dynamically — see below
 skill_mode: "dynamic"
+
+# Turn-budget scaling: a plan with N steps needs roughly
+# (setup_overhead=10) + (per_step_turns=4 * N) + (assessment_overhead=6) turns
+# in the worst case (dispatch + capture + criteria + log/screenshot on fail).
+# main.py overrides max_iterations and termination.max_turns at trigger time:
+#   max_iterations = max(60, 16 + 4 * len(plan.reproduction_steps))
+#   max_turns      = max_iterations + 10
+# 60 is the floor for short plans; the scaling kicks in once N > ~11.
 
 tools:
   - name: "bash"
