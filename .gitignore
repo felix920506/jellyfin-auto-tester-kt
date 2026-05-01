@@ -1,4 +1,6 @@
 __pycache__/
 *.py[cod]
+.venv/
+.venv-home/
 artifacts/*
 !artifacts/.gitkeep
