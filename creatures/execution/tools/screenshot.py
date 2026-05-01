@@ -1,8 +1,9 @@
-"""Headless Jellyfin web UI screenshot helper for the execution stage."""
+"""Jellyfin web UI screenshot helper for the execution stage."""
 
 from __future__ import annotations
 
 import os
+import platform
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ARTIFACTS_ROOT = Path(
     os.environ.get("JF_AUTO_TESTER_ARTIFACTS_ROOT", REPO_ROOT / "artifacts")
 ).resolve()
+BROWSER_HEADLESS_ENV = "JF_AUTO_TESTER_BROWSER_HEADLESS"
+TRUTHY_VALUES = {"1", "true", "yes", "on", "headless"}
+FALSY_VALUES = {"0", "false", "no", "off", "headed", "gui"}
 
 
 class Screenshotter:
@@ -52,7 +56,8 @@ class Screenshotter:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with factory() as playwright:
-                browser = playwright.chromium.launch(headless=True)
+                headless = browser_should_run_headless()
+                browser = playwright.chromium.launch(headless=headless)
                 try:
                     page = browser.new_page(viewport={"width": 1280, "height": 720})
                     page.goto(url, wait_until="networkidle", timeout=max(wait_ms, 1) + 30000)
@@ -77,6 +82,7 @@ class Screenshotter:
             "url": url,
             "label": label,
             "timestamp": timestamp,
+            "headless": headless,
         }
 
     def _path(self, run_id: str, label: str) -> Path:
@@ -106,3 +112,40 @@ def _load_sync_playwright() -> Any:
     except ImportError as exc:
         raise RuntimeError("playwright not available") from exc
     return sync_playwright
+
+
+def browser_should_run_headless() -> bool:
+    """Return the Playwright headless setting for the current environment."""
+
+    override = os.environ.get(BROWSER_HEADLESS_ENV)
+    if override is not None:
+        normalized = override.strip().lower()
+        if normalized in TRUTHY_VALUES:
+            return True
+        if normalized in FALSY_VALUES:
+            return False
+        if normalized not in {"", "auto"}:
+            raise ValueError(
+                f"{BROWSER_HEADLESS_ENV} must be true, false, or auto"
+            )
+
+    return not system_has_gui()
+
+
+def system_has_gui() -> bool:
+    """Best-effort display detection for choosing headed browser mode."""
+
+    if os.environ.get("CI", "").strip().lower() in TRUTHY_VALUES:
+        return False
+
+    system = platform.system()
+    if system == "Darwin":
+        return not (
+            os.environ.get("SSH_CONNECTION")
+            or os.environ.get("SSH_TTY")
+            or os.environ.get("SSH_CLIENT")
+        )
+    if system == "Windows":
+        return True
+
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))

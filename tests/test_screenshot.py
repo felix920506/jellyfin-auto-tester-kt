@@ -1,8 +1,14 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from creatures.execution.tools.screenshot import Screenshotter
+from creatures.execution.tools.screenshot import (
+    BROWSER_HEADLESS_ENV,
+    Screenshotter,
+    browser_should_run_headless,
+    system_has_gui,
+)
 
 
 class FakePage:
@@ -91,9 +97,53 @@ class ScreenshotTests(unittest.TestCase):
             )
             self.assertTrue(Path(result["path"]).exists())
             self.assertTrue(context.chromium.browser.closed)
+            self.assertIn(context.chromium.headless, {True, False})
             calls = context.chromium.browser.page.calls
             self.assertEqual(calls[0][0], "goto")
             self.assertEqual(calls[1], ("wait_for_selector", "#login", 50))
+
+    def test_browser_headless_env_override_forces_headless(self):
+        with patch.dict("os.environ", {BROWSER_HEADLESS_ENV: "true"}, clear=True):
+            self.assertTrue(browser_should_run_headless())
+
+    def test_browser_headless_env_override_forces_gui(self):
+        with patch.dict("os.environ", {BROWSER_HEADLESS_ENV: "false"}, clear=True):
+            self.assertFalse(browser_should_run_headless())
+
+    def test_browser_defaults_to_gui_on_non_headless_macos(self):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("platform.system", return_value="Darwin"),
+        ):
+            self.assertTrue(system_has_gui())
+            self.assertFalse(browser_should_run_headless())
+
+    def test_browser_defaults_to_headless_without_linux_display(self):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("platform.system", return_value="Linux"),
+        ):
+            self.assertFalse(system_has_gui())
+            self.assertTrue(browser_should_run_headless())
+
+    def test_capture_passes_headless_choice_to_playwright(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            context = FakePlaywrightContext()
+            screenshotter = Screenshotter(
+                artifacts_root=temp_dir,
+                playwright_factory=lambda: context,
+            )
+
+            with patch.dict("os.environ", {BROWSER_HEADLESS_ENV: "false"}, clear=True):
+                result = screenshotter.capture(
+                    "http://localhost:8096/web",
+                    "run",
+                    "visible",
+                    wait_ms=0,
+                )
+
+            self.assertFalse(result["headless"])
+            self.assertFalse(context.chromium.headless)
 
 
 if __name__ == "__main__":
