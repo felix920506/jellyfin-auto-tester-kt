@@ -93,7 +93,7 @@ A `run_id` (UUID) for artifact namespacing.
 
 ### Phase 2: Step Execution
 For each step in `reproduction_steps`, in order:
-1. Log the step start time
+1. Log the step start time; record `step.role` in the execution log entry
 2. Dispatch to the appropriate tool based on `step.tool`:
    - `bash` → run command on host or via `docker exec`
    - `http_request` → call `jellyfin_api.request()`
@@ -111,12 +111,16 @@ For each step in `reproduction_steps`, in order:
 ### Phase 3: Assessment
 After all steps:
 1. Retrieve full Jellyfin logs
-2. Scan logs for ERROR/WARN lines matching `failure_indicators` from the plan
-3. Assess `overall_result`:
-   - `reproduced`: majority of steps pass AND at least one failure indicator is present
-     OR the final step explicitly matches `success_criteria`
-   - `not_reproduced`: all steps pass with no failure indicators
-   - `inconclusive`: mixed results, or container crashed, or steps could not be executed
+2. Find the step with `role: "trigger"` in the execution log
+3. Assess `overall_result` based solely on the trigger step's outcome:
+   - `reproduced`: trigger step has `outcome: "fail"` AND its actual output (stdout/stderr/HTTP
+     response) matches its `expected_outcome` description
+   - `not_reproduced`: trigger step has `outcome: "pass"` (bug did not manifest)
+   - `inconclusive`: trigger step was never reached (skipped or container crashed before it),
+     no step has `role: "trigger"`, or the trigger step timed out
+
+Do not use log-scanning heuristics or pass-rate counts to determine `overall_result`.
+All log data is captured in `jellyfin_logs` and `execution_log` for Stage 3 to interpret.
 
 ### Phase 4: Teardown
 1. Stop and remove the container

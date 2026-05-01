@@ -120,8 +120,9 @@ async def run_issue(issue_url: str, container_version: str):
   "reproduction_steps": [
     {
       "step_id": 1,
+      "role": "setup | trigger | verify",
       "action": "string",
-      "tool": "bash | http_request | screenshot",
+      "tool": "bash | http_request | screenshot | docker_exec",
       "input": {},
       "expected_outcome": "string",
       "success_criteria": "string"
@@ -132,6 +133,16 @@ async def run_issue(issue_url: str, container_version: str):
   "confidence": "high | medium | low",
   "ambiguities": ["string"]
 }
+```
+
+**Step `role` semantics:**
+- `setup` — prerequisite action; expected to pass cleanly
+- `trigger` — the action that causes the bug; its `expected_outcome` describes the observable failure symptom (e.g. HTTP 500, error in logs, wrong UI state)
+- `verify` — optional post-trigger assertion to confirm the failure state
+
+Exactly one step must have `role: "trigger"`. Stage 2 uses this to determine `overall_result` without scanning all logs or counting pass rates.
+
+```json
 ```
 
 ### ExecutionResult (Stage 2 → Stage 3)
