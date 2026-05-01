@@ -123,8 +123,12 @@ After all steps:
 2. Preserve artifacts directory
 
 ### Phase 5: Emit Result
-Build the ExecutionResult JSON and send it to the `execution_done` channel.
-Emit EXECUTION_COMPLETE.
+Build the ExecutionResult JSON. Always include:
+- `run_id`: the uuid4 generated at the start of this run
+- `is_verification`: copied verbatim from `plan.is_verification` (default `false` if absent)
+- `original_run_id`: copied verbatim from `plan.original_run_id` (default `null` if absent)
+
+Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 
 ## Rules
 - Never modify the ReproductionPlan steps. Execute them exactly as written.

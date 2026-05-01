@@ -76,7 +76,9 @@ exactly once by re-running Stage 2.
 
 ## Your Inputs
 An ExecutionResult JSON from the `execution_done` channel.
-A `is_verification` boolean flag (true if this is the second run).
+Read `execution_result.is_verification` (bool) to determine which pass this is.
+Do not rely on any external flag, session variable, or channel metadata — `is_verification`
+and `original_run_id` are embedded in the ExecutionResult itself.
 
 ## Two-Pass Protocol
 
@@ -230,12 +232,13 @@ The `report_writer` tool generates a Markdown file with this structure:
 #   Returns {path: str, word_count: int}
 
 # report_writer.build_verification_plan(
-#     original_plan: dict,
+#     original_result: dict,   # full ExecutionResult from first pass
 #     written_steps: list[dict]
 # ) -> dict
 #   Constructs a new ReproductionPlan from the written steps for re-execution.
-#   Sets is_verification=True and links back to the original run_id.
-#   Returns a valid ReproductionPlan JSON dict.
+#   Copies docker_image, environment, prerequisites from original_result.plan unchanged.
+#   Sets is_verification=True and original_run_id=original_result.run_id.
+#   Returns a valid ReproductionPlan JSON dict ready for the verification_request channel.
 ```
 
 **Implementation Notes:**
@@ -312,18 +315,22 @@ The channel message contains:
 
 ## State Tracking: Distinguishing First vs. Second Pass
 
-The Report Agent needs to know whether an incoming `execution_done` message is the first run or the verification run. This is handled by a field embedded in the `ExecutionResult`:
+State is carried entirely inside the `ExecutionResult` payload — no external state, session variables, or channel metadata are needed.
 
-```json
-{
-  "is_verification": false,
-  "original_run_id": null
-}
-```
+**Data flow:**
 
-The `build_verification_plan()` tool sets `is_verification: true` and `original_run_id: <first_run_id>` in the plan it sends to Stage 2. Stage 2 echoes these fields back in its `ExecutionResult`. The Report Agent reads `is_verification` to route its logic.
+1. Stage 2 always generates a fresh `run_id` (uuid4) and sets `is_verification: false`, `original_run_id: null` in the `ExecutionResult` it emits, unless the incoming `ReproductionPlan` already carries `is_verification: true`.
 
-This avoids any need for external state or session-level variables.
+2. When the Report Agent calls `build_verification_plan()`, that function:
+   - Copies `docker_image`, `environment`, and `prerequisites` from the original plan unchanged
+   - Replaces `reproduction_steps` with the distilled written steps
+   - Sets `is_verification: true` and `original_run_id: <first_run_id>` in the new plan
+
+3. Stage 2 receives the verification plan, runs it, and echoes `is_verification: true` and `original_run_id` into the `ExecutionResult` it emits to `execution_done`.
+
+4. The Report Agent reads `execution_result.is_verification` on every incoming message. There is no ambiguity: a first-pass result always has `is_verification: false`; a verification result always has `is_verification: true`. No other flag is consulted.
+
+**What prevents double-queuing:** The Report Agent's system prompt instructs it to halt after routing (either to `final_report` or `human_review_queue`) and never send another `verification_request` once `is_verification` is true. The `max_iterations: 30` cap in `config.yaml` provides a hard backstop.
 
 ---
 

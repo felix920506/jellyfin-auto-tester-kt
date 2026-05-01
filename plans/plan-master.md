@@ -139,6 +139,9 @@ async def run_issue(issue_url: str, container_version: str):
 ```json
 {
   "plan": { "...": "ReproductionPlan as above" },
+  "run_id": "string (uuid4)",
+  "is_verification": false,
+  "original_run_id": "string | null",
   "container_id": "string",
   "execution_log": [
     {
@@ -153,10 +156,16 @@ async def run_issue(issue_url: str, container_version: str):
     }
   ],
   "overall_result": "reproduced | not_reproduced | inconclusive",
-  "artifacts_dir": "/tmp/jellyfin-test-artifacts/run-<uuid>/",
+  "artifacts_dir": "/artifacts/<run_id>/",
   "jellyfin_logs": "string",
   "error_summary": "string | null"
 }
+```
+
+**Verification lineage fields:**
+- `is_verification` and `original_run_id` are set in the `ReproductionPlan` by `report_writer.build_verification_plan()` before being sent to Stage 2 on the `verification_request` channel.
+- Stage 2 echoes both fields verbatim from the incoming plan into the `ExecutionResult` it emits.
+- The Report Agent reads `is_verification` from the `ExecutionResult`—there is no separate channel-level flag or session variable. This ensures the state marker travels with the data and is present even if the Report Agent is restarted mid-run.
 ```
 
 ---
