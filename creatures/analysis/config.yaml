@@ -1,0 +1,44 @@
+name: "analysis_agent"
+version: "1.0"
+
+controller:
+  model: "claude-opus-4-7"
+  temperature: 0.2
+
+system_prompt_file: "prompts/system.md"
+
+max_iterations: 20
+skill_mode: "dynamic"
+
+tools:
+  - name: "web_fetch"
+    type: "builtin"
+  - name: "web_search"
+    type: "builtin"
+  - name: "read"
+    type: "builtin"
+  - name: "bash"
+    type: "builtin"
+  - name: "github_fetcher"
+    type: "custom"
+    module: "tools/github_fetcher.py"
+  - name: "send_message"
+    type: "builtin"
+
+output:
+  named_outputs:
+    - name: "plan_ready"
+      type: "channel"
+      channel: "plan_ready"
+
+memory:
+  provider: "model2vec"
+
+compact:
+  threshold_tokens: 8000
+  strategy: "summarize"
+
+termination:
+  keywords: ["REPRODUCTION_PLAN_COMPLETE", "INSUFFICIENT_INFORMATION"]
+  max_turns: 25
+

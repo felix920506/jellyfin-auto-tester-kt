@@ -1,0 +1,53 @@
+name: "report_agent"
+version: "1.0"
+
+controller:
+  model: "claude-opus-4-7"
+  temperature: 0.3
+
+system_prompt_file: "prompts/system.md"
+
+max_iterations: 30
+skill_mode: "dynamic"
+
+tools:
+  - name: "read"
+    type: "builtin"
+  - name: "write"
+    type: "builtin"
+  - name: "bash"
+    type: "builtin"
+  - name: "send_message"
+    type: "builtin"
+  - name: "report_writer"
+    type: "custom"
+    module: "tools/report_writer.py"
+
+triggers:
+  - type: "channel"
+    channel: "execution_done"
+    task: "analyze_and_report"
+
+output:
+  named_outputs:
+    - name: "final_report"
+      type: "channel"
+      channel: "final_report"
+    - name: "human_review_queue"
+      type: "channel"
+      channel: "human_review_queue"
+    - name: "verification_request"
+      type: "channel"
+      channel: "verification_request"
+
+memory:
+  provider: "model2vec"
+
+compact:
+  threshold_tokens: 10000
+  strategy: "summarize"
+
+termination:
+  keywords: ["REPORT_COMPLETE", "QUEUED_FOR_REVIEW"]
+  max_turns: 35
+

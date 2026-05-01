@@ -288,9 +288,12 @@ jellyfin-auto-tester-kt/
 ├── artifacts/                       # Runtime: per-run subdirs created here
 └── plans/
     ├── plan-master.md               # This file
-    ├── plan-stage1-analysis.md
-    ├── plan-stage2-execution.md
-    └── plan-stage3-report.md
+    ├── stage1-analysis/
+    │   └── plan.md
+    ├── stage2-execution/
+    │   └── plan.md
+    └── stage3-report/
+        └── plan.md
 ```
 
 ---
