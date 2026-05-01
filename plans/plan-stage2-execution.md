@@ -249,9 +249,11 @@ Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 
 ```python
 # jellyfin_api.request(method: str, path: str, body: dict = None,
-#                      headers: dict = None, expected_status: int = 200) -> dict
+#                      headers: dict = None) -> dict
 #   Makes HTTP request to http://localhost:8096{path}
-#   Returns {status_code, body, headers, duration_ms, success: bool}
+#   Returns {status_code, body, headers, duration_ms}
+#   Status-code expectations belong in step.success_criteria
+#   (status_code assertion), evaluated by the criteria DSL — not here.
 
 # jellyfin_api.wait_healthy(timeout_s: int = 60) -> dict
 #   Polls /health until 200 or timeout
