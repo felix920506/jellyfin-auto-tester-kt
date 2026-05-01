@@ -352,12 +352,12 @@ State is carried entirely inside the `ExecutionResult` payload — no external s
 
 | Scenario | Handling |
 |---|---|
-| `overall_result: "not_reproduced"` on first run | Report states "not reproduced"; verification step is still run (maybe it reproduced differently than expected) |
-| `overall_result: "inconclusive"` on first run | Report notes blockers; verification plan sends the same steps; if still inconclusive → human review |
+| `overall_result: "not_reproduced"` on first run | Report states "not reproduced"; verification still runs — the written steps may expose a different failure path |
+| `overall_result: "inconclusive"` on first run AND trigger step was reached | Report notes blockers; verification plan sends the same steps; if still inconclusive → human review |
+| `overall_result: "inconclusive"` on first run AND trigger step was never reached (skipped, container crash, timeout before trigger) | Report states "could not execute"; skip verification; route directly to human review — re-running the same blocked plan wastes a run |
 | Verification run crashes (container failure) | Treated as "failed verification" → human review queue |
 | No screenshots available (Playwright missing) | Report skips screenshot section; logs a note |
 | Artifacts dir missing or unreadable | Report Agent falls back to the in-memory ExecutionResult; notes missing artifacts |
-| First run had 0 passing steps | Report states "could not execute"; skips verification; routes directly to human review |
 
 ---
 
