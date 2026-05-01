@@ -220,8 +220,22 @@ Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 - Uses the `docker` Python SDK (`docker` package), not subprocess
 - Enforces image whitelist: only `jellyfin/jellyfin:*` and `jellyfin/jellyfin-web:*`
 - `start()` always adds `--restart no` to prevent auto-restart pollution
+- `start()` always tags containers with label `jf-auto-tester=1` so the reaper
+  can identify them safely without scanning every container on the host
 - Hard limit: max 2 containers running at once (prevent runaway)
 - All operations logged to `artifacts/<run_id>/docker_ops.log`
+
+**Crash-safety / leak prevention:**
+
+- On module import, `docker_manager` runs a reaper that lists all containers
+  with label `jf-auto-tester=1` whose age exceeds the max-total-run-time
+  budget (30 min) and force-removes them. This handles containers orphaned
+  by a previous agent crash before any new run starts.
+- Every `start()` call registers an `atexit` hook (and a `SIGTERM`/`SIGINT`
+  handler) that force-removes the container it created. Hooks are unregistered
+  by `stop()` so the normal-path teardown remains the single source of truth.
+- If the agent process is `SIGKILL`-ed the next run's import-time reaper picks
+  up the leak; this is the backstop, not the primary mechanism.
 
 ---
 
