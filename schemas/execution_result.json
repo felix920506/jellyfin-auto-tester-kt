@@ -1,7 +1,252 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jellyfin-auto-tester.local/schemas/execution_result.json",
   "title": "ExecutionResult",
   "type": "object",
-  "additionalProperties": true
+  "additionalProperties": true,
+  "required": [
+    "plan",
+    "run_id",
+    "is_verification",
+    "original_run_id",
+    "container_id",
+    "execution_log",
+    "overall_result",
+    "artifacts_dir",
+    "jellyfin_logs",
+    "error_summary"
+  ],
+  "properties": {
+    "plan": {
+      "type": "object"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "is_verification": {
+      "type": "boolean"
+    },
+    "original_run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "container_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "execution_log": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/execution_log_entry"
+      }
+    },
+    "overall_result": {
+      "enum": [
+        "reproduced",
+        "not_reproduced",
+        "inconclusive"
+      ]
+    },
+    "artifacts_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "jellyfin_logs": {
+      "type": "string"
+    },
+    "error_summary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "$defs": {
+    "execution_log_entry": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "step_id",
+        "role",
+        "action",
+        "tool",
+        "stdout",
+        "stderr",
+        "exit_code",
+        "http",
+        "screenshot_path",
+        "outcome",
+        "reason",
+        "criteria_evaluation",
+        "duration_ms"
+      ],
+      "properties": {
+        "step_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "role": {
+          "enum": [
+            "setup",
+            "trigger",
+            "verify",
+            null
+          ]
+        },
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "enum": [
+            "bash",
+            "http_request",
+            "screenshot",
+            "docker_exec",
+            null
+          ]
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "http": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/http_result"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "screenshot_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "pass",
+            "fail",
+            "skip"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "criteria_evaluation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/criteria_evaluation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "http_result": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "status_code",
+        "body",
+        "headers"
+      ],
+      "properties": {
+        "status_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "criteria_evaluation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "passed",
+        "assertions"
+      ],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "operator": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "assertions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/assertion_evaluation"
+          }
+        }
+      }
+    },
+    "assertion_evaluation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "passed",
+        "actual",
+        "expected",
+        "message"
+      ],
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "actual": true,
+        "expected": true,
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
 }
-

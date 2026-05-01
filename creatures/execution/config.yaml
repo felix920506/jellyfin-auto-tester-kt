@@ -26,6 +26,9 @@ tools:
   - name: "screenshot"
     type: "custom"
     module: "tools/screenshot.py"
+  - name: "execution_runner"
+    type: "custom"
+    module: "tools/execution_runner.py"
   - name: "send_message"
     type: "builtin"
 
@@ -56,4 +59,3 @@ compact:
 termination:
   keywords: ["EXECUTION_COMPLETE"]
   max_turns: 70
-
