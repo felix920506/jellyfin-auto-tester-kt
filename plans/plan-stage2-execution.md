@@ -147,6 +147,10 @@ For each step in `reproduction_steps`, in order:
    - If a criterion references a tool channel that did not run for this step
      (e.g. `status_code` on a bash step) → mark step `fail` with reason
      "criterion not applicable to step.tool"
+   - Store the full criteria result in `execution_log[].criteria_evaluation`,
+     including each assertion's type, pass/fail result, actual value, expected
+     value, and diagnostic message. Stage 3 must not recompute criteria from
+     sidecar logs.
 6. If the step passed and declares a `capture` block, evaluate each entry
    against the step result and bind the resulting values into the per-run
    variable scope. Capture-extraction failures (JSONPath miss, regex no-match)
@@ -184,6 +188,9 @@ Build the ExecutionResult JSON. Always include:
 - `run_id`: the uuid4 generated at the start of this run
 - `is_verification`: copied verbatim from `plan.is_verification` (default `false` if absent)
 - `original_run_id`: copied verbatim from `plan.original_run_id` (default `null` if absent)
+- `execution_log[]`: one entry per planned step, including `role`, `tool`,
+  stdout/stderr/exit code, HTTP response details when applicable, screenshot
+  path, outcome, failure reason, duration, and criteria evaluation details
 
 Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 

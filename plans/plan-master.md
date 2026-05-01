@@ -206,12 +206,32 @@ Resolution rules: variables are scoped to the run; later steps overwrite earlier
   "execution_log": [
     {
       "step_id": 1,
+      "role": "setup | trigger | verify",
       "action": "string",
+      "tool": "bash | http_request | screenshot | docker_exec",
       "stdout": "string",
       "stderr": "string",
       "exit_code": 0,
+      "http": {
+        "status_code": 200,
+        "body": "string | null",
+        "headers": {}
+      },
       "screenshot_path": "string | null",
       "outcome": "pass | fail | skip",
+      "reason": "string | null",
+      "criteria_evaluation": {
+        "passed": true,
+        "assertions": [
+          {
+            "type": "status_code",
+            "passed": true,
+            "actual": 200,
+            "expected": 200,
+            "message": "string"
+          }
+        ]
+      },
       "duration_ms": 0
     }
   ],
