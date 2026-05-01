@@ -214,13 +214,30 @@ The agent sends a `ReproductionPlan` JSON to the `plan_ready` channel. See the m
         "body": { "Name": "TestLib", "CollectionType": "movies", "Paths": ["/media"] }
       },
       "expected_outcome": "HTTP 204; library scan triggered",
-      "success_criteria": { "all_of": [ { "type": "status_code", "equals": 204 } ] },
+      "success_criteria": { "all_of": [ { "type": "status_code", "equals": 204 } ] }
+    },
+    {
+      "step_id": 2,
+      "action": "Query the library and capture the generated Jellyfin item ID",
+      "role": "setup",
+      "tool": "http_request",
+      "input": {
+        "method": "GET",
+        "path": "/Items?Recursive=true&IncludeItemTypes=Movie"
+      },
+      "expected_outcome": "HTTP 200 with the generated test media listed",
+      "success_criteria": {
+        "all_of": [
+          { "type": "status_code", "equals": 200 },
+          { "type": "body_contains", "value": "test.mkv" }
+        ]
+      },
       "capture": {
         "item_id": { "from": "body_json_path", "path": "$.Items[0].Id" }
       }
     },
     {
-      "step_id": 2,
+      "step_id": 3,
       "action": "Request playback info for the HEVC item to trigger transcoding decision",
       "role": "trigger",
       "tool": "http_request",
