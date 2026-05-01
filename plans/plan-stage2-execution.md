@@ -90,6 +90,12 @@ A `run_id` (UUID) for artifact namespacing.
    - Create host volume directories
 4. Start the Jellyfin container using `docker_manager.start()`
 5. Wait for Jellyfin to become healthy: poll `GET /health` up to 60s
+6. Complete the first-run StartupWizard so an admin account exists:
+   - `POST /Startup/Configuration` with `{ "UICulture": "en-US", "MetadataCountryCode": "US", "PreferredMetadataLanguage": "en" }`
+   - `POST /Startup/User` with `{ "Name": "admin", "Password": "admin" }`
+   - `POST /Startup/RemoteAccess` with `{ "EnableRemoteAccess": true, "EnableAutomaticPortMapping": false }`
+   - `POST /Startup/Complete` (no body)
+   This sequence is unconditional. If the wizard endpoints return 403/404 the server has already been provisioned (e.g. mounted config volume), so skip silently and proceed.
 
 ### Phase 2: Step Execution
 For each step in `reproduction_steps`, in order:
@@ -215,6 +221,12 @@ Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 #   Posts to /Users/AuthenticateByName
 #   Returns {token, user_id, success: bool}
 #   Stores token for subsequent requests
+
+# jellyfin_api.complete_startup_wizard(admin_user: str = "admin",
+#                                      admin_password: str = "admin") -> dict
+#   Drives /Startup/Configuration, /Startup/User, /Startup/RemoteAccess, /Startup/Complete.
+#   Idempotent: returns {already_provisioned: True} if endpoints reject as already-completed.
+#   Returns {provisioned: bool, already_provisioned: bool, elapsed_s: float}
 ```
 
 **Implementation Notes:**
