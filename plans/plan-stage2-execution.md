@@ -190,8 +190,10 @@ Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 # docker_manager.pull(image: str) -> dict
 #   Pulls image, returns {image, digest, size_mb}
 
-# docker_manager.start(image: str, ports: dict, volumes: list, env_vars: dict, name: str) -> dict
-#   Starts container, returns {container_id, name, status}
+# docker_manager.start(image: str, ports: dict, volumes: list, env_vars: dict, run_id: str) -> dict
+#   Starts container with name = f"jf-test-{run_id[:8]}" so concurrent runs
+#   never collide on the Docker container-name namespace.
+#   Returns {container_id, name, status}
 
 # docker_manager.exec(container_id: str, command: str, timeout_s: int = 120) -> dict
 #   Runs command inside container, returns {stdout, stderr, exit_code, duration_ms}
@@ -335,6 +337,7 @@ artifacts/<run_id>/
 | Container exits before all steps | Mark remaining steps `skip`; collect available logs; set `inconclusive` |
 | Step timeout | Mark step `fail` with `"timeout"` reason; continue |
 | Port 8096 already in use | `docker_manager.start()` tries ports 8097, 8098; updates `jellyfin_api` base URL |
+| Container name collision (concurrent runs) | Names are derived from `run_id` (`jf-test-<run_id[:8]>`), so collisions are statistically excluded; if a stale container with the same name exists, `start()` removes it first |
 | No Playwright available | Steps with `tool: "screenshot"` log warning, save `null` path, continue |
 | Media generation fails (no ffmpeg) | Mark prerequisite as failed in result; continue if step is still attempted |
 
