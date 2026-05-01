@@ -292,3 +292,13 @@ jellyfin-auto-tester-kt/
 - **Maintainer specifies version.** Docker image version is always a human-provided input, never inferred by the agent, to avoid false reproductions against wrong versions.
 - **Artifacts are stored locally.** All screenshots, logs, and outputs land in `/artifacts/<run-uuid>/` so every run is independently reviewable.
 - **Channel-based decoupling.** Stages communicate via KohakuTerrarium queue channels, not direct function calls, so each stage can be run and debugged independently.
+
+## Channel Consumers
+
+| Channel | Producer | Consumer |
+|---|---|---|
+| `plan_ready` | analysis_agent | execution_agent (auto-trigger) |
+| `execution_done` | execution_agent | report_agent (auto-trigger) |
+| `verification_request` | report_agent | execution_agent (auto-trigger) |
+| `final_report` | report_agent | `main.py` CLI prints the report path; no agent listens |
+| `human_review_queue` | report_agent | **No automated consumer.** Inspect manually with `kt channel inspect human_review_queue` (or read the appended JSONL at `artifacts/human_review_queue.jsonl`). v1 keeps the human in the loop deliberately. |
