@@ -132,6 +132,9 @@ Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 
 ## Rules
 - Never modify the ReproductionPlan steps. Execute them exactly as written.
+- Stage 2 exclusively owns container lifecycle. If a step's `input.command` contains
+  `docker run`, `docker pull`, or `docker start`, skip it with a warning logged to
+  `docker_ops.log` and mark it `skip`. Container setup has already been done in Phase 1.
 - Enforce a per-step timeout of 120 seconds. Steps exceeding this are marked `fail` with
   reason "timeout".
 - If the container exits unexpectedly, mark all remaining steps `skip` and set

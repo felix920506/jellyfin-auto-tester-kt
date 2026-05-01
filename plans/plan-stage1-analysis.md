@@ -102,11 +102,18 @@ Do not proceed to plan generation.
 
 ### Step 5: Emit the ReproductionPlan
 Produce a valid JSON object conforming to the ReproductionPlan schema (see schemas/reproduction_plan.json).
+
+**Steps begin after the container is already healthy.** Stage 2 unconditionally handles
+pulling the image, starting the container, and waiting for `/health`. Never include steps
+like "pull image", "docker run", "start Jellyfin", or "wait for health" in
+`reproduction_steps`—they will be executed a second time and cause port conflicts or
+duplicate containers.
+
 Each step must have a `tool` field specifying how Stage 2 should execute it:
-- `"bash"` — shell command against the running container or host
+- `"bash"` — shell command on the host (e.g. file preparation, ffmpeg)
 - `"http_request"` — HTTP call to the Jellyfin API or web UI
 - `"screenshot"` — capture browser state at this step
-- `"docker_exec"` — command inside the container
+- `"docker_exec"` — command inside the already-running container
 
 Send the plan to the `plan_ready` channel using `send_message`.
 Emit REPRODUCTION_PLAN_COMPLETE to terminate.
@@ -189,11 +196,29 @@ The agent sends a `ReproductionPlan` JSON to the `plan_ready` channel. See the m
   "reproduction_steps": [
     {
       "step_id": 1,
-      "action": "Start Jellyfin container",
-      "tool": "bash",
-      "input": { "command": "docker run -d --name jf-test -p 8096:8096 jellyfin/jellyfin:10.9.7" },
-      "expected_outcome": "Container starts, HTTP 200 on /health",
-      "success_criteria": "curl -s http://localhost:8096/health returns 'Healthy'"
+      "action": "Add H.265 10-bit test file to the media library via the API",
+      "role": "setup",
+      "tool": "http_request",
+      "input": {
+        "method": "POST",
+        "path": "/Library/Media/VirtualFolders",
+        "body": { "Name": "TestLib", "CollectionType": "movies", "Paths": ["/media"] }
+      },
+      "expected_outcome": "HTTP 204; library scan triggered",
+      "success_criteria": "GET /Library/VirtualFolders returns entry with Name=TestLib"
+    },
+    {
+      "step_id": 2,
+      "action": "Request playback info for the HEVC item to trigger transcoding decision",
+      "role": "trigger",
+      "tool": "http_request",
+      "input": {
+        "method": "POST",
+        "path": "/Items/{item_id}/PlaybackInfo",
+        "body": { "DeviceProfile": { "MaxStreamingBitrate": 2000000 } }
+      },
+      "expected_outcome": "HTTP 500 or TranscodingInfo.IsVideoDirect=false with error in logs",
+      "success_criteria": "Response body contains 'Transcoding failed' or server log contains 'HEVC decode error'"
     }
   ],
   "confidence": "high",
