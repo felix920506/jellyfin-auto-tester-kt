@@ -235,7 +235,7 @@ jellyfin-auto-tester-kt/
 | Docker pull fails | Execution Agent retries 3×; if unavailable, reports clearly |
 | Reproduction is environment-dependent | Execution Agent captures full `docker inspect` + system info |
 | Verification loop fails | Report Agent routes to `human_review_queue`; does not re-loop a second time |
-| Container hangs | Execution Agent enforces per-step timeouts via subprocess with `timeout` |
+| Container hangs | Execution Agent enforces per-step timeouts via `docker_manager.exec(timeout_s=120)`; the Docker SDK raises `APIError` on expiry, which marks the step `fail` and triggers teardown |
 
 ---
 
