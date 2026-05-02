@@ -39,6 +39,22 @@ supply provider auth instead of relying on KohakuTerrarium's saved login store.
 .venv/bin/python main.py https://github.com/jellyfin/jellyfin/issues/XXXX 10.9.7
 ```
 
+## Transcript Viewer
+
+The repository includes a standalone web application to view execution transcripts:
+
+1. Open `transcript-viewer/index.html` in a web browser.
+2. Click **"Select Debug Folder"** and choose the `debug/` directory.
+3. Select a transcript from the sidebar to view the conversation and tool calls.
+
+## Running Tests
+
+Tests use the standard library `unittest` framework:
+
+```bash
+.venv/bin/python -m unittest discover tests
+```
+
 The entrypoint loads `terrarium.yaml`, starts the Stage 1 analysis agent, lets
 the channel topology drive execution and reporting, then prints either the final
 report path or the human-review queue result. LLM transcripts are written to the
