@@ -350,15 +350,25 @@ async def run_issue(
     _apply_default_execution_budget(engine)
 
     terminal_task = asyncio.create_task(_wait_for_terminal_message(engine))
+    plan_observer_task = _create_channel_observer_task(engine, "plan_ready")
+    if plan_observer_task is not None:
+        await asyncio.sleep(0)
     analysis_output: list[str] = []
+    chat_task: asyncio.Task[None] | None = None
     try:
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
         analysis_agent = _get_agent(engine, "analysis_agent")
         _suppress_default_output(analysis_agent)
         logger.info("Starting Stage 1 analysis")
-        async for chunk in _chat(analysis_agent, prompt):
-            text = _chunk_text(chunk)
-            analysis_output.append(text)
+        chat_task = asyncio.create_task(
+            _collect_analysis_chat(analysis_agent, prompt, analysis_output)
+        )
+
+        await _wait_for_analysis_completion_signal(
+            chat_task=chat_task,
+            plan_observer_task=plan_observer_task,
+            analysis_agent=analysis_agent,
+        )
 
         transcript = "".join(analysis_output)
         if _is_insufficient_information(transcript):
@@ -386,6 +396,12 @@ async def run_issue(
             _print_terminal_summary(result, stream)
         return result
     except BaseException:
+        if chat_task is not None and not chat_task.done():
+            chat_task.cancel()
+            await _cancel_task(chat_task)
+        if plan_observer_task is not None and not plan_observer_task.done():
+            plan_observer_task.cancel()
+            await _cancel_task(plan_observer_task)
         terminal_task.cancel()
         await _cancel_task(terminal_task)
         raise
@@ -431,7 +447,9 @@ async def run_analysis_stage(
 
     engine = await _load_stage_engine("analysis", engine_factory=engine_factory)
     plan_task = asyncio.create_task(_receive_channel_message(engine, "plan_ready"))
+    await asyncio.sleep(0)
     transcript_parts: list[str] = []
+    chat_task: asyncio.Task[None] | None = None
     try:
         analysis_agent = _get_agent(engine, "analysis_agent")
         transcript_capture_state = _install_transcript_output(analysis_agent)
@@ -441,14 +459,39 @@ async def run_analysis_stage(
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
         system_prompt = _agent_system_prompt_text(analysis_agent)
         logger.info("Capturing Stage 1 analysis transcript")
+        channel_plan: dict[str, Any] | None = None
         try:
-            async for chunk in _chat(analysis_agent, prompt):
-                text = _chunk_text(chunk)
-                if transcript_capture is None or not transcript_capture.has_text:
-                    transcript_parts.append(text)
+            chat_task = asyncio.create_task(
+                _collect_analysis_chat(
+                    analysis_agent,
+                    prompt,
+                    transcript_parts,
+                    transcript_capture=transcript_capture,
+                )
+            )
+            done, _pending = await asyncio.wait(
+                {chat_task, plan_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if plan_task in done:
+                channel_plan, _channel_error = _completed_channel_plan(
+                    plan_task,
+                    issue_url=issue_url,
+                    container_version=container_version,
+                    issue_thread=issue_thread,
+                )
+                await _stop_analysis_agent(analysis_agent)
+                if not chat_task.done():
+                    chat_task.cancel()
+                    await _cancel_task(chat_task)
+            else:
+                await chat_task
             if transcript_capture is not None:
                 await transcript_capture.flush()
         finally:
+            if chat_task is not None and not chat_task.done():
+                chat_task.cancel()
+                await _cancel_task(chat_task)
             _restore_transcript_output(transcript_capture_state)
 
         captured_transcript = transcript_capture.text if transcript_capture is not None else ""
@@ -488,14 +531,17 @@ async def run_analysis_stage(
                 )
             )
 
-        plan, plan_source = await _resolve_analysis_stage_plan(
-            plan_task,
-            transcript,
-            issue_url=issue_url,
-            container_version=container_version,
-            issue_thread=issue_thread,
-            timeout_s=timeout_s,
-        )
+        plan = channel_plan
+        plan_source = "channel" if channel_plan is not None else None
+        if plan is None:
+            plan, plan_source = await _resolve_analysis_stage_plan(
+                plan_task,
+                transcript,
+                issue_url=issue_url,
+                container_version=container_version,
+                issue_thread=issue_thread,
+                timeout_s=timeout_s,
+            )
         if plan is None:
             logger.warning(
                 "Stage 1 debug run completed without a plan_ready channel message "
@@ -1279,6 +1325,26 @@ async def _receive_channel_message(engine: Any, channel_name: str) -> tuple[str,
     return channel_name, _unwrap_message(message)
 
 
+def _create_channel_observer_task(
+    engine: Any,
+    channel_name: str,
+) -> asyncio.Task[tuple[str, Any]] | None:
+    try:
+        source = _channel_observe_source(engine, channel_name)
+    except RuntimeError:
+        _logger().debug("Channel %s cannot be observed without consuming it", channel_name)
+        return None
+    return asyncio.create_task(_first_observed_channel_message(channel_name, source))
+
+
+async def _first_observed_channel_message(
+    channel_name: str,
+    source: Any,
+) -> tuple[str, Any]:
+    message = await _first_message(source)
+    return channel_name, _unwrap_message(message)
+
+
 async def _observe_channel_send(channel: Any) -> Any:
     queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1)
     loop = asyncio.get_running_loop()
@@ -1306,6 +1372,13 @@ async def _observe_channel_send(channel: Any) -> Any:
             remove = getattr(channel, "remove_on_send", None)
             if callable(remove):
                 remove(callback)
+
+
+def _channel_observe_source(engine: Any, channel_name: str) -> Any:
+    channel = _get_channel(engine, channel_name)
+    if channel is not None and callable(getattr(channel, "on_send", None)):
+        return _observe_channel_send(channel)
+    raise RuntimeError(f"{channel_name!r} channel cannot be observed")
 
 
 def _channel_receive_source(engine: Any, channel_name: str) -> Any:
@@ -1590,6 +1663,68 @@ def _analysis_transcript_payload(
         },
         "messages": messages,
     }
+
+
+async def _collect_analysis_chat(
+    agent: Any,
+    prompt: str,
+    transcript_parts: list[str],
+    *,
+    transcript_capture: "_TranscriptOutput | None" = None,
+) -> None:
+    async for chunk in _chat(agent, prompt):
+        text = _chunk_text(chunk)
+        if transcript_capture is None or not transcript_capture.has_text:
+            transcript_parts.append(text)
+
+
+async def _wait_for_analysis_completion_signal(
+    *,
+    chat_task: asyncio.Task[None],
+    plan_observer_task: asyncio.Task[tuple[str, Any]] | None,
+    analysis_agent: Any,
+) -> None:
+    if plan_observer_task is None:
+        await chat_task
+        return
+
+    done, _pending = await asyncio.wait(
+        {chat_task, plan_observer_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if plan_observer_task in done:
+        try:
+            plan_observer_task.result()
+        except Exception as exc:
+            _logger().debug("plan_ready observer failed: %s", exc)
+            if not chat_task.done():
+                await chat_task
+            return
+
+        _logger().info("Observed plan_ready; stopping Stage 1 analysis")
+        await _stop_analysis_agent(analysis_agent)
+        if not chat_task.done():
+            chat_task.cancel()
+            await _cancel_task(chat_task)
+        return
+
+    await chat_task
+    if not plan_observer_task.done():
+        plan_observer_task.cancel()
+        await _cancel_task(plan_observer_task)
+
+
+async def _stop_analysis_agent(creature_or_agent: Any) -> None:
+    for target in (creature_or_agent, getattr(creature_or_agent, "agent", None)):
+        if target is None:
+            continue
+        stop = getattr(target, "stop", None)
+        if callable(stop):
+            try:
+                await _maybe_await(stop())
+            except Exception as exc:
+                _logger().debug("Failed to stop analysis agent: %s", exc)
+            return
 
 
 async def _chat(agent: Any, prompt: str):

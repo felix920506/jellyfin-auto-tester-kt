@@ -98,6 +98,25 @@ class ConversationOnlyAnalysisAgent:
             yield ""
 
 
+class PlanReadyThenHangingAnalysisAgent:
+    def __init__(self, plan_channel, plan):
+        self.plan_channel = plan_channel
+        self.plan = plan
+        self.prompts = []
+        self.cancelled = False
+
+    async def chat(self, prompt):
+        self.prompts.append(prompt)
+        self.plan_channel.send(self.plan)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        if False:
+            yield ""
+
+
 class FakeMessage:
     def __init__(self, content):
         self.content = content
@@ -171,7 +190,8 @@ class FakeGraphEngine:
 
 
 class FakeOnSendChannel:
-    def __init__(self):
+    def __init__(self, channel_name="final_report"):
+        self.channel_name = channel_name
         self.callbacks = []
 
     def on_send(self, callback):
@@ -182,7 +202,7 @@ class FakeOnSendChannel:
 
     def send(self, message):
         for callback in list(self.callbacks):
-            callback("final_report", {"content": message})
+            callback(self.channel_name, {"content": message})
 
 
 class FakeStage2Runner:
@@ -497,6 +517,36 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(events[:2], ["issue_fetch", "engine_load"])
+
+    async def test_run_issue_treats_plan_ready_as_analysis_completion(self):
+        plan_channel = FakeOnSendChannel("plan_ready")
+        payload = {"report_path": "/tmp/artifacts/run-1/report.md"}
+        analysis_agent = PlanReadyThenHangingAnalysisAgent(
+            plan_channel,
+            _sample_plan(),
+        )
+        engine = FakeEngine(
+            [],
+            channels={
+                "plan_ready": plan_channel,
+                "final_report": FakeChannel({"content": payload}),
+            },
+            analysis_agent=analysis_agent,
+        )
+
+        result = await asyncio.wait_for(
+            run_issue(
+                "https://github.com/jellyfin/jellyfin/issues/1",
+                "10.9.7",
+                stream=None,
+                engine_factory=lambda recipe: engine,
+                issue_fetcher=_sample_issue_fetcher,
+            ),
+            timeout=1,
+        )
+
+        self.assertEqual(result.status, "complete")
+        self.assertTrue(analysis_agent.cancelled)
 
     async def test_run_issue_stops_on_insufficient_information(self):
         engine = FakeEngine(["INSUFFICIENT_INFORMATION\nmissing steps\n"])

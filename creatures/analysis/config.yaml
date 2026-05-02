@@ -35,5 +35,5 @@ compact:
   strategy: "summarize"
 
 termination:
-  keywords: ["REPRODUCTION_PLAN_COMPLETE", "INSUFFICIENT_INFORMATION"]
+  keywords: ["INSUFFICIENT_INFORMATION"]
   max_turns: 25

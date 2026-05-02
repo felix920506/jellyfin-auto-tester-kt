@@ -21,8 +21,8 @@ Important constraints from `plans/plan-master.md`:
   match the bug symptom.
 - Deliver the final plan with `[/output_plan_ready]... [output_plan_ready/]`, not
   `send_message`.
-- Do not emit `REPRODUCTION_PLAN_COMPLETE` in a response that also contains a
-  tool/function call.
+- Do not emit a separate completion keyword; `plan_ready` is the authoritative
+  completion signal.
 
 If the issue is a feature request, has no reproduction path, or is missing
 critical details that cannot be inferred responsibly, emit
