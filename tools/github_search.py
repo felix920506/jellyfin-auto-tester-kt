@@ -12,6 +12,9 @@ from typing import Any
 
 from github import Auth, Github, GithubException
 from kohakuterrarium.modules.tool.base import BaseTool, ExecutionMode, ToolResult
+from kohakuterrarium.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 USER_AGENT = "jellyfin-auto-tester-stage1"
 
@@ -125,19 +128,54 @@ class GitHubSearchTool(BaseTool):
         return ExecutionMode.DIRECT
 
     async def _execute(self, args: dict[str, Any], **kwargs: Any) -> ToolResult:
+        logger.debug("github_search invoked", args=args, kwargs_keys=list(kwargs))
         query = args.get("query", "")
         if not query:
+            logger.debug(
+                "github_search rejected: missing query",
+                arg_keys=list(args.keys()),
+            )
             return ToolResult(
                 error="No query provided. Usage: github_search(query='repo:owner/name is:issue ...')"
             )
         kind = args.get("kind", "issues")
         max_results = int(args.get("max_results", 10))
 
+        token_present = bool(os.getenv("GITHUB_TOKEN"))
+        logger.debug(
+            "github_search calling PyGithub",
+            query=query,
+            kind=kind,
+            max_results=max_results,
+            github_token_present=token_present,
+        )
         try:
             payload = github_search(query=query, kind=kind, max_results=max_results)
         except (ValueError, GithubException) as exc:
+            logger.debug(
+                "github_search failed",
+                exc_type=type(exc).__name__,
+                error=str(exc),
+                query=query,
+                kind=kind,
+            )
             return ToolResult(error=f"github_search failed: {exc}")
+        except Exception as exc:
+            logger.exception(
+                "github_search crashed unexpectedly",
+                exc_type=type(exc).__name__,
+                query=query,
+                kind=kind,
+            )
+            return ToolResult(error=f"github_search crashed: {type(exc).__name__}: {exc}")
 
+        logger.debug(
+            "github_search succeeded",
+            query=query,
+            kind=kind,
+            total_count=payload.get("total_count"),
+            returned=len(payload.get("items", [])),
+        )
         return ToolResult(
             output=json.dumps(payload, ensure_ascii=False, indent=2),
             exit_code=0,

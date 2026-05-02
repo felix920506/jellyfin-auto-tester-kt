@@ -13,6 +13,9 @@ from typing import Any
 
 from github import Auth, Github, GithubException, UnknownObjectException
 from kohakuterrarium.modules.tool.base import BaseTool, ExecutionMode, ToolResult
+from kohakuterrarium.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 USER_AGENT = "jellyfin-auto-tester-stage1"
 
@@ -246,14 +249,27 @@ class GitHubFetcherTool(BaseTool):
         return ExecutionMode.DIRECT
 
     async def _execute(self, args: dict[str, Any], **kwargs: Any) -> ToolResult:
+        logger.debug("github_fetcher invoked", args=args, kwargs_keys=list(kwargs))
         issue_url = args.get("issue_url", "")
         if not issue_url:
+            logger.debug(
+                "github_fetcher rejected: missing issue_url",
+                arg_keys=list(args.keys()),
+            )
             return ToolResult(
                 error="No issue_url provided. Usage: github_fetcher(issue_url='https://github.com/<owner>/<repo>/issues/<n>')"
             )
         include_comments = bool(args.get("include_comments", True))
         include_linked = bool(args.get("include_linked", True))
 
+        token_present = bool(os.getenv("GITHUB_TOKEN"))
+        logger.debug(
+            "github_fetcher calling PyGithub",
+            issue_url=issue_url,
+            include_comments=include_comments,
+            include_linked=include_linked,
+            github_token_present=token_present,
+        )
         try:
             payload = github_fetcher(
                 issue_url=issue_url,
@@ -261,8 +277,28 @@ class GitHubFetcherTool(BaseTool):
                 include_linked=include_linked,
             )
         except (ValueError, GithubException, UnknownObjectException) as exc:
+            logger.debug(
+                "github_fetcher failed",
+                exc_type=type(exc).__name__,
+                error=str(exc),
+                issue_url=issue_url,
+            )
             return ToolResult(error=f"github_fetcher failed: {exc}")
+        except Exception as exc:
+            logger.exception(
+                "github_fetcher crashed unexpectedly",
+                exc_type=type(exc).__name__,
+                issue_url=issue_url,
+            )
+            return ToolResult(error=f"github_fetcher crashed: {type(exc).__name__}: {exc}")
 
+        logger.debug(
+            "github_fetcher succeeded",
+            issue_url=issue_url,
+            comments=len(payload.get("comments", [])),
+            linked_issues=len(payload.get("linked_issues", [])),
+            linked_prs=len(payload.get("linked_prs", [])),
+        )
         return ToolResult(
             output=json.dumps(payload, ensure_ascii=False, indent=2),
             exit_code=0,
