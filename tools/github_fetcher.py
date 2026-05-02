@@ -254,14 +254,18 @@ class GitHubFetcherTool(BaseTool):
 
     async def _execute(self, args: dict[str, Any], **kwargs: Any) -> ToolResult:
         logger.debug("github_fetcher invoked", tool_args=args, kwargs_keys=list(kwargs))
-        issue_url = args.get("issue_url", "")
+        issue_url = args.get("issue_url") or args.get("url", "")
         if not issue_url:
             logger.debug(
                 "github_fetcher rejected: missing issue_url",
                 arg_keys=list(args.keys()),
             )
             return ToolResult(
-                error="No issue_url provided. Usage: github_fetcher(issue_url='https://github.com/<owner>/<repo>/issues/<n>')"
+                error=(
+                    "No issue_url provided. Usage: "
+                    "github_fetcher(issue_url='https://github.com/<owner>/<repo>/issues/<n>') "
+                    "or github_fetcher(url='https://github.com/<owner>/<repo>/pull/<n>')"
+                )
             )
         include_comments = bool(args.get("include_comments", True))
         include_linked = bool(args.get("include_linked", True))

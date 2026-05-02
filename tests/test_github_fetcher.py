@@ -194,6 +194,24 @@ class GitHubFetcherTests(unittest.TestCase):
 
         self.assertIn("No issue_url provided", result.error)
 
+    def test_tool_accepts_url_alias(self):
+        payload = {"comments": [], "linked_issues": [], "linked_prs": []}
+
+        with patch.object(fetcher, "github_fetcher", return_value=payload) as github_fetcher:
+            result = asyncio.run(
+                fetcher.GitHubFetcherTool()._execute(
+                    {"url": "https://github.com/jellyfin/jellyfin-web/pull/7328"}
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.exit_code, 0)
+        github_fetcher.assert_called_once_with(
+            issue_url="https://github.com/jellyfin/jellyfin-web/pull/7328",
+            include_comments=True,
+            include_linked=True,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
