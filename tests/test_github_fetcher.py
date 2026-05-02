@@ -68,6 +68,88 @@ class _FakeDiscussion:
         return list(self._comments)
 
 
+class _FakeContent:
+    def __init__(
+        self,
+        *,
+        path="",
+        name="",
+        decoded_content=b"",
+        content_type="file",
+        size=None,
+        html_url="",
+        download_url="",
+        encoding="base64",
+    ):
+        self.path = path
+        self.name = name
+        self.decoded_content = decoded_content
+        self.type = content_type
+        self.size = size
+        self.html_url = html_url
+        self.download_url = download_url
+        self.encoding = encoding
+
+
+class _FakeCommitActor:
+    def __init__(self, name="", date=None):
+        self.name = name
+        self.date = date
+
+
+class _FakeCommitData:
+    def __init__(self, message="", author=None, committer=None):
+        self.message = message
+        self.author = author
+        self.committer = committer
+
+
+class _FakeCommitFile:
+    def __init__(
+        self,
+        *,
+        filename="",
+        status="modified",
+        additions=0,
+        deletions=0,
+        changes=0,
+        patch="",
+    ):
+        self.filename = filename
+        self.status = status
+        self.additions = additions
+        self.deletions = deletions
+        self.changes = changes
+        self.patch = patch
+
+
+class _FakeCommit:
+    def __init__(
+        self,
+        *,
+        sha="",
+        message="",
+        html_url="",
+        author_login=None,
+        committer_login=None,
+        created_at=None,
+        comments=(),
+        files=(),
+    ):
+        self.sha = sha
+        self.html_url = html_url
+        self.author = _FakeUser(author_login) if author_login else None
+        self.committer = _FakeUser(committer_login) if committer_login else None
+        actor = _FakeCommitActor(author_login or "", created_at)
+        committer = _FakeCommitActor(committer_login or "", created_at)
+        self.commit = _FakeCommitData(message, author=actor, committer=committer)
+        self._comments = list(comments)
+        self.files = list(files)
+
+    def get_comments(self):
+        return list(self._comments)
+
+
 class _FakeIssue:
     def __init__(
         self,
@@ -102,10 +184,24 @@ class _FakePull:
 
 
 class _FakeRepo:
-    def __init__(self, issues, pulls=None, discussions=None):
+    def __init__(
+        self,
+        issues,
+        pulls=None,
+        discussions=None,
+        commits=None,
+        contents=None,
+    ):
         self._issues = issues
         self._pulls = pulls or {}
         self._discussions = discussions or {}
+        self._commits = commits or {}
+        self._contents = contents or {}
+        self.html_url = "https://github.com/jellyfin/jellyfin"
+        self.full_name = "jellyfin/jellyfin"
+        self.description = ""
+        self.default_branch = "main"
+        self.open_issues_count = 0
 
     def get_issue(self, number):
         if number not in self._issues:
@@ -119,6 +215,17 @@ class _FakeRepo:
         if number not in self._discussions:
             raise GithubException(404, {"message": "Not Found"}, None)
         return self._discussions[number]
+
+    def get_commit(self, sha):
+        if sha not in self._commits:
+            raise GithubException(404, {"message": "Not Found"}, None)
+        return self._commits[sha]
+
+    def get_contents(self, path, ref=None):
+        key = (ref or "", path)
+        if key not in self._contents:
+            raise GithubException(404, {"message": "Not Found"}, None)
+        return self._contents[key]
 
 
 class _FakeClient:
@@ -295,6 +402,98 @@ class GitHubFetcherTests(unittest.TestCase):
             ],
         )
 
+    def test_target_issue_url_falls_back_to_discussion(self):
+        discussion = _FakeDiscussion(
+            number=7328,
+            title="LG Smart TV profile",
+            category="Troubleshooting",
+            url="https://github.com/jellyfin/jellyfin/discussions/7328",
+        )
+        repo = _FakeRepo(issues={}, discussions={7328: discussion})
+        client = _FakeClient({"jellyfin/jellyfin": repo})
+
+        with patch.object(fetcher, "_client", return_value=client):
+            result = fetcher.github_fetcher(
+                "https://github.com/jellyfin/jellyfin/issues/7328"
+            )
+
+        self.assertEqual(result["kind"], "discussion")
+        self.assertEqual(result["title"], "LG Smart TV profile")
+
+    def test_target_discussion_url_falls_back_to_issue(self):
+        issue = _FakeIssue(
+            title="Playback regression",
+            html_url="https://github.com/jellyfin/jellyfin/issues/10",
+        )
+        repo = _FakeRepo(issues={10: issue}, discussions={})
+        client = _FakeClient({"jellyfin/jellyfin": repo})
+
+        with patch.object(fetcher, "_client", return_value=client):
+            result = fetcher.github_fetcher(
+                "https://github.com/jellyfin/jellyfin/discussions/10"
+            )
+
+        self.assertEqual(result["kind"], "issue")
+        self.assertEqual(result["title"], "Playback regression")
+
+    def test_github_fetcher_fetches_code_url(self):
+        content = _FakeContent(
+            path="README.md",
+            name="README.md",
+            decoded_content=b"first\nsecond\nthird\n",
+            size=19,
+            html_url="https://github.com/jellyfin/jellyfin/blob/main/README.md",
+        )
+        repo = _FakeRepo(issues={}, contents={("main", "README.md"): content})
+        client = _FakeClient({"jellyfin/jellyfin": repo})
+
+        with patch.object(fetcher, "_client", return_value=client):
+            result = fetcher.github_fetcher(
+                "https://github.com/jellyfin/jellyfin/blob/main/README.md#L2"
+            )
+
+        self.assertEqual(result["kind"], "file")
+        self.assertEqual(result["path"], "README.md")
+        self.assertEqual(result["content"], "first\nsecond\nthird\n")
+        self.assertEqual(result["line_start"], 2)
+        self.assertEqual(result["selected_content"], "second")
+
+    def test_github_fetcher_fetches_commit_url(self):
+        created = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        commit = _FakeCommit(
+            sha="abc123",
+            message="Fix playback regression\n\nRefs #10",
+            html_url="https://github.com/jellyfin/jellyfin/commit/abc123",
+            author_login="maintainer",
+            committer_login="committer",
+            created_at=created,
+            comments=[_FakeComment("Ship it", created, "reviewer")],
+            files=[
+                _FakeCommitFile(
+                    filename="src/playback.py",
+                    additions=2,
+                    deletions=1,
+                    changes=3,
+                    patch="@@ patch",
+                )
+            ],
+        )
+        repo = _FakeRepo(issues={}, commits={"abc123": commit})
+        client = _FakeClient({"jellyfin/jellyfin": repo})
+
+        with patch.object(fetcher, "_client", return_value=client):
+            result = fetcher.github_fetcher(
+                "https://github.com/jellyfin/jellyfin/commit/abc123",
+                include_linked=False,
+            )
+
+        self.assertEqual(result["kind"], "commit")
+        self.assertEqual(result["title"], "Fix playback regression")
+        self.assertEqual(result["author"], "maintainer")
+        self.assertEqual(result["created_at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(result["comments"][0]["body"], "Ship it")
+        self.assertEqual(result["files"][0]["filename"], "src/playback.py")
+
     def test_linked_item_falls_back_to_discussion_after_issue_404(self):
         target = _FakeIssue(
             title="Playback regression",
@@ -340,9 +539,16 @@ class GitHubFetcherTests(unittest.TestCase):
         finally:
             fetcher.logger.setLevel(original_level)
 
-        self.assertIn("No issue_url provided", result.error)
+        self.assertIn("No url provided", result.error)
 
-    def test_tool_accepts_url_alias(self):
+    def test_tool_schema_declares_url_parameter_only(self):
+        schema = fetcher.GitHubFetcherTool().get_parameters_schema()
+
+        self.assertEqual(schema["required"], ["url"])
+        self.assertIn("url", schema["properties"])
+        self.assertNotIn("issue_url", schema["properties"])
+
+    def test_tool_accepts_url_input(self):
         payload = {
             "comments": [],
             "linked_issues": [],
@@ -360,7 +566,29 @@ class GitHubFetcherTests(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertEqual(result.exit_code, 0)
         github_fetcher.assert_called_once_with(
-            issue_url="https://github.com/jellyfin/jellyfin-web/pull/7328",
+            url="https://github.com/jellyfin/jellyfin-web/pull/7328",
+            include_comments=True,
+            include_linked=True,
+        )
+
+    def test_tool_extracts_url_from_content_body(self):
+        payload = {
+            "comments": [],
+            "linked_issues": [],
+            "linked_prs": [],
+            "linked_discussions": [],
+        }
+
+        with patch.object(fetcher, "github_fetcher", return_value=payload) as github_fetcher:
+            result = asyncio.run(
+                fetcher.GitHubFetcherTool()._execute(
+                    {"content": "fetch https://github.com/jellyfin/jellyfin/issues/10."}
+                )
+            )
+
+        self.assertIsNone(result.error)
+        github_fetcher.assert_called_once_with(
+            url="https://github.com/jellyfin/jellyfin/issues/10",
             include_comments=True,
             include_linked=True,
         )

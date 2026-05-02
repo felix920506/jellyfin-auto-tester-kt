@@ -34,9 +34,10 @@ reproduction analysis.
   Example queries: `repo:jellyfin/jellyfin is:issue transcoding h265`,
   `repo:jellyfin/jellyfin-web is:pr subtitle rendering`.
 - For any GitHub URL (issues, pull requests, discussions, commits, code), always use
-  `github_fetcher` instead of `web_fetch`. `github_fetcher` returns structured
-  data and respects rate limits; `web_fetch` on GitHub URLs returns raw HTML and
-  should never be used for GitHub resources.
+  `github_fetcher` instead of `web_fetch`. Pass only `url`; do not specify an
+  issue/PR/discussion/code type. `github_fetcher` infers the resource type,
+  returns structured data, and respects rate limits; `web_fetch` on GitHub URLs
+  returns raw HTML and should never be used for GitHub resources.
 - Use `web_search` only for non-GitHub queries such as codec documentation,
   external bug trackers, or general Jellyfin community resources.
 - Fetch linked external resources such as logs, screenshots, and config files

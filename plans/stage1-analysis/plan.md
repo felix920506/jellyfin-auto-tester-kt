@@ -157,19 +157,19 @@ result, output only the tool call block and wait for the next turn.
 
 **File:** `creatures/analysis/tools/github_fetcher.py`
 
-**Purpose:** Wraps the GitHub REST API to retrieve structured issue data without HTML parsing.
+**Purpose:** Wraps the GitHub APIs to retrieve structured GitHub URL data without HTML parsing.
 
 **Interface:**
 
 ```python
 # Tool name: github_fetcher
 # Arguments:
-#   issue_url: str         — full GitHub issue URL
+#   url: str               — full github.com URL; type is inferred
 #   include_comments: bool — default True
 #   include_linked: bool   — default True (fetches linked PRs/issues/discussions)
 
 # Returns: dict with keys:
-#   title, body, labels, state, created_at, author
+#   kind, url, title/body/message/content fields as appropriate
 #   comments: list of {author, body, created_at}
 #   linked_issues: list of {url, title, state}
 #   linked_prs: list of {url, title, state, merged}
@@ -178,8 +178,8 @@ result, output only the tool call block and wait for the next turn.
 
 **Implementation Notes:**
 - Uses `GITHUB_TOKEN` env var if present (avoids rate limits)
-- Extracts issue number and repo from URL with regex
-- Calls `GET /repos/{owner}/{repo}/issues/{number}` and `/comments`
+- Infers issue, PR, discussion, commit, code file, directory, or repository from the URL
+- Retries issue/PR/discussion API shapes when a numbered URL path is wrong
 - For linked items: parses `closes #N`, `fixes #N`, `#N` references in body/comments
 - Returns plain dict; agent serializes to JSON in its reasoning
 

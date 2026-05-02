@@ -1035,24 +1035,44 @@ async def _prefetch_issue_thread(
     """Fetch the target GitHub issue before starting the analysis agent."""
 
     fetcher = issue_fetcher or _default_issue_fetcher()
+    fetcher_kwargs = _github_fetcher_kwargs(fetcher, issue_url)
     if issue_fetcher is None:
         issue_thread = await asyncio.to_thread(
             fetcher,
-            issue_url=issue_url,
-            include_comments=True,
-            include_linked=True,
+            **fetcher_kwargs,
         )
     else:
-        issue_thread = fetcher(
-            issue_url=issue_url,
-            include_comments=True,
-            include_linked=True,
-        )
+        issue_thread = fetcher(**fetcher_kwargs)
         issue_thread = await _maybe_await(issue_thread)
 
     if not isinstance(issue_thread, dict):
         raise TypeError("issue prefetcher must return a dictionary")
     return issue_thread
+
+
+def _github_fetcher_kwargs(
+    fetcher: Callable[..., Any],
+    issue_url: str,
+) -> dict[str, Any]:
+    url_key = "url"
+    try:
+        signature = inspect.signature(fetcher)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None:
+        parameters = signature.parameters.values()
+        accepts_url = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            or parameter.name == "url"
+            for parameter in parameters
+        )
+        if not accepts_url:
+            url_key = "issue_url"
+    return {
+        url_key: issue_url,
+        "include_comments": True,
+        "include_linked": True,
+    }
 
 
 def _default_issue_fetcher() -> Callable[..., Any]:
