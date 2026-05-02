@@ -6,11 +6,13 @@ and resolve issue/PR references found in the issue text.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any
 
 from github import Auth, Github, GithubException, UnknownObjectException
+from kohakuterrarium.modules.tool.base import BaseTool, ExecutionMode, ToolResult
 
 USER_AGENT = "jellyfin-auto-tester-stage1"
 
@@ -223,3 +225,45 @@ def _format_datetime(value: Any) -> str:
             return iso[:-6] + "Z"
         return iso
     return str(value)
+
+
+class GitHubFetcherTool(BaseTool):
+    """Fetch a GitHub issue or pull request along with comments and linked refs."""
+
+    @property
+    def tool_name(self) -> str:
+        return "github_fetcher"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Fetch a GitHub issue or pull request, paginate its comments, and "
+            "resolve referenced issues/PRs."
+        )
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        return ExecutionMode.DIRECT
+
+    async def _execute(self, args: dict[str, Any], **kwargs: Any) -> ToolResult:
+        issue_url = args.get("issue_url", "")
+        if not issue_url:
+            return ToolResult(
+                error="No issue_url provided. Usage: github_fetcher(issue_url='https://github.com/<owner>/<repo>/issues/<n>')"
+            )
+        include_comments = bool(args.get("include_comments", True))
+        include_linked = bool(args.get("include_linked", True))
+
+        try:
+            payload = github_fetcher(
+                issue_url=issue_url,
+                include_comments=include_comments,
+                include_linked=include_linked,
+            )
+        except (ValueError, GithubException, UnknownObjectException) as exc:
+            return ToolResult(error=f"github_fetcher failed: {exc}")
+
+        return ToolResult(
+            output=json.dumps(payload, ensure_ascii=False, indent=2),
+            exit_code=0,
+        )

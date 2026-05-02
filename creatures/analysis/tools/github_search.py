@@ -6,10 +6,12 @@ requests, and code without falling back to a generic web search.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
-from github import Auth, Github
+from github import Auth, Github, GithubException
+from kohakuterrarium.modules.tool.base import BaseTool, ExecutionMode, ToolResult
 
 USER_AGENT = "jellyfin-auto-tester-stage1"
 
@@ -102,3 +104,41 @@ def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "…"
+
+
+class GitHubSearchTool(BaseTool):
+    """Search GitHub for issues, pull requests, or code."""
+
+    @property
+    def tool_name(self) -> str:
+        return "github_search"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search GitHub for issues, pull requests, or code using the "
+            "GitHub Search API qualifier syntax."
+        )
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        return ExecutionMode.DIRECT
+
+    async def _execute(self, args: dict[str, Any], **kwargs: Any) -> ToolResult:
+        query = args.get("query", "")
+        if not query:
+            return ToolResult(
+                error="No query provided. Usage: github_search(query='repo:owner/name is:issue ...')"
+            )
+        kind = args.get("kind", "issues")
+        max_results = int(args.get("max_results", 10))
+
+        try:
+            payload = github_search(query=query, kind=kind, max_results=max_results)
+        except (ValueError, GithubException) as exc:
+            return ToolResult(error=f"github_search failed: {exc}")
+
+        return ToolResult(
+            output=json.dumps(payload, ensure_ascii=False, indent=2),
+            exit_code=0,
+        )
