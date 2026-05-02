@@ -70,8 +70,15 @@ model blocklist needs to change.
 
 ## Running Stages Individually
 
-The full pipeline remains channel-driven. For debugging, each stage can also be
-run with disk handoff folders:
+explicitly want this process environment to supply provider auth instead of
+relying on KohakuTerrarium's saved login store.
+
+### Key Environment Variables
+
+- `GITHUB_TOKEN`: Recommended to avoid GitHub API rate limits.
+- `JF_AUTO_TESTER_LOG_LEVEL`: Controls logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
+- `JF_AUTO_TESTER_LOG_STDERR`: Controls whether logs are mirrored to stderr (`on`, `off`, `auto`).
+- `JF_AUTO_TESTER_BROWSER_HEADLESS`: Controls browser visibility in Stage 2 (`true`, `false`, `auto`).
 
 ```bash
 .venv/bin/python main.py --stage analysis \
@@ -87,10 +94,11 @@ run with disk handoff folders:
   --out debug/stage3
 ```
 
-Stage 1 writes `transcript.json` and `plan.json`, Stage 2 reads `plan.json`
-and writes `result.json`, and Stage 3 reads `result.json` and writes `report.md` plus
-`verification_plan.json`. To debug the verification pass, feed that plan back
-through Stage 2 and then finalize the report:
+- **Stage 1 (Analysis)** writes `transcript.json` and `reproduction_plan.json`.
+- **Stage 2 (Execution)** reads `reproduction_plan.json` and writes `execution_result.json`.
+- **Stage 3 (Report)** reads `execution_result.json` and writes `report.md` plus `verification_plan.json`.
+
+To debug the verification pass, feed that plan back through Stage 2 and then finalize the report:
 
 ```bash
 .venv/bin/python main.py --stage execution \
