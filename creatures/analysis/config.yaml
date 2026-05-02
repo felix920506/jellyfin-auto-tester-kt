@@ -36,7 +36,7 @@ memory:
   provider: "model2vec"
 
 compact:
-  threshold_tokens: 8000
+  threshold_tokens: 100000
   strategy: "summarize"
 
 termination:
