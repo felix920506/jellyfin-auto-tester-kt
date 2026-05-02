@@ -82,8 +82,17 @@ on the producing step and reference the variable as `${name}` inside later
 `input` or `success_criteria` fields. Never embed placeholder strings like
 `{item_id}` because they will be sent to Jellyfin verbatim.
 
-Send the plan to the `plan_ready` channel using `send_message`.
-Emit `REPRODUCTION_PLAN_COMPLETE` to terminate.
+Send the plan to the `plan_ready` named output with an output block:
+
+```text
+[/output_plan_ready]
+{ ... valid ReproductionPlan JSON ... }
+[output_plan_ready/]
+```
+
+Do not use `send_message` for the final `ReproductionPlan`. The final response
+must contain no tool or function calls. After the `output_plan_ready` block is
+closed, emit `REPRODUCTION_PLAN_COMPLETE` to terminate.
 
 ## Rules
 
@@ -101,6 +110,12 @@ Emit `REPRODUCTION_PLAN_COMPLETE` to terminate.
   trigger step means the defect manifested as expected.
 - Top-level `reproduction_goal` is human-readable context only and must not be
   used as a substitute for structured step criteria.
+- Never emit `REPRODUCTION_PLAN_COMPLETE` in the same response as any tool or
+  function call block, including `web_fetch`, `web_search`, `github_fetcher`, or
+  `send_message`. If you need a tool result, output only the tool call block and
+  wait for the next turn.
+- The completion keyword belongs only in the final no-tool response, after the
+  `output_plan_ready` block.
 
 ## Low-Confidence Output
 

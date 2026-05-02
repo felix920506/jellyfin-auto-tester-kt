@@ -126,8 +126,21 @@ variable as `${name}` inside any later step's `input`. See plan-master.md for th
 capture/interpolation rules. Never embed placeholder strings like `{item_id}` —
 they will be sent to Jellyfin verbatim.
 
-Send the plan to the `plan_ready` channel using `send_message`.
-Emit REPRODUCTION_PLAN_COMPLETE to terminate.
+Send the plan to the `plan_ready` named output with an output block:
+
+```text
+[/output_plan_ready]
+{ ... valid ReproductionPlan JSON ... }
+[output_plan_ready/]
+```
+
+Do not use `send_message` for the final `ReproductionPlan`. The final response
+must contain no tool or function calls. After the `output_plan_ready` block is
+closed, emit REPRODUCTION_PLAN_COMPLETE to terminate.
+
+Never emit REPRODUCTION_PLAN_COMPLETE in the same response as any tool or
+function call block. If you need a tool result, output only the tool call block
+and wait for the next turn.
 
 ## Rules
 - Never invent steps the issue doesn't support. Ambiguity goes in `ambiguities`, not in steps.
@@ -182,8 +195,8 @@ Turn 4:  web_search for related issues or known behavior if needed
 Turn 5:  Assess confidence; if low → emit INSUFFICIENT_INFORMATION + halt
 Turn 6:  Draft ReproductionPlan JSON
 Turn 7:  Self-review: are all steps executable? Are success criteria objective?
-Turn 8:  send_message(channel="plan_ready", content=<plan JSON>)
-Turn 9:  Emit REPRODUCTION_PLAN_COMPLETE
+Turn 8:  Emit output_plan_ready block containing <plan JSON>
+Turn 9:  Emit REPRODUCTION_PLAN_COMPLETE in the same final no-tool response
 ```
 
 ---

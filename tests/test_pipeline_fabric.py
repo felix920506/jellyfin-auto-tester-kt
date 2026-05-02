@@ -300,6 +300,54 @@ def _sample_legacy_printed_plan():
     }
 
 
+def _sample_gemini_partial_plan():
+    return {
+        "reproduction_goal": "Confirm invalid plugin repository behavior.",
+        "target_version": "10.11.8",
+        "reproduction_steps": [
+            {
+                "name": "setup_admin",
+                "description": "Create the initial admin user.",
+                "tool": "http_request",
+                "input": {
+                    "method": "POST",
+                    "url": "http://localhost:8096/Startup/User",
+                },
+            },
+            {
+                "name": "add_invalid_repo",
+                "role": "trigger",
+                "description": "Add an invalid plugin repository.",
+                "tool": "http_request",
+                "input": {
+                    "method": "POST",
+                    "url": "http://localhost:8096/Repositories",
+                },
+                "success_criteria": {
+                    "all_of": [
+                        {"type": "status_code", "value": 204},
+                    ]
+                },
+            },
+            {
+                "name": "verify_repo_added",
+                "role": "verification",
+                "description": "Verify the invalid repository is listed.",
+                "tool": "http_request",
+                "input": {
+                    "method": "GET",
+                    "url": "http://localhost:8096/Repositories",
+                },
+                "success_criteria": {
+                    "all_of": [
+                        {"body_contains": "Invalid Bug Repo"},
+                    ]
+                },
+            },
+        ],
+    }
+
+
 def _sample_issue_thread():
     return {
         "title": "Debug issue",
@@ -586,7 +634,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 written_transcript["output"]["assistant"],
             )
             self.assertEqual(written_plan["target_version"], "10.11.8")
-            self.assertEqual(written_plan["issue_title"], "Issue 14267")
+            self.assertEqual(written_plan["issue_title"], "Debug issue")
             self.assertFalse(written_plan["is_verification"])
             self.assertIsNone(written_plan["original_run_id"])
             self.assertEqual(
@@ -649,6 +697,63 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("jellyfin_version", written_transcript["output"]["assistant"])
             self.assertEqual(written_transcript["output"]["sources"][0]["source"], "conversation")
             self.assertEqual(written_plan["target_version"], "10.11.8")
+
+    async def test_run_analysis_stage_recovers_gemini_same_turn_partial_plan(self):
+        partial_plan = _sample_gemini_partial_plan()
+        transcript = (
+            "[/web_search]\n"
+            "@@queries=[\"Jellyfin plugin repositories\"]\n"
+            "[web_search/]"
+            "[/send_message]\n"
+            "@@channel=plan_ready\n"
+            f"{json.dumps(partial_plan)}\n"
+            "[send_message/]"
+            "REPRODUCTION_PLAN_COMPLETE"
+            "[web_fetch]\n"
+            "@@url=\"https://api.jellyfin.org/#tag/Plugins\"\n"
+            "[web_fetch/]"
+            "REPRODUCTION_PLAN_COMPLETE"
+        )
+        engine = FakeEngine([transcript])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/14267",
+                    "10.11.8",
+                    temp_dir,
+                    timeout_s=0.01,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
+            )
+
+            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+
+        self.assertEqual(result.status, "plan_ready")
+        self.assertEqual(result.metadata["source"], "transcript")
+        self.assertEqual(
+            written_plan["issue_url"],
+            "https://github.com/jellyfin/jellyfin/issues/14267",
+        )
+        self.assertEqual(written_plan["docker_image"], "jellyfin/jellyfin:10.11.8")
+        self.assertEqual(written_plan["issue_title"], "Debug issue")
+        self.assertEqual(written_plan["reproduction_steps"][0]["role"], "setup")
+        self.assertEqual(
+            written_plan["reproduction_steps"][0]["success_criteria"],
+            {"all_of": [{"type": "status_code", "in": [200, 204]}]},
+        )
+        self.assertEqual(
+            written_plan["reproduction_steps"][1]["success_criteria"],
+            {"all_of": [{"type": "status_code", "equals": 204}]},
+        )
+        self.assertEqual(written_plan["reproduction_steps"][2]["role"], "verify")
+        self.assertEqual(
+            written_plan["reproduction_steps"][2]["success_criteria"],
+            {"all_of": [{"type": "body_contains", "value": "Invalid Bug Repo"}]},
+        )
 
     async def test_run_analysis_stage_returns_no_plan_instead_of_hanging(self):
         engine = FakeEngine(["analysis started\nREPRODUCTION_PLAN_COMPLETE\n"])

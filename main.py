@@ -491,6 +491,9 @@ async def run_analysis_stage(
         plan, plan_source = await _resolve_analysis_stage_plan(
             plan_task,
             transcript,
+            issue_url=issue_url,
+            container_version=container_version,
+            issue_thread=issue_thread,
             timeout_s=timeout_s,
         )
         if plan is None:
@@ -786,17 +789,30 @@ async def _resolve_analysis_stage_plan(
     plan_task: asyncio.Task[tuple[str, Any]],
     transcript: str,
     *,
+    issue_url: str | None = None,
+    container_version: str | None = None,
+    issue_thread: dict[str, Any] | None = None,
     timeout_s: float | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     channel_error: BaseException | None = None
     grace_s = _analysis_channel_grace(timeout_s)
 
     if plan_task.done():
-        plan, channel_error = _completed_channel_plan(plan_task)
+        plan, channel_error = _completed_channel_plan(
+            plan_task,
+            issue_url=issue_url,
+            container_version=container_version,
+            issue_thread=issue_thread,
+        )
         if plan is not None:
             return plan, "channel"
 
-    plan = _extract_reproduction_plan(transcript)
+    plan = _extract_reproduction_plan(
+        transcript,
+        issue_url=issue_url,
+        container_version=container_version,
+        issue_thread=issue_thread,
+    )
     if plan is not None:
         if not plan_task.done():
             plan_task.cancel()
@@ -809,7 +825,12 @@ async def _resolve_analysis_stage_plan(
                 asyncio.shield(plan_task),
                 timeout=grace_s,
             )
-            plan = _coerce_reproduction_plan(message)
+            plan = _coerce_reproduction_plan(
+                message,
+                issue_url=issue_url,
+                container_version=container_version,
+                issue_thread=issue_thread,
+            )
             if plan is not None:
                 return plan, "channel"
         except asyncio.TimeoutError:
@@ -831,17 +852,40 @@ def _analysis_channel_grace(timeout_s: float | None) -> float:
 
 def _completed_channel_plan(
     plan_task: asyncio.Task[tuple[str, Any]],
+    *,
+    issue_url: str | None = None,
+    container_version: str | None = None,
+    issue_thread: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, BaseException | None]:
     try:
         _, message = plan_task.result()
     except Exception as exc:
         return None, exc
-    return _coerce_reproduction_plan(message), None
+    return (
+        _coerce_reproduction_plan(
+            message,
+            issue_url=issue_url,
+            container_version=container_version,
+            issue_thread=issue_thread,
+        ),
+        None,
+    )
 
 
-def _extract_reproduction_plan(transcript: str) -> dict[str, Any] | None:
+def _extract_reproduction_plan(
+    transcript: str,
+    *,
+    issue_url: str | None = None,
+    container_version: str | None = None,
+    issue_thread: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     for fenced in _json_fenced_blocks(transcript):
-        plan = _decode_reproduction_plan(fenced)
+        plan = _decode_reproduction_plan(
+            fenced,
+            issue_url=issue_url,
+            container_version=container_version,
+            issue_thread=issue_thread,
+        )
         if plan is not None:
             return plan
 
@@ -851,7 +895,12 @@ def _extract_reproduction_plan(transcript: str) -> dict[str, Any] | None:
             value, _ = decoder.raw_decode(transcript[match.start() :])
         except json.JSONDecodeError:
             continue
-        plan = _coerce_reproduction_plan(value)
+        plan = _coerce_reproduction_plan(
+            value,
+            issue_url=issue_url,
+            container_version=container_version,
+            issue_thread=issue_thread,
+        )
         if plan is not None:
             return plan
     return None
@@ -863,39 +912,82 @@ def _json_fenced_blocks(text: str) -> Iterable[str]:
         yield match.group(1).strip()
 
 
-def _decode_reproduction_plan(value: str) -> dict[str, Any] | None:
+def _decode_reproduction_plan(
+    value: str,
+    *,
+    issue_url: str | None = None,
+    container_version: str | None = None,
+    issue_thread: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     try:
         decoded = json.loads(value)
     except json.JSONDecodeError:
         return None
-    return _coerce_reproduction_plan(decoded)
+    return _coerce_reproduction_plan(
+        decoded,
+        issue_url=issue_url,
+        container_version=container_version,
+        issue_thread=issue_thread,
+    )
 
 
-def _coerce_reproduction_plan(value: Any) -> dict[str, Any] | None:
+def _coerce_reproduction_plan(
+    value: Any,
+    *,
+    issue_url: str | None = None,
+    container_version: str | None = None,
+    issue_thread: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     value = _decode_jsonish(value)
-    plan = _normalize_reproduction_plan(value)
+    plan = _normalize_reproduction_plan(
+        value,
+        issue_url=issue_url,
+        container_version=container_version,
+        issue_thread=issue_thread,
+    )
     if plan is not None:
         return plan
     if isinstance(value, dict):
         for key in ("plan", "reproduction_plan", "content", "payload", "data", "message"):
             if key not in value:
                 continue
-            plan = _coerce_reproduction_plan(value[key])
+            plan = _coerce_reproduction_plan(
+                value[key],
+                issue_url=issue_url,
+                container_version=container_version,
+                issue_thread=issue_thread,
+            )
             if plan is not None:
                 return plan
     return None
 
 
-def _normalize_reproduction_plan(value: Any) -> dict[str, Any] | None:
-    if not _looks_like_reproduction_plan(value):
+def _normalize_reproduction_plan(
+    value: Any,
+    *,
+    issue_url: str | None = None,
+    container_version: str | None = None,
+    issue_thread: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not _looks_like_reproduction_plan(
+        value,
+        allow_context=bool(issue_url and container_version),
+    ):
         return None
 
     plan = dict(value)
-    target_version = plan.get("target_version") or plan.get("jellyfin_version")
+    target_version = (
+        plan.get("target_version")
+        or plan.get("jellyfin_version")
+        or container_version
+    )
     if target_version is not None:
         plan["target_version"] = str(target_version)
 
-    plan.setdefault("issue_title", _issue_title_from_url(plan.get("issue_url")))
+    plan.setdefault("issue_url", issue_url)
+    if plan.get("target_version") and not plan.get("docker_image"):
+        plan["docker_image"] = f"jellyfin/jellyfin:{plan['target_version']}"
+    plan.setdefault("issue_title", _issue_title(plan.get("issue_url"), issue_thread))
     plan.setdefault("prerequisites", [])
     plan.setdefault("failure_indicators", [])
     plan.setdefault("confidence", "medium")
@@ -907,14 +999,25 @@ def _normalize_reproduction_plan(value: Any) -> dict[str, Any] | None:
     return plan
 
 
-def _looks_like_reproduction_plan(value: Any) -> bool:
+def _looks_like_reproduction_plan(value: Any, *, allow_context: bool = False) -> bool:
     if not isinstance(value, dict):
         return False
+    if not isinstance(value.get("reproduction_steps"), list):
+        return False
+    if allow_context:
+        return "target_version" in value or "jellyfin_version" in value
     if not MINIMUM_REPRODUCTION_PLAN_KEYS.issubset(value):
         return False
     if "target_version" not in value and "jellyfin_version" not in value:
         return False
-    return isinstance(value.get("reproduction_steps"), list)
+    return True
+
+
+def _issue_title(issue_url: Any, issue_thread: dict[str, Any] | None = None) -> str:
+    title = issue_thread.get("title") if isinstance(issue_thread, dict) else None
+    if title:
+        return str(title)
+    return _issue_title_from_url(issue_url)
 
 
 def _issue_title_from_url(issue_url: Any) -> str:
@@ -983,6 +1086,8 @@ def _normalize_plan_steps(value: Any) -> list[dict[str, Any]]:
     for index, step in enumerate(steps):
         step.setdefault("step_id", step.get("step", index + 1))
         step.setdefault("action", step.get("description") or f"Run step {index + 1}")
+        if step.get("role") == "verification":
+            step["role"] = "verify"
         if "role" not in step:
             step["role"] = _default_step_role(index, trigger_index)
         step.setdefault("expected_outcome", step.get("action", "Step completes"))
@@ -994,6 +1099,8 @@ def _normalize_plan_steps(value: Any) -> list[dict[str, Any]]:
             step["success_criteria"] = _normalize_success_criteria(
                 step["success_criteria"]
             )
+        else:
+            step["success_criteria"] = _default_success_criteria(step.get("tool"))
         step.pop("step", None)
         step.pop("description", None)
     return steps
@@ -1040,9 +1147,21 @@ def _normalize_success_criteria(value: dict[str, Any]) -> dict[str, Any]:
     return criteria
 
 
+def _default_success_criteria(tool: Any) -> dict[str, Any]:
+    if tool == "http_request":
+        return {"all_of": [{"type": "status_code", "in": [200, 204]}]}
+    if tool == "screenshot":
+        return {"all_of": [{"type": "screenshot_present", "label": "screenshot"}]}
+    return {"all_of": [{"type": "exit_code", "equals": 0}]}
+
+
 def _normalize_criteria_assertion(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
+    if len(value) == 1:
+        legacy = _normalize_legacy_criteria_assertion(value)
+        if legacy is not None:
+            return legacy
     assertion = dict(value)
     operator = assertion.pop("operator", None)
     if assertion.get("type") == "json_field":
@@ -1056,7 +1175,28 @@ def _normalize_criteria_assertion(value: Any) -> Any:
         assertion["equals"] = assertion.pop("value")
     elif operator == "in" and "value" in assertion:
         assertion["in"] = assertion.pop("value")
+    elif assertion.get("type") in {"status_code", "exit_code"} and "value" in assertion:
+        assertion["equals"] = assertion.pop("value")
     return assertion
+
+
+def _normalize_legacy_criteria_assertion(value: dict[str, Any]) -> dict[str, Any] | None:
+    key, payload = next(iter(value.items()))
+    if key == "http_status":
+        assertion_type = "status_code"
+    elif key in {"exit_code", "body_contains", "stdout_contains", "stderr_contains"}:
+        assertion_type = key
+    else:
+        return None
+
+    if key in {"body_contains", "stdout_contains", "stderr_contains"}:
+        return {"type": assertion_type, "value": str(payload)}
+    if isinstance(payload, dict):
+        if "==" in payload:
+            return {"type": assertion_type, "equals": payload["=="]}
+        if "in" in payload:
+            return {"type": assertion_type, "in": payload["in"]}
+    return {"type": assertion_type, "equals": payload}
 
 
 def _json_path_existence_pattern(path: Any) -> str:
