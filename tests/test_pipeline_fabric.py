@@ -68,6 +68,20 @@ class DefaultWritingAnalysisAgent:
             yield chunk
 
 
+class DefaultOnlyAnalysisAgent:
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.prompts = []
+        self.agent = FakeInnerAgent()
+
+    async def chat(self, prompt):
+        self.prompts.append(prompt)
+        for chunk in self.chunks:
+            await self.agent.output_router.default_output.write_stream(chunk)
+        if False:
+            yield ""
+
+
 class FakeExecutionAgent:
     def __init__(self):
         self.max_iterations = 1
@@ -190,6 +204,65 @@ def _sample_plan():
         "ambiguities": [],
         "is_verification": False,
         "original_run_id": None,
+    }
+
+
+def _sample_legacy_printed_plan():
+    return {
+        "issue_url": "https://github.com/jellyfin/jellyfin/issues/14267",
+        "jellyfin_version": "10.11.8",
+        "docker_image": "jellyfin/jellyfin:10.11.8",
+        "reproduction_goal": "Confirm repository validation behavior.",
+        "confidence": "high",
+        "ambiguities": [],
+        "environment": {
+            "ports": {"8096": 8096},
+            "volumes": {},
+        },
+        "reproduction_steps": [
+            {
+                "step": 1,
+                "description": "Create the initial admin user.",
+                "tool": "http_request",
+                "input": {
+                    "method": "POST",
+                    "url": "http://localhost:8096/Startup/User",
+                    "body": {"Name": "testadmin", "Password": "TestPassword1!"},
+                },
+                "success_criteria": {
+                    "all_of": [
+                        {"type": "status_code", "operator": "in", "value": [200, 204]},
+                        {"type": "json_field", "path": "$.AccessToken", "operator": "exists"},
+                    ]
+                },
+            },
+            {
+                "step": 2,
+                "role": "trigger",
+                "description": "POST /Repositories with an invalid manifest URL.",
+                "tool": "http_request",
+                "input": {
+                    "method": "POST",
+                    "url": "http://localhost:8096/Repositories",
+                },
+                "success_criteria": {
+                    "all_of": [
+                        {"type": "status_code", "operator": "eq", "value": 204}
+                    ]
+                },
+            },
+            {
+                "step": 3,
+                "description": "Search logs for the manifest error.",
+                "tool": "docker_exec",
+                "input": {"command": ["sh", "-c", "grep -rl manifest /config/log/"]},
+                "success_criteria": {
+                    "all_of": [
+                        {"type": "exit_code", "operator": "eq", "value": 0}
+                    ]
+                },
+            },
+        ],
     }
 
 
@@ -418,6 +491,69 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status, "plan_ready")
             self.assertEqual(result.metadata["source"], "transcript")
             self.assertEqual(json.loads((Path(temp_dir) / "plan.json").read_text()), plan)
+
+    async def test_run_analysis_stage_captures_default_output_plan(self):
+        plan = _sample_legacy_printed_plan()
+        transcript = (
+            "Now I have enough context to write the reproduction plan.\n"
+            "```json\n"
+            f"{json.dumps(plan)}\n"
+            "```\n"
+            "`REPRODUCTION_PLAN_COMPLETE`"
+        )
+        analysis_agent = DefaultOnlyAnalysisAgent([transcript])
+        engine = FakeEngine([], analysis_agent=analysis_agent)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/14267",
+                    "10.11.8",
+                    temp_dir,
+                    timeout_s=60,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
+            )
+
+            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+            written_transcript = (Path(temp_dir) / "transcript.txt").read_text(
+                encoding="utf-8"
+            )
+
+            self.assertEqual(result.status, "plan_ready")
+            self.assertEqual(result.metadata["source"], "transcript")
+            self.assertIn("jellyfin_version", written_transcript)
+            self.assertEqual(written_plan["target_version"], "10.11.8")
+            self.assertEqual(written_plan["issue_title"], "Issue 14267")
+            self.assertFalse(written_plan["is_verification"])
+            self.assertIsNone(written_plan["original_run_id"])
+            self.assertEqual(
+                written_plan["environment"]["ports"],
+                {"host": 8096, "container": 8096},
+            )
+            self.assertEqual(written_plan["environment"]["volumes"], [])
+            self.assertEqual(written_plan["reproduction_steps"][0]["step_id"], 1)
+            self.assertEqual(written_plan["reproduction_steps"][0]["role"], "setup")
+            self.assertEqual(
+                written_plan["reproduction_steps"][0]["input"]["path"],
+                "/Startup/User",
+            )
+            self.assertEqual(
+                written_plan["reproduction_steps"][0]["success_criteria"]["all_of"][0],
+                {"type": "status_code", "in": [200, 204]},
+            )
+            self.assertEqual(
+                written_plan["reproduction_steps"][0]["success_criteria"]["all_of"][1],
+                {"type": "body_matches", "pattern": r'"AccessToken"\s*:'},
+            )
+            self.assertEqual(written_plan["reproduction_steps"][2]["role"], "verify")
+            self.assertEqual(
+                written_plan["reproduction_steps"][2]["input"]["command"],
+                "sh -c 'grep -rl manifest /config/log/'",
+            )
 
     async def test_run_analysis_stage_returns_no_plan_instead_of_hanging(self):
         engine = FakeEngine(["analysis started\nREPRODUCTION_PLAN_COMPLETE\n"])

@@ -9,10 +9,12 @@ import json
 import logging
 import os
 import re
+import shlex
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, TextIO
+from urllib.parse import urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -48,13 +50,10 @@ PIPELINE_PAYLOAD_KEYS = {
     "issue_url",
     "reason",
 }
-REPRODUCTION_PLAN_KEYS = {
+MINIMUM_REPRODUCTION_PLAN_KEYS = {
     "issue_url",
-    "target_version",
     "docker_image",
     "reproduction_steps",
-    "is_verification",
-    "original_run_id",
 }
 LOGGER_NAME = "kohakuterrarium.jellyfin_auto_tester"
 logging.getLogger(LOGGER_NAME).addHandler(logging.NullHandler())
@@ -129,6 +128,59 @@ class _NullOutput:
 
     def reset(self) -> None:
         pass
+
+
+class _TranscriptOutput:
+    """Output sink that mirrors visible agent text into a transcript."""
+
+    def __init__(self, stream: TextIO | None = None) -> None:
+        self._stream = stream
+        self._parts: list[str] = []
+
+    @property
+    def text(self) -> str:
+        return "".join(self._parts)
+
+    @property
+    def has_text(self) -> bool:
+        return bool(self._parts)
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        await self.flush()
+
+    async def write(self, content: str) -> None:
+        self._write(content)
+
+    async def write_stream(self, chunk: str) -> None:
+        self._write(chunk)
+
+    async def flush(self) -> None:
+        if self._stream is not None:
+            self._stream.flush()
+
+    async def on_processing_start(self) -> None:
+        pass
+
+    async def on_processing_end(self) -> None:
+        pass
+
+    def on_activity(self, _activity_type: str, _detail: str) -> None:
+        pass
+
+    def reset(self) -> None:
+        pass
+
+    def _write(self, value: Any) -> None:
+        text = _chunk_text(value)
+        if not text:
+            return
+        self._parts.append(text)
+        if self._stream is not None:
+            self._stream.write(text)
+            self._stream.flush()
 
 
 def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
@@ -389,17 +441,27 @@ async def run_analysis_stage(
     transcript_parts: list[str] = []
     try:
         analysis_agent = _get_agent(engine, "analysis_agent")
-        _suppress_default_output(analysis_agent)
+        transcript_capture_state = _install_transcript_output(analysis_agent, stream)
+        transcript_capture = (
+            transcript_capture_state[0] if transcript_capture_state is not None else None
+        )
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
         logger.info("Streaming Stage 1 analysis transcript")
-        async for chunk in _chat(analysis_agent, prompt):
-            text = _chunk_text(chunk)
-            transcript_parts.append(text)
-            if stream is not None:
-                stream.write(text)
-                stream.flush()
+        try:
+            async for chunk in _chat(analysis_agent, prompt):
+                text = _chunk_text(chunk)
+                if transcript_capture is None or not transcript_capture.has_text:
+                    transcript_parts.append(text)
+                    if stream is not None:
+                        stream.write(text)
+                        stream.flush()
+            if transcript_capture is not None:
+                await transcript_capture.flush()
+        finally:
+            _restore_transcript_output(transcript_capture_state)
 
-        transcript = "".join(transcript_parts)
+        captured_transcript = transcript_capture.text if transcript_capture is not None else ""
+        transcript = captured_transcript or "".join(transcript_parts)
         (output_dir / "transcript.txt").write_text(transcript, encoding="utf-8")
 
         if _is_insufficient_information(transcript):
@@ -801,8 +863,9 @@ def _decode_reproduction_plan(value: str) -> dict[str, Any] | None:
 
 def _coerce_reproduction_plan(value: Any) -> dict[str, Any] | None:
     value = _decode_jsonish(value)
-    if _looks_like_reproduction_plan(value):
-        return value
+    plan = _normalize_reproduction_plan(value)
+    if plan is not None:
+        return plan
     if isinstance(value, dict):
         for key in ("plan", "reproduction_plan", "content", "payload", "data", "message"):
             if key not in value:
@@ -813,8 +876,184 @@ def _coerce_reproduction_plan(value: Any) -> dict[str, Any] | None:
     return None
 
 
+def _normalize_reproduction_plan(value: Any) -> dict[str, Any] | None:
+    if not _looks_like_reproduction_plan(value):
+        return None
+
+    plan = dict(value)
+    target_version = plan.get("target_version") or plan.get("jellyfin_version")
+    if target_version is not None:
+        plan["target_version"] = str(target_version)
+
+    plan.setdefault("issue_title", _issue_title_from_url(plan.get("issue_url")))
+    plan.setdefault("prerequisites", [])
+    plan.setdefault("failure_indicators", [])
+    plan.setdefault("confidence", "medium")
+    plan.setdefault("ambiguities", [])
+    plan.setdefault("is_verification", False)
+    plan.setdefault("original_run_id", None)
+    plan["environment"] = _normalize_plan_environment(plan.get("environment"))
+    plan["reproduction_steps"] = _normalize_plan_steps(plan.get("reproduction_steps"))
+    return plan
+
+
 def _looks_like_reproduction_plan(value: Any) -> bool:
-    return isinstance(value, dict) and REPRODUCTION_PLAN_KEYS.issubset(value)
+    if not isinstance(value, dict):
+        return False
+    if not MINIMUM_REPRODUCTION_PLAN_KEYS.issubset(value):
+        return False
+    if "target_version" not in value and "jellyfin_version" not in value:
+        return False
+    return isinstance(value.get("reproduction_steps"), list)
+
+
+def _issue_title_from_url(issue_url: Any) -> str:
+    text = str(issue_url or "").rstrip("/")
+    issue_id = text.rsplit("/", 1)[-1] if text else ""
+    return f"Issue {issue_id}" if issue_id else "Jellyfin issue"
+
+
+def _normalize_plan_environment(value: Any) -> dict[str, Any]:
+    environment = dict(value) if isinstance(value, dict) else {}
+    environment["ports"] = _normalize_plan_ports(environment.get("ports"))
+    environment["volumes"] = _normalize_plan_volumes(environment.get("volumes"))
+    env_vars = environment.get("env_vars")
+    environment["env_vars"] = dict(env_vars) if isinstance(env_vars, dict) else {}
+    return environment
+
+
+def _normalize_plan_ports(value: Any) -> dict[str, int]:
+    if isinstance(value, dict):
+        if "host" in value or "container" in value:
+            return {
+                "host": int(value.get("host", 8096)),
+                "container": int(value.get("container", 8096)),
+            }
+        if value:
+            container, host = next(iter(value.items()))
+            return {
+                "host": int(host),
+                "container": int(str(container).split("/")[0]),
+            }
+    return {"host": 8096, "container": 8096}
+
+
+def _normalize_plan_volumes(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        volumes = []
+        for host, spec in value.items():
+            if not isinstance(spec, dict):
+                continue
+            container = spec.get("container") or spec.get("bind")
+            if container:
+                volumes.append(
+                    {
+                        "host": str(host),
+                        "container": str(container),
+                        "mode": str(spec.get("mode", "rw")),
+                    }
+                )
+        return volumes
+    return []
+
+
+def _normalize_plan_steps(value: Any) -> list[dict[str, Any]]:
+    steps = [dict(step) for step in value] if isinstance(value, list) else []
+    trigger_index = next(
+        (
+            index
+            for index, step in enumerate(steps)
+            if step.get("role") == "trigger"
+        ),
+        None,
+    )
+
+    for index, step in enumerate(steps):
+        step.setdefault("step_id", step.get("step", index + 1))
+        step.setdefault("action", step.get("description") or f"Run step {index + 1}")
+        if "role" not in step:
+            step["role"] = _default_step_role(index, trigger_index)
+        step.setdefault("expected_outcome", step.get("action", "Step completes"))
+        if isinstance(step.get("input"), dict):
+            step["input"] = _normalize_step_input(step["input"], step.get("tool"))
+        if isinstance(step.get("capture"), dict):
+            step["capture"] = _normalize_step_capture(step["capture"])
+        if isinstance(step.get("success_criteria"), dict):
+            step["success_criteria"] = _normalize_success_criteria(
+                step["success_criteria"]
+            )
+        step.pop("step", None)
+        step.pop("description", None)
+    return steps
+
+
+def _default_step_role(index: int, trigger_index: int | None) -> str:
+    if trigger_index is None:
+        return "trigger" if index == 0 else "verify"
+    return "setup" if index < trigger_index else "verify"
+
+
+def _normalize_step_input(value: dict[str, Any], tool: Any) -> dict[str, Any]:
+    step_input = dict(value)
+    if tool == "http_request" and "path" not in step_input and step_input.get("url"):
+        parsed = urlparse(str(step_input["url"]))
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        step_input["path"] = path
+    if tool in {"bash", "docker_exec"} and isinstance(step_input.get("command"), list):
+        step_input["command"] = shlex.join(str(part) for part in step_input["command"])
+    return step_input
+
+
+def _normalize_step_capture(value: dict[str, Any]) -> dict[str, Any]:
+    capture = {}
+    for key, expression in value.items():
+        if isinstance(expression, str) and expression.startswith("$"):
+            capture[key] = {"from": "body_json_path", "path": expression}
+        else:
+            capture[key] = expression
+    return capture
+
+
+def _normalize_success_criteria(value: dict[str, Any]) -> dict[str, Any]:
+    criteria = dict(value)
+    for operator in ("all_of", "any_of"):
+        assertions = criteria.get(operator)
+        if isinstance(assertions, list):
+            criteria[operator] = [
+                _normalize_criteria_assertion(assertion)
+                for assertion in assertions
+            ]
+    return criteria
+
+
+def _normalize_criteria_assertion(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    assertion = dict(value)
+    operator = assertion.pop("operator", None)
+    if assertion.get("type") == "json_field":
+        if operator == "exists":
+            return {
+                "type": "body_matches",
+                "pattern": _json_path_existence_pattern(assertion.get("path")),
+            }
+        assertion["type"] = "body_json_path"
+    if operator == "eq" and "value" in assertion:
+        assertion["equals"] = assertion.pop("value")
+    elif operator == "in" and "value" in assertion:
+        assertion["in"] = assertion.pop("value")
+    return assertion
+
+
+def _json_path_existence_pattern(path: Any) -> str:
+    field = str(path or "").rsplit(".", 1)[-1].strip("[]'\"")
+    if not field or field == "$":
+        return ".+"
+    return rf'"{re.escape(field)}"\s*:'
 
 
 def _apply_default_execution_budget(engine: Any) -> None:
@@ -1051,6 +1290,32 @@ def _suppress_default_output(creature_or_agent: Any) -> None:
         return
 
     setattr(output_router, "default_output", _NullOutput())
+
+
+def _install_transcript_output(
+    creature_or_agent: Any,
+    stream: TextIO | None,
+) -> tuple[_TranscriptOutput, Any, Any] | None:
+    """Route visible default output into a transcript for Stage 1 debug runs."""
+
+    agent = getattr(creature_or_agent, "agent", creature_or_agent)
+    output_router = getattr(agent, "output_router", None)
+    if output_router is None or not hasattr(output_router, "default_output"):
+        return None
+
+    default_output = getattr(output_router, "default_output")
+    capture = _TranscriptOutput(stream)
+    setattr(output_router, "default_output", capture)
+    return capture, output_router, default_output
+
+
+def _restore_transcript_output(
+    state: tuple[_TranscriptOutput, Any, Any] | None,
+) -> None:
+    if state is None:
+        return
+    _, output_router, default_output = state
+    setattr(output_router, "default_output", default_output)
 
 
 async def _chat(agent: Any, prompt: str):
