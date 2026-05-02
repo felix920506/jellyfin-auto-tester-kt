@@ -82,18 +82,37 @@ class DefaultOnlyAnalysisAgent:
             yield ""
 
 
-class DirectStdoutAnalysisAgent:
+class ConversationOnlyAnalysisAgent:
     def __init__(self, chunks):
         self.chunks = chunks
         self.prompts = []
         self.agent = FakeInnerAgent()
+        self.agent.controller = FakeController(FakeConversation())
 
     async def chat(self, prompt):
         self.prompts.append(prompt)
         for chunk in self.chunks:
-            print(chunk, end="", flush=True)
+            self.agent.controller.conversation.message = FakeMessage(chunk)
         if False:
             yield ""
+
+
+class FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class FakeConversation:
+    def __init__(self):
+        self.message = None
+
+    def get_last_assistant_message(self):
+        return self.message
+
+
+class FakeController:
+    def __init__(self, conversation):
+        self.conversation = conversation
 
 
 class FakeExecutionAgent:
@@ -569,7 +588,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 "sh -c 'grep -rl manifest /config/log/'",
             )
 
-    async def test_run_analysis_stage_captures_direct_stdout_plan(self):
+    async def test_run_analysis_stage_recovers_plan_from_conversation(self):
         plan = _sample_legacy_printed_plan()
         transcript = (
             "Now I have enough context to write the reproduction plan.\n"
@@ -578,7 +597,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             "```\n"
             "REPRODUCTION_PLAN_COMPLETE\n"
         )
-        analysis_agent = DirectStdoutAnalysisAgent([transcript])
+        analysis_agent = ConversationOnlyAnalysisAgent([transcript])
         engine = FakeEngine([], analysis_agent=analysis_agent)
         stream = io.StringIO()
 
@@ -602,7 +621,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(result.status, "plan_ready")
-            self.assertIn("jellyfin_version", stream.getvalue())
+            self.assertEqual(stream.getvalue(), "")
             self.assertIn("jellyfin_version", written_transcript)
             self.assertEqual(written_plan["target_version"], "10.11.8")
 
