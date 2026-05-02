@@ -11,6 +11,10 @@ Repository scaffold for a three-stage Jellyfin issue reproduction pipeline.
 - `artifacts/` - Runtime output directory; per-run artifacts are ignored by Git.
 - `plans/` - Architecture and stage implementation plans.
 
+## AI Use Disclosure
+
+This project was developed with the assistance of AI tools, including Codex, Claude, and Gemini.
+
 ## Running the Pipeline
 
 ```bash
