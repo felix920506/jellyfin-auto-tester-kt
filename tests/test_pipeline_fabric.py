@@ -450,6 +450,45 @@ def _sample_gemini_partial_plan():
     }
 
 
+def _sample_provider_plan_without_target_version():
+    return {
+        "reproduction_goal": "Confirm Dolby Vision playback profile behavior.",
+        "docker_image": "jellyfin/jellyfin:10.11.8",
+        "reproduction_steps": [
+            {
+                "name": "prepare_media",
+                "tool": "bash",
+                "input": "echo ok",
+                "success_criteria": {
+                    "all_of": [{"type": "bash_exit_code", "value": 0}]
+                },
+            },
+            {
+                "name": "check_playback_info",
+                "role": "trigger",
+                "tool": "http_request",
+                "input": {
+                    "method": "GET",
+                    "url": "http://localhost:8096/Items",
+                    "query": {"Recursive": True},
+                },
+                "capture": {"item_id": "Items[0].Id"},
+                "success_criteria": {
+                    "all_of": [
+                        {
+                            "type": "json_match",
+                            "path": "Items[0].Name",
+                            "value": "Beautiful Planet",
+                        }
+                    ]
+                },
+            },
+        ],
+        "confidence": "high",
+        "ambiguities": [],
+    }
+
+
 def _sample_issue_thread():
     return {
         "title": "Debug issue",
@@ -813,6 +852,58 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 "Debug issue",
             )
             self.assertEqual(stream.getvalue(), "")
+
+    async def test_run_analysis_stage_accepts_context_filled_provider_plan(self):
+        plan = _sample_provider_plan_without_target_version()
+        engine = FakeEngine(
+            ["analysis completed\n"],
+            channels={"plan_ready": FakeChannel({"content": json.dumps(plan)})},
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await run_analysis_stage(
+                "https://github.com/jellyfin/jellyfin/issues/14267",
+                "10.11.8",
+                temp_dir,
+                stream=None,
+                engine_factory=lambda stage: engine,
+                issue_fetcher=_sample_issue_fetcher,
+            )
+
+            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+
+        self.assertEqual(result.status, "plan_ready")
+        self.assertEqual(result.metadata["source"], "channel")
+        self.assertEqual(written_plan["target_version"], "10.11.8")
+        self.assertEqual(
+            written_plan["issue_url"],
+            "https://github.com/jellyfin/jellyfin/issues/14267",
+        )
+        self.assertEqual(written_plan["issue_title"], "Debug issue")
+        self.assertEqual(
+            written_plan["reproduction_steps"][0]["input"]["command"],
+            "echo ok",
+        )
+        self.assertEqual(
+            written_plan["reproduction_steps"][0]["success_criteria"]["all_of"][0],
+            {"type": "exit_code", "equals": 0},
+        )
+        self.assertEqual(
+            written_plan["reproduction_steps"][1]["input"]["path"],
+            "/Items?Recursive=true",
+        )
+        self.assertEqual(
+            written_plan["reproduction_steps"][1]["capture"]["item_id"],
+            {"from": "body_json_path", "path": "$.Items[0].Id"},
+        )
+        self.assertEqual(
+            written_plan["reproduction_steps"][1]["success_criteria"]["all_of"][0],
+            {
+                "type": "body_json_path",
+                "path": "$.Items[0].Name",
+                "equals": "Beautiful Planet",
+            },
+        )
 
     async def test_run_analysis_stage_retries_after_hallucinated_plan_ready(self):
         plan = _sample_plan()

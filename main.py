@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, TextIO
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from uuid import uuid4
 
 from stage1_model_blacklist import is_stage1_model_blacklisted
@@ -1308,6 +1308,7 @@ def _normalize_reproduction_plan(
     target_version = (
         plan.get("target_version")
         or plan.get("jellyfin_version")
+        or _target_version_from_docker_image(plan.get("docker_image"))
         or container_version
     )
     if target_version is not None:
@@ -1333,13 +1334,31 @@ def _looks_like_reproduction_plan(value: Any, *, allow_context: bool = False) ->
         return False
     if not isinstance(value.get("reproduction_steps"), list):
         return False
+    has_version = (
+        "target_version" in value
+        or "jellyfin_version" in value
+        or _target_version_from_docker_image(value.get("docker_image")) is not None
+    )
     if allow_context:
-        return "target_version" in value or "jellyfin_version" in value
+        return has_version or any(
+            key in value
+            for key in ("issue_url", "docker_image", "reproduction_goal", "environment")
+        )
     if not MINIMUM_REPRODUCTION_PLAN_KEYS.issubset(value):
         return False
-    if "target_version" not in value and "jellyfin_version" not in value:
+    if not has_version:
         return False
     return True
+
+
+def _target_version_from_docker_image(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    prefix = "jellyfin/jellyfin:"
+    if not value.startswith(prefix):
+        return None
+    tag = value[len(prefix):].strip()
+    return tag or None
 
 
 def _issue_title(issue_url: Any, issue_thread: dict[str, Any] | None = None) -> str:
@@ -1420,7 +1439,7 @@ def _normalize_plan_steps(value: Any) -> list[dict[str, Any]]:
         if "role" not in step:
             step["role"] = _default_step_role(index, trigger_index)
         step.setdefault("expected_outcome", step.get("action", "Step completes"))
-        if isinstance(step.get("input"), dict):
+        if "input" in step:
             step["input"] = _normalize_step_input(step["input"], step.get("tool"))
         if isinstance(step.get("capture"), dict):
             step["capture"] = _normalize_step_capture(step["capture"])
@@ -1441,24 +1460,57 @@ def _default_step_role(index: int, trigger_index: int | None) -> str:
     return "setup" if index < trigger_index else "verify"
 
 
-def _normalize_step_input(value: dict[str, Any], tool: Any) -> dict[str, Any]:
-    step_input = dict(value)
+def _normalize_step_input(value: Any, tool: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        if tool in {"bash", "docker_exec"}:
+            step_input = {"command": value}
+        elif tool == "http_request":
+            step_input = {"path": value}
+        elif tool == "screenshot":
+            step_input = {"url": value}
+        else:
+            step_input = {"value": value}
+    elif isinstance(value, dict):
+        step_input = dict(value)
+    else:
+        step_input = {}
     if tool == "http_request" and "path" not in step_input and step_input.get("url"):
         parsed = urlparse(str(step_input["url"]))
         path = parsed.path or "/"
         if parsed.query:
             path = f"{path}?{parsed.query}"
         step_input["path"] = path
+    if tool == "http_request" and isinstance(step_input.get("query"), dict):
+        query = urlencode(_normalize_query_params(step_input["query"]), doseq=True)
+        if query:
+            path = str(step_input.get("path") or "/")
+            separator = "&" if "?" in path else "?"
+            step_input["path"] = f"{path}{separator}{query}"
     if tool in {"bash", "docker_exec"} and isinstance(step_input.get("command"), list):
         step_input["command"] = shlex.join(str(part) for part in step_input["command"])
     return step_input
 
 
+def _normalize_query_params(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: _normalize_query_value(item) for key, item in value.items()}
+
+
+def _normalize_query_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, list):
+        return [_normalize_query_value(item) for item in value]
+    return value
+
+
 def _normalize_step_capture(value: dict[str, Any]) -> dict[str, Any]:
     capture = {}
     for key, expression in value.items():
-        if isinstance(expression, str) and expression.startswith("$"):
-            capture[key] = {"from": "body_json_path", "path": expression}
+        if isinstance(expression, str):
+            capture[key] = {
+                "from": "body_json_path",
+                "path": _normalize_json_path(expression),
+            }
         else:
             capture[key] = expression
     return capture
@@ -1493,6 +1545,13 @@ def _normalize_criteria_assertion(value: Any) -> Any:
             return legacy
     assertion = dict(value)
     operator = assertion.pop("operator", None)
+    if assertion.get("type") == "bash_exit_code":
+        assertion["type"] = "exit_code"
+    if assertion.get("type") == "json_match":
+        assertion["type"] = "body_json_path"
+        assertion["path"] = _normalize_json_path(assertion.get("path"))
+        if operator is None and "value" in assertion and "equals" not in assertion:
+            assertion["equals"] = assertion.pop("value")
     if assertion.get("type") == "json_field":
         if operator == "exists":
             return {
@@ -1507,6 +1566,17 @@ def _normalize_criteria_assertion(value: Any) -> Any:
     elif assertion.get("type") in {"status_code", "exit_code"} and "value" in assertion:
         assertion["equals"] = assertion.pop("value")
     return assertion
+
+
+def _normalize_json_path(path: Any) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return "$"
+    if text.startswith("$"):
+        return text
+    if text.startswith("["):
+        return f"${text}"
+    return f"$.{text}"
 
 
 def _normalize_legacy_criteria_assertion(value: dict[str, Any]) -> dict[str, Any] | None:
