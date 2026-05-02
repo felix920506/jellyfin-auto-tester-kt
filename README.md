@@ -59,8 +59,8 @@ run with disk handoff folders:
   --out debug/stage3
 ```
 
-Stage 1 writes `plan.json`, Stage 2 reads `plan.json` and writes `result.json`,
-and Stage 3 reads `result.json` and writes `report.md` plus
+Stage 1 writes `transcript.json` and `plan.json`, Stage 2 reads `plan.json`
+and writes `result.json`, and Stage 3 reads `result.json` and writes `report.md` plus
 `verification_plan.json`. To debug the verification pass, feed that plan back
 through Stage 2 and then finalize the report:
 

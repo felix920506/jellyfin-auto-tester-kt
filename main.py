@@ -23,6 +23,7 @@ DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
 TERMINAL_CHANNELS = ("final_report", "human_review_queue")
 STAGE_CHOICES = ("analysis", "execution", "report")
 STAGE_CHANNEL_GRACE_S = 2.0
+ANALYSIS_TRANSCRIPT_FILE = "transcript.json"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR")
 LOG_STDERR_CHOICES = ("auto", "on", "off")
 DEFAULT_LOG_LEVEL = "INFO"
@@ -412,7 +413,7 @@ async def run_analysis_stage(
 
     Output files:
     - ``input.json``: issue URL and target version used for the run.
-    - ``transcript.txt``: analysis agent text transcript.
+    - ``transcript.json``: machine-readable prompt and assistant response.
     - ``plan.json``: ReproductionPlan payload for Stage 2 when available.
     - ``stage_result.json``: machine-readable metadata for the debug run.
     """
@@ -446,6 +447,7 @@ async def run_analysis_stage(
             transcript_capture_state[0] if transcript_capture_state is not None else None
         )
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
+        system_prompt = _agent_system_prompt_text(analysis_agent)
         logger.info("Streaming Stage 1 analysis transcript")
         try:
             async for chunk in _chat(analysis_agent, prompt):
@@ -462,12 +464,26 @@ async def run_analysis_stage(
 
         captured_transcript = transcript_capture.text if transcript_capture is not None else ""
         conversation_transcript = _assistant_conversation_text(analysis_agent)
-        transcript = _merge_transcript_sources(
-            conversation_transcript,
-            captured_transcript,
-            "".join(transcript_parts),
+        transcript_sources = _transcript_sources(
+            ("conversation", conversation_transcript),
+            ("output_router", captured_transcript),
+            ("chat_chunks", "".join(transcript_parts)),
         )
-        (output_dir / "transcript.txt").write_text(transcript, encoding="utf-8")
+        transcript = _merge_transcript_sources(
+            *(source["content"] for source in transcript_sources)
+        )
+        _write_json_file(
+            output_dir / ANALYSIS_TRANSCRIPT_FILE,
+            _analysis_transcript_payload(
+                issue_url=issue_url,
+                container_version=container_version,
+                prompt=prompt,
+                issue_thread=issue_thread,
+                system_prompt=system_prompt,
+                assistant_output=transcript,
+                output_sources=transcript_sources,
+            ),
+        )
 
         if _is_insufficient_information(transcript):
             logger.info("Stage 1 debug run stopped with insufficient information")
@@ -478,7 +494,7 @@ async def run_analysis_stage(
                     stage="analysis",
                     status="insufficient_information",
                     output_dir=str(output_dir),
-                    output_file="transcript.txt",
+                    output_file=ANALYSIS_TRANSCRIPT_FILE,
                     metadata={"message": transcript.strip()},
                 )
             )
@@ -500,7 +516,7 @@ async def run_analysis_stage(
                     stage="analysis",
                     status="no_plan",
                     output_dir=str(output_dir),
-                    output_file="transcript.txt",
+                    output_file=ANALYSIS_TRANSCRIPT_FILE,
                     metadata={
                         "message": (
                             "analysis completed but no plan_ready channel message "
@@ -518,7 +534,7 @@ async def run_analysis_stage(
                 status="plan_ready",
                 output_dir=str(output_dir),
                 output_file="plan.json",
-                metadata={"transcript": "transcript.txt", "source": plan_source},
+                metadata={"transcript": ANALYSIS_TRANSCRIPT_FILE, "source": plan_source},
             )
         )
     except BaseException:
@@ -1326,9 +1342,7 @@ def _restore_transcript_output(
 def _assistant_conversation_text(creature_or_agent: Any) -> str:
     """Read the final assistant message from Kohaku's conversation model."""
 
-    agent = getattr(creature_or_agent, "agent", creature_or_agent)
-    controller = getattr(agent, "controller", None)
-    conversation = getattr(controller, "conversation", None)
+    conversation = _agent_conversation(creature_or_agent)
     if conversation is None:
         return ""
 
@@ -1337,6 +1351,25 @@ def _assistant_conversation_text(creature_or_agent: Any) -> str:
     if message is None:
         return ""
     return _message_content_text(getattr(message, "content", ""))
+
+
+def _agent_system_prompt_text(creature_or_agent: Any) -> str | None:
+    conversation = _agent_conversation(creature_or_agent)
+    if conversation is None:
+        return None
+
+    get_system = getattr(conversation, "get_system_message", None)
+    message = get_system() if callable(get_system) else None
+    if message is None:
+        return None
+    text = _message_content_text(getattr(message, "content", ""))
+    return text or None
+
+
+def _agent_conversation(creature_or_agent: Any) -> Any | None:
+    agent = getattr(creature_or_agent, "agent", creature_or_agent)
+    controller = getattr(agent, "controller", None)
+    return getattr(controller, "conversation", None)
 
 
 def _message_content_text(content: Any) -> str:
@@ -1358,6 +1391,17 @@ def _message_content_text(content: Any) -> str:
     return _chunk_text(content)
 
 
+def _transcript_sources(*sources: tuple[str, str]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for name, content in sources:
+        if not content:
+            continue
+        if any(content == item["content"] for item in result):
+            continue
+        result.append({"source": name, "content": content})
+    return result
+
+
 def _merge_transcript_sources(*sources: str) -> str:
     merged: list[str] = []
     for source in sources:
@@ -1368,6 +1412,56 @@ def _merge_transcript_sources(*sources: str) -> str:
         merged = [existing for existing in merged if existing not in source]
         merged.append(source)
     return "".join(merged)
+
+
+def _analysis_transcript_payload(
+    *,
+    issue_url: str,
+    container_version: str,
+    prompt: str,
+    issue_thread: dict[str, Any] | None,
+    system_prompt: str | None,
+    assistant_output: str,
+    output_sources: list[dict[str, str]],
+) -> dict[str, Any]:
+    messages = []
+    if system_prompt:
+        messages.append(
+            {
+                "role": "system",
+                "content": system_prompt,
+            }
+        )
+    messages.extend(
+        [
+            {
+                "role": "user",
+                "content": prompt,
+            },
+            {
+                "role": "assistant",
+                "content": assistant_output,
+            },
+        ]
+    )
+    return {
+        "stage": "analysis",
+        "schema_version": 1,
+        "issue_url": issue_url,
+        "container_version": container_version,
+        "input": {
+            "system_prompt": system_prompt,
+            "prompt": prompt,
+            "issue_url": issue_url,
+            "container_version": container_version,
+            "prefetched_issue_thread": issue_thread,
+        },
+        "output": {
+            "assistant": assistant_output,
+            "sources": output_sources,
+        },
+        "messages": messages,
+    }
 
 
 async def _chat(agent: Any, prompt: str):

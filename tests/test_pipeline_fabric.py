@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from main import (
+    ANALYSIS_TRANSCRIPT_FILE,
     _build_parser,
     _build_stage_parser,
     _default_log_level,
@@ -323,6 +324,12 @@ def _sample_issue_fetcher(**_kwargs):
     return _sample_issue_thread()
 
 
+def _read_stage_transcript(path):
+    return json.loads(
+        (Path(path) / ANALYSIS_TRANSCRIPT_FILE).read_text(encoding="utf-8")
+    )
+
+
 def _sample_execution_entry(plan):
     step = plan["reproduction_steps"][0]
     return {
@@ -492,9 +499,20 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads((Path(temp_dir) / "plan.json").read_text()), plan)
             input_payload = json.loads((Path(temp_dir) / "input.json").read_text())
             self.assertEqual(input_payload["prefetched_issue_thread"]["title"], "Debug issue")
+            transcript_payload = _read_stage_transcript(temp_dir)
+            self.assertEqual(transcript_payload["schema_version"], 1)
+            self.assertEqual(transcript_payload["stage"], "analysis")
             self.assertIn(
-                "analysis started",
-                (Path(temp_dir) / "transcript.txt").read_text(encoding="utf-8"),
+                "Issue: https://github.com/jellyfin/jellyfin/issues/1",
+                transcript_payload["input"]["prompt"],
+            )
+            self.assertIn("system_prompt", transcript_payload["input"])
+            self.assertEqual(transcript_payload["messages"][0]["role"], "user")
+            self.assertEqual(transcript_payload["messages"][1]["role"], "assistant")
+            self.assertIn("analysis started", transcript_payload["output"]["assistant"])
+            self.assertEqual(
+                transcript_payload["input"]["prefetched_issue_thread"]["title"],
+                "Debug issue",
             )
 
     async def test_run_analysis_stage_extracts_printed_plan_without_channel(self):
@@ -523,6 +541,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(result.status, "plan_ready")
             self.assertEqual(result.metadata["source"], "transcript")
+            self.assertEqual(result.metadata["transcript"], ANALYSIS_TRANSCRIPT_FILE)
             self.assertEqual(json.loads((Path(temp_dir) / "plan.json").read_text()), plan)
 
     async def test_run_analysis_stage_captures_default_output_plan(self):
@@ -552,13 +571,17 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
 
             written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
-            written_transcript = (Path(temp_dir) / "transcript.txt").read_text(
-                encoding="utf-8"
-            )
+            written_transcript = _read_stage_transcript(temp_dir)
 
             self.assertEqual(result.status, "plan_ready")
             self.assertEqual(result.metadata["source"], "transcript")
-            self.assertIn("jellyfin_version", written_transcript)
+            self.assertIn("jellyfin_version", written_transcript["output"]["assistant"])
+            self.assertEqual(written_transcript["messages"][0]["role"], "user")
+            self.assertEqual(written_transcript["messages"][1]["role"], "assistant")
+            self.assertEqual(
+                written_transcript["messages"][1]["content"],
+                written_transcript["output"]["assistant"],
+            )
             self.assertEqual(written_plan["target_version"], "10.11.8")
             self.assertEqual(written_plan["issue_title"], "Issue 14267")
             self.assertFalse(written_plan["is_verification"])
@@ -616,13 +639,12 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
 
             written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
-            written_transcript = (Path(temp_dir) / "transcript.txt").read_text(
-                encoding="utf-8"
-            )
+            written_transcript = _read_stage_transcript(temp_dir)
 
             self.assertEqual(result.status, "plan_ready")
             self.assertEqual(stream.getvalue(), "")
-            self.assertIn("jellyfin_version", written_transcript)
+            self.assertIn("jellyfin_version", written_transcript["output"]["assistant"])
+            self.assertEqual(written_transcript["output"]["sources"][0]["source"], "conversation")
             self.assertEqual(written_plan["target_version"], "10.11.8")
 
     async def test_run_analysis_stage_returns_no_plan_instead_of_hanging(self):
@@ -642,7 +664,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(result.status, "no_plan")
-            self.assertEqual(result.output_file, "transcript.txt")
+            self.assertEqual(result.output_file, ANALYSIS_TRANSCRIPT_FILE)
             self.assertFalse((Path(temp_dir) / "plan.json").exists())
 
     def test_run_execution_stage_reads_plan_and_writes_result_handoff(self):
