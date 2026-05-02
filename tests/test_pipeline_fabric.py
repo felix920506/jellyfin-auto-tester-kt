@@ -97,6 +97,18 @@ class DefaultOnlyAnalysisAgent:
             yield ""
 
 
+class CrashingAnalysisAgent:
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.prompts = []
+
+    async def chat(self, prompt):
+        self.prompts.append(prompt)
+        for chunk in self.chunks:
+            yield chunk
+        raise RuntimeError("provider stream crashed")
+
+
 class ConversationOnlyAnalysisAgent:
     def __init__(self, chunks):
         self.chunks = chunks
@@ -229,6 +241,11 @@ class FakeChannel:
 
     async def receive(self):
         return self.message
+
+
+class HangingChannel:
+    async def receive(self):
+        await asyncio.Event().wait()
 
 
 class FakeEngine:
@@ -852,6 +869,43 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 "Debug issue",
             )
             self.assertEqual(stream.getvalue(), "")
+
+    async def test_run_analysis_stage_flushes_transcript_while_streaming(self):
+        analysis_agent = CrashingAnalysisAgent(["partial response\n"])
+        engine = FakeEngine(
+            [],
+            channels={"plan_ready": HangingChannel()},
+            analysis_agent=analysis_agent,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(RuntimeError, "provider stream crashed"):
+                await run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/1",
+                    "10.9.7",
+                    temp_dir,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                )
+
+            transcript_payload = _read_stage_transcript(temp_dir)
+
+        self.assertEqual(transcript_payload["status"], "running")
+        self.assertEqual(transcript_payload["messages"][0]["role"], "user")
+        self.assertIn(
+            "Issue: https://github.com/jellyfin/jellyfin/issues/1",
+            transcript_payload["messages"][0]["content"],
+        )
+        self.assertEqual(transcript_payload["messages"][1]["role"], "assistant")
+        self.assertEqual(
+            transcript_payload["messages"][1]["content"],
+            "partial response\n",
+        )
+        self.assertEqual(
+            transcript_payload["output"]["assistant"],
+            "partial response\n",
+        )
 
     async def test_run_analysis_stage_accepts_context_filled_provider_plan(self):
         plan = _sample_provider_plan_without_target_version()

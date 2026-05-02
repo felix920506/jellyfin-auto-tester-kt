@@ -165,8 +165,9 @@ class _NullOutput:
 class _TranscriptOutput:
     """Output sink that captures visible agent text for transcript files."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_write: Callable[[str], None] | None = None) -> None:
         self._parts: list[str] = []
+        self._on_write = on_write
 
     @property
     def text(self) -> str:
@@ -208,6 +209,118 @@ class _TranscriptOutput:
         if not text:
             return
         self._parts.append(text)
+        if self._on_write is not None:
+            self._on_write(text)
+
+
+class _AnalysisTranscriptWriter:
+    """Keep Stage 1 transcript.json valid while provider traffic is in flight."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        issue_url: str,
+        container_version: str,
+        prompt: str,
+        issue_thread: dict[str, Any] | None,
+        system_prompt: str | None,
+    ) -> None:
+        self.path = Path(path).expanduser()
+        self.issue_url = issue_url
+        self.container_version = container_version
+        self.prompt = prompt
+        self.issue_thread = issue_thread
+        self.system_prompt = system_prompt
+        self._messages: list[dict[str, str]] = []
+        self._assistant_parts: list[str] = []
+        self._current_assistant_index: int | None = None
+        if system_prompt:
+            self._messages.append({"role": "system", "content": system_prompt})
+
+    @property
+    def assistant_text(self) -> str:
+        return "".join(self._assistant_parts)
+
+    def initialize(self) -> None:
+        self.write_snapshot(status="initialized")
+
+    def record_prompt(self, prompt: str, *, attempt: int) -> None:
+        self._messages.append(
+            {
+                "role": "user",
+                "content": prompt,
+                "source": "provider_send",
+                "attempt": str(attempt),
+            }
+        )
+        self._messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "source": "provider_receive",
+                "attempt": str(attempt),
+            }
+        )
+        self._current_assistant_index = len(self._messages) - 1
+        self.write_snapshot(status="running")
+
+    def record_assistant_text(self, text: str, *, source: str) -> None:
+        if not text:
+            return
+        self._assistant_parts.append(text)
+        if self._current_assistant_index is None:
+            self._messages.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "source": source,
+                }
+            )
+            self._current_assistant_index = len(self._messages) - 1
+        self._messages[self._current_assistant_index]["content"] += text
+        self._messages[self._current_assistant_index]["source"] = source
+        self.write_snapshot(status="running")
+
+    def write_snapshot(
+        self,
+        *,
+        assistant_output: str | None = None,
+        output_sources: list[dict[str, str]] | None = None,
+        status: str,
+    ) -> None:
+        assistant = self.assistant_text if assistant_output is None else assistant_output
+        _write_json_file(
+            self.path,
+            _analysis_transcript_payload(
+                issue_url=self.issue_url,
+                container_version=self.container_version,
+                prompt=self.prompt,
+                issue_thread=self.issue_thread,
+                system_prompt=self.system_prompt,
+                assistant_output=assistant,
+                output_sources=(
+                    output_sources
+                    if output_sources is not None
+                    else _transcript_sources(("incremental", self.assistant_text))
+                ),
+                messages=self._messages_for_output(assistant),
+                status=status,
+            ),
+        )
+
+    def _messages_for_output(self, assistant_output: str) -> list[dict[str, str]]:
+        messages = [dict(message) for message in self._messages]
+        assistant_indexes = [
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "assistant"
+        ]
+        if not assistant_indexes:
+            messages.append({"role": "assistant", "content": assistant_output})
+        else:
+            messages[assistant_indexes[0]]["content"] = assistant_output
+        return messages
 
 
 def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
@@ -568,16 +681,32 @@ async def run_analysis_stage(
     chat_task: asyncio.Task[None] | None = None
     try:
         analysis_agent = _get_agent(engine, "analysis_agent")
-        transcript_capture_state = _install_transcript_output(analysis_agent)
+        prompt = _analysis_prompt(issue_url, container_version, issue_thread)
+        system_prompt = _agent_system_prompt_text(analysis_agent)
+        transcript_writer = _AnalysisTranscriptWriter(
+            output_dir / ANALYSIS_TRANSCRIPT_FILE,
+            issue_url=issue_url,
+            container_version=container_version,
+            prompt=prompt,
+            issue_thread=issue_thread,
+            system_prompt=system_prompt,
+        )
+        transcript_writer.initialize()
+        transcript_capture_state = _install_transcript_output(
+            analysis_agent,
+            on_write=lambda text: transcript_writer.record_assistant_text(
+                text,
+                source="output_router",
+            ),
+        )
         transcript_capture = (
             transcript_capture_state[0] if transcript_capture_state is not None else None
         )
-        prompt = _analysis_prompt(issue_url, container_version, issue_thread)
-        system_prompt = _agent_system_prompt_text(analysis_agent)
         channel_plan: dict[str, Any] | None = None
         plan: dict[str, Any] | None = None
         plan_source: str | None = None
         transcript = ""
+        transcript_sources: list[dict[str, str]] = []
         current_prompt = prompt
         try:
             for attempt in range(1, ANALYSIS_PLAN_MAX_ATTEMPTS + 1):
@@ -586,12 +715,14 @@ async def run_analysis_stage(
                     attempt,
                     ANALYSIS_PLAN_MAX_ATTEMPTS,
                 )
+                transcript_writer.record_prompt(current_prompt, attempt=attempt)
                 chat_task = asyncio.create_task(
                     _collect_analysis_chat(
                         analysis_agent,
                         current_prompt,
                         transcript_parts,
                         transcript_capture=transcript_capture,
+                        transcript_writer=transcript_writer,
                     )
                 )
                 done, _pending = await asyncio.wait(
@@ -628,21 +759,19 @@ async def run_analysis_stage(
                 transcript = _merge_transcript_sources(
                     *(source["content"] for source in transcript_sources)
                 )
-                _write_json_file(
-                    output_dir / ANALYSIS_TRANSCRIPT_FILE,
-                    _analysis_transcript_payload(
-                        issue_url=issue_url,
-                        container_version=container_version,
-                        prompt=prompt,
-                        issue_thread=issue_thread,
-                        system_prompt=system_prompt,
-                        assistant_output=transcript,
-                        output_sources=transcript_sources,
-                    ),
+                transcript_writer.write_snapshot(
+                    assistant_output=transcript,
+                    output_sources=transcript_sources,
+                    status="attempt_complete",
                 )
 
                 if _is_insufficient_information(transcript):
                     logger.info("Stage 1 debug run stopped with insufficient information")
+                    transcript_writer.write_snapshot(
+                        assistant_output=transcript,
+                        output_sources=transcript_sources,
+                        status="insufficient_information",
+                    )
                     plan_task.cancel()
                     await _cancel_task(plan_task)
                     return _write_stage_result(
@@ -702,6 +831,11 @@ async def run_analysis_stage(
                 await _cancel_task(chat_task)
             _restore_transcript_output(transcript_capture_state)
         if plan is None:
+            transcript_writer.write_snapshot(
+                assistant_output=transcript,
+                output_sources=transcript_sources,
+                status="protocol_error",
+            )
             plan_task.cancel()
             await _cancel_task(plan_task)
             _raise_analysis_plan_protocol_error(
@@ -709,6 +843,11 @@ async def run_analysis_stage(
                 attempts=ANALYSIS_PLAN_MAX_ATTEMPTS,
             )
 
+        transcript_writer.write_snapshot(
+            assistant_output=transcript,
+            output_sources=transcript_sources,
+            status="plan_ready",
+        )
         _write_json_file(output_dir / "plan.json", plan)
         logger.info("Stage 1 debug run wrote plan.json from %s", plan_source)
         return _write_stage_result(
@@ -1977,6 +2116,8 @@ def _suppress_default_output(creature_or_agent: Any) -> None:
 
 def _install_transcript_output(
     creature_or_agent: Any,
+    *,
+    on_write: Callable[[str], None] | None = None,
 ) -> tuple[_TranscriptOutput, Any, Any] | None:
     """Route visible default output into a transcript for Stage 1 debug runs."""
 
@@ -1986,7 +2127,7 @@ def _install_transcript_output(
         return None
 
     default_output = getattr(output_router, "default_output")
-    capture = _TranscriptOutput()
+    capture = _TranscriptOutput(on_write=on_write)
     setattr(output_router, "default_output", capture)
     return capture, output_router, default_output
 
@@ -2084,28 +2225,32 @@ def _analysis_transcript_payload(
     system_prompt: str | None,
     assistant_output: str,
     output_sources: list[dict[str, str]],
+    messages: list[dict[str, Any]] | None = None,
+    status: str | None = None,
 ) -> dict[str, Any]:
-    messages = []
-    if system_prompt:
-        messages.append(
-            {
-                "role": "system",
-                "content": system_prompt,
-            }
+    payload_messages = messages
+    if payload_messages is None:
+        payload_messages = []
+        if system_prompt:
+            payload_messages.append(
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                }
+            )
+        payload_messages.extend(
+            [
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+                {
+                    "role": "assistant",
+                    "content": assistant_output,
+                },
+            ]
         )
-    messages.extend(
-        [
-            {
-                "role": "user",
-                "content": prompt,
-            },
-            {
-                "role": "assistant",
-                "content": assistant_output,
-            },
-        ]
-    )
-    return {
+    payload = {
         "stage": "analysis",
         "schema_version": 1,
         "issue_url": issue_url,
@@ -2121,8 +2266,11 @@ def _analysis_transcript_payload(
             "assistant": assistant_output,
             "sources": output_sources,
         },
-        "messages": messages,
+        "messages": payload_messages,
     }
+    if status is not None:
+        payload["status"] = status
+    return payload
 
 
 async def _collect_analysis_chat(
@@ -2131,11 +2279,14 @@ async def _collect_analysis_chat(
     transcript_parts: list[str],
     *,
     transcript_capture: "_TranscriptOutput | None" = None,
+    transcript_writer: "_AnalysisTranscriptWriter | None" = None,
 ) -> None:
     async for chunk in _chat(agent, prompt):
         text = _chunk_text(chunk)
         if transcript_capture is None or not transcript_capture.has_text:
             transcript_parts.append(text)
+            if transcript_writer is not None:
+                transcript_writer.record_assistant_text(text, source="chat_chunks")
 
 
 async def _wait_for_analysis_completion_signal(
@@ -2376,10 +2527,12 @@ def _read_json_file(path: str | Path) -> Any:
 def _write_json_file(path: str | Path, value: Any) -> Path:
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
+    temp_path = target.with_name(f".{target.name}.tmp")
+    temp_path.write_text(
         json.dumps(value, indent=2, sort_keys=True, default=str) + "\n",
         encoding="utf-8",
     )
+    temp_path.replace(target)
     return target
 
 
