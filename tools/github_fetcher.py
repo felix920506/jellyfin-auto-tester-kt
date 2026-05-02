@@ -138,6 +138,13 @@ def _get_linked_items(
             repo = client.get_repo(f"{owner}/{repo_name}")
             issue = repo.get_issue(number)
         except (UnknownObjectException, GithubException) as exc:
+            logger.warning(
+                "github_fetcher failed to fetch linked item",
+                owner=owner,
+                repo=repo_name,
+                number=number,
+                error=str(exc),
+            )
             linked_issues.append(
                 {
                     "url": f"https://github.com/{owner}/{repo_name}/issues/{number}",
@@ -152,7 +159,14 @@ def _get_linked_items(
             merged = False
             try:
                 merged = bool(repo.get_pull(number).merged)
-            except GithubException:
+            except GithubException as exc:
+                logger.warning(
+                    "github_fetcher failed to check PR merge status",
+                    owner=owner,
+                    repo=repo_name,
+                    number=number,
+                    error=str(exc),
+                )
                 merged = False
             linked_prs.append(
                 {
@@ -256,7 +270,7 @@ class GitHubFetcherTool(BaseTool):
         logger.debug("github_fetcher invoked", tool_args=args, kwargs_keys=list(kwargs))
         issue_url = args.get("issue_url") or args.get("url", "")
         if not issue_url:
-            logger.debug(
+            logger.warning(
                 "github_fetcher rejected: missing issue_url",
                 arg_keys=list(args.keys()),
             )
@@ -285,7 +299,7 @@ class GitHubFetcherTool(BaseTool):
                 include_linked=include_linked,
             )
         except (ValueError, GithubException, UnknownObjectException) as exc:
-            logger.debug(
+            logger.warning(
                 "github_fetcher failed",
                 exc_type=type(exc).__name__,
                 error=str(exc),

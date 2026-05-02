@@ -278,7 +278,7 @@ class GitHubSearchTool(BaseTool):
         logger.debug("github_search invoked", tool_args=args, kwargs_keys=list(kwargs))
         query = _query_from_args(args)
         if not query:
-            logger.debug(
+            logger.warning(
                 "github_search rejected: missing query",
                 arg_keys=list(args.keys()),
             )
@@ -308,7 +308,7 @@ class GitHubSearchTool(BaseTool):
                 max_results=max_results,
             )
         except (ValueError, GithubException) as exc:
-            logger.debug(
+            logger.warning(
                 "github_search failed",
                 exc_type=type(exc).__name__,
                 error=str(exc),
