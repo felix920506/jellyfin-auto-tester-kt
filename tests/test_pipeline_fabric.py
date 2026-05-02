@@ -1,8 +1,11 @@
 import asyncio
 import io
 import json
+import logging
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +15,7 @@ from main import (
     AnalysisAgentEmptyResponseError,
     AnalysisAgentProtocolError,
     BlockedStage1ModelError,
+    LOGGER_NAME,
     _build_parser,
     _build_stage_parser,
     _assert_stage1_model_allowed_for_recipe,
@@ -25,6 +29,7 @@ from main import (
     _stage1_model_identifier_from_config,
     _receive_channel_message,
     apply_execution_turn_budget,
+    configure_runtime_logging,
     execution_turn_budget,
     load_env_file,
     run_analysis_stage,
@@ -1178,6 +1183,58 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertEqual(_default_log_level(), "DEBUG")
             self.assertEqual(_default_log_stderr(), "off")
+
+    def test_configure_runtime_logging_leaves_debug_enabled_for_child_loggers(self):
+        calls = []
+        app_logger = logging.getLogger(LOGGER_NAME)
+        kt_root = logging.getLogger("kohakuterrarium")
+        existing_child = logging.getLogger("kohakuterrarium.some_module")
+        original_levels = {
+            app_logger: app_logger.level,
+            kt_root: kt_root.level,
+            existing_child: existing_child.level,
+        }
+        existing_child.setLevel(logging.INFO)
+
+        fake_logging = types.ModuleType("kohakuterrarium.utils.logging")
+
+        def configure_utf8_stdio(*, log=False):
+            return None
+
+        def get_logger(name, level=logging.INFO):
+            calls.append((name, level))
+            logger = logging.getLogger(name)
+            logger.setLevel(level)
+            return logger
+
+        def set_level(level):
+            kt_root.setLevel(getattr(logging, str(level)))
+
+        fake_logging.configure_utf8_stdio = configure_utf8_stdio
+        fake_logging.disable_stderr_logging = lambda: None
+        fake_logging.enable_stderr_logging = lambda level: None
+        fake_logging.get_logger = get_logger
+        fake_logging.set_level = set_level
+
+        try:
+            with patch.dict(
+                sys.modules,
+                {
+                    "kohakuterrarium": types.ModuleType("kohakuterrarium"),
+                    "kohakuterrarium.utils": types.ModuleType("kohakuterrarium.utils"),
+                    "kohakuterrarium.utils.logging": fake_logging,
+                },
+            ):
+                configure_runtime_logging("DEBUG", "off")
+
+            self.assertEqual(calls, [(LOGGER_NAME, logging.NOTSET)])
+            self.assertEqual(kt_root.level, logging.DEBUG)
+            self.assertEqual(app_logger.level, logging.NOTSET)
+            self.assertEqual(app_logger.getEffectiveLevel(), logging.DEBUG)
+            self.assertEqual(existing_child.level, logging.NOTSET)
+        finally:
+            for logger, level in original_levels.items():
+                logger.setLevel(level)
 
     def test_apply_execution_turn_budget_updates_execution_agent(self):
         engine = FakeEngine([])

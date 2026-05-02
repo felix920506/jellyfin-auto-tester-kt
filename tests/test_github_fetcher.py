@@ -1,4 +1,6 @@
+import asyncio
 import datetime as dt
+import logging
 import unittest
 from unittest.mock import patch
 
@@ -181,6 +183,16 @@ class GitHubFetcherTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_tool_debug_logging_does_not_conflict_with_log_record_args(self):
+        original_level = fetcher.logger.level
+        fetcher.logger.setLevel(logging.DEBUG)
+        try:
+            result = asyncio.run(fetcher.GitHubFetcherTool()._execute({}))
+        finally:
+            fetcher.logger.setLevel(original_level)
+
+        self.assertIn("No issue_url provided", result.error)
 
 
 if __name__ == "__main__":

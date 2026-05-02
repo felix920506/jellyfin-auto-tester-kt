@@ -7,6 +7,7 @@ and resolve issue/PR references found in the issue text.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -15,7 +16,10 @@ from github import Auth, Github, GithubException, UnknownObjectException
 from kohakuterrarium.modules.tool.base import BaseTool, ExecutionMode, ToolResult
 from kohakuterrarium.utils.logging import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger(
+    "kohakuterrarium.jellyfin_auto_tester.tools.github_fetcher",
+    logging.NOTSET,
+)
 
 USER_AGENT = "jellyfin-auto-tester-stage1"
 
@@ -249,7 +253,7 @@ class GitHubFetcherTool(BaseTool):
         return ExecutionMode.DIRECT
 
     async def _execute(self, args: dict[str, Any], **kwargs: Any) -> ToolResult:
-        logger.debug("github_fetcher invoked", args=args, kwargs_keys=list(kwargs))
+        logger.debug("github_fetcher invoked", tool_args=args, kwargs_keys=list(kwargs))
         issue_url = args.get("issue_url", "")
         if not issue_url:
             logger.debug(

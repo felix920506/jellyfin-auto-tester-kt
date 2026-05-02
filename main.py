@@ -267,11 +267,12 @@ def configure_runtime_logging(
     configure_utf8_stdio(log=False)
     kt_log_stderr = os.environ.pop("KT_LOG_STDERR", None) if stderr_mode == "off" else None
     try:
-        get_logger(LOGGER_NAME)
+        get_logger(LOGGER_NAME, logging.NOTSET)
     finally:
         if kt_log_stderr is not None:
             os.environ["KT_LOG_STDERR"] = kt_log_stderr
     set_level(level)
+    _inherit_kohakuterrarium_logger_levels()
     if stderr_mode in {"auto", "on"}:
         enable_stderr_logging(level)
     else:
@@ -287,6 +288,17 @@ def _configure_stdlib_logging(level: str, stderr_mode: str) -> None:
             datefmt="%H:%M:%S",
         )
     root_logger.setLevel(getattr(logging, level))
+    logging.getLogger(LOGGER_NAME).setLevel(logging.NOTSET)
+
+
+def _inherit_kohakuterrarium_logger_levels() -> None:
+    """Let the configured KohakuTerrarium root level control child loggers."""
+
+    for name, logger in logging.Logger.manager.loggerDict.items():
+        if not name.startswith("kohakuterrarium."):
+            continue
+        if isinstance(logger, logging.Logger):
+            logger.setLevel(logging.NOTSET)
 
 
 def _logger() -> logging.Logger:

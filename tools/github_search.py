@@ -7,6 +7,7 @@ requests, and code without falling back to a generic web search.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -14,7 +15,10 @@ from github import Auth, Github, GithubException
 from kohakuterrarium.modules.tool.base import BaseTool, ExecutionMode, ToolResult
 from kohakuterrarium.utils.logging import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger(
+    "kohakuterrarium.jellyfin_auto_tester.tools.github_search",
+    logging.NOTSET,
+)
 
 USER_AGENT = "jellyfin-auto-tester-stage1"
 
@@ -30,8 +34,15 @@ def github_search(
         query: GitHub search query string. Qualifiers such as ``repo:``,
             ``is:issue``, ``is:pr``, ``label:``, and ``in:title`` are all
             supported. Example: ``repo:jellyfin/jellyfin is:issue transcoding``.
+            For ``kind="issues"``, GitHub requires either ``is:issue`` or
+            ``is:pull-request``; if neither is present, the query is broadened
+            to ``(is:issue OR is:pull-request)`` so both issues and PRs are
+            returned. Pull requests often contain relevant context (root-cause
+            discussion, fixes), so prefer leaving both in unless you have a
+            reason to narrow.
         kind: Type of search to perform. One of ``"issues"`` (covers both
-            issues and pull requests), or ``"code"``.
+            issues and pull requests — narrow with ``is:issue`` or
+            ``is:pull-request``/``is:pr`` qualifiers), or ``"code"``.
         max_results: Maximum number of results to return (1–30, default 10).
 
     Returns:
@@ -45,13 +56,24 @@ def github_search(
 
     client = _client()
     if kind == "issues":
-        results = client.search_issues(query=query)
+        effective_query = _ensure_issue_kind_qualifier(query)
+        results = client.search_issues(query=effective_query)
         items = [_format_issue_item(item) for item in _take(results, max_results)]
     else:
         results = client.search_code(query=query)
         items = [_format_code_item(item) for item in _take(results, max_results)]
 
     return {"total_count": results.totalCount, "items": items}
+
+
+def _ensure_issue_kind_qualifier(query: str) -> str:
+    """GitHub's issue search rejects queries without ``is:issue`` or
+    ``is:pull-request``. When neither is present, broaden the query so it
+    returns both issues and pull requests — both can carry relevant context."""
+    lowered = query.lower()
+    if "is:issue" in lowered or "is:pr" in lowered or "is:pull-request" in lowered:
+        return query
+    return f"{query} (is:issue OR is:pull-request)"
 
 
 def _client() -> Github:
@@ -120,7 +142,10 @@ class GitHubSearchTool(BaseTool):
     def description(self) -> str:
         return (
             "Search GitHub for issues, pull requests, or code using the "
-            "GitHub Search API qualifier syntax."
+            "GitHub Search API qualifier syntax. With kind='issues' the search "
+            "covers both issues AND pull requests by default — pull requests "
+            "often hold root-cause discussion and fixes, so prefer keeping "
+            "both unless you explicitly need to narrow with is:issue / is:pr."
         )
 
     @property
@@ -128,7 +153,7 @@ class GitHubSearchTool(BaseTool):
         return ExecutionMode.DIRECT
 
     async def _execute(self, args: dict[str, Any], **kwargs: Any) -> ToolResult:
-        logger.debug("github_search invoked", args=args, kwargs_keys=list(kwargs))
+        logger.debug("github_search invoked", tool_args=args, kwargs_keys=list(kwargs))
         query = args.get("query", "")
         if not query:
             logger.debug(
