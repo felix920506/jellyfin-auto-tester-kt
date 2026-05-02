@@ -1,7 +1,78 @@
+import datetime as dt
 import unittest
 from unittest.mock import patch
 
 from creatures.analysis.tools import github_fetcher as fetcher
+
+
+class _FakeUser:
+    def __init__(self, login):
+        self.login = login
+
+
+class _FakeLabel:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeComment:
+    def __init__(self, body, created_at, login):
+        self.body = body
+        self.created_at = created_at
+        self.user = _FakeUser(login)
+
+
+class _FakeIssue:
+    def __init__(
+        self,
+        *,
+        title="",
+        body="",
+        labels=(),
+        state="open",
+        created_at=None,
+        login=None,
+        html_url="",
+        comments=(),
+        is_pr=False,
+    ):
+        self.title = title
+        self.body = body
+        self.labels = [_FakeLabel(n) for n in labels]
+        self.state = state
+        self.created_at = created_at
+        self.user = _FakeUser(login) if login else None
+        self.html_url = html_url
+        self._comments = list(comments)
+        self.pull_request = object() if is_pr else None
+
+    def get_comments(self):
+        return list(self._comments)
+
+
+class _FakePull:
+    def __init__(self, merged):
+        self.merged = merged
+
+
+class _FakeRepo:
+    def __init__(self, issues, pulls=None):
+        self._issues = issues
+        self._pulls = pulls or {}
+
+    def get_issue(self, number):
+        return self._issues[number]
+
+    def get_pull(self, number):
+        return self._pulls[number]
+
+
+class _FakeClient:
+    def __init__(self, repos):
+        self._repos = repos
+
+    def get_repo(self, full_name):
+        return self._repos[full_name]
 
 
 class GitHubFetcherTests(unittest.TestCase):
@@ -39,43 +110,38 @@ class GitHubFetcherTests(unittest.TestCase):
         )
 
     def test_github_fetcher_normalizes_issue_comments_and_linked_items(self):
-        def get_issue(owner, repo, number):
-            issues = {
-                10: {
-                    "title": "Playback regression",
-                    "body": "Repro steps. Fixes #11 and see #12.",
-                    "labels": [{"name": "bug"}, {"name": "playback"}],
-                    "state": "open",
-                    "created_at": "2026-01-01T00:00:00Z",
-                    "user": {"login": "reporter"},
-                },
-                11: {
-                    "html_url": "https://github.com/jellyfin/jellyfin/issues/11",
-                    "title": "Related issue",
-                    "state": "closed",
-                },
-                12: {
-                    "html_url": "https://github.com/jellyfin/jellyfin/pull/12",
-                    "title": "Fix playback regression",
-                    "state": "closed",
-                    "pull_request": {},
-                },
-            }
-            return issues[number]
+        created = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        comment_created = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
 
-        comments = [
-            {
-                "body": "Also mentioned in #11.",
-                "created_at": "2026-01-02T00:00:00Z",
-                "user": {"login": "maintainer"},
-            }
-        ]
+        target = _FakeIssue(
+            title="Playback regression",
+            body="Repro steps. Fixes #11 and see #12.",
+            labels=("bug", "playback"),
+            state="open",
+            created_at=created,
+            login="reporter",
+            html_url="https://github.com/jellyfin/jellyfin/issues/10",
+            comments=[_FakeComment("Also mentioned in #11.", comment_created, "maintainer")],
+        )
+        linked_issue = _FakeIssue(
+            title="Related issue",
+            state="closed",
+            html_url="https://github.com/jellyfin/jellyfin/issues/11",
+        )
+        linked_pr_issue = _FakeIssue(
+            title="Fix playback regression",
+            state="closed",
+            html_url="https://github.com/jellyfin/jellyfin/pull/12",
+            is_pr=True,
+        )
 
-        with (
-            patch.object(fetcher, "_get_issue", side_effect=get_issue),
-            patch.object(fetcher, "_get_paginated", return_value=comments),
-            patch.object(fetcher, "_get_json", return_value={"merged": True}),
-        ):
+        repo = _FakeRepo(
+            issues={10: target, 11: linked_issue, 12: linked_pr_issue},
+            pulls={12: _FakePull(merged=True)},
+        )
+        client = _FakeClient({"jellyfin/jellyfin": repo})
+
+        with patch.object(fetcher, "_client", return_value=client):
             result = fetcher.github_fetcher(
                 "https://github.com/jellyfin/jellyfin/issues/10"
             )
@@ -83,6 +149,7 @@ class GitHubFetcherTests(unittest.TestCase):
         self.assertEqual(result["title"], "Playback regression")
         self.assertEqual(result["labels"], ["bug", "playback"])
         self.assertEqual(result["author"], "reporter")
+        self.assertEqual(result["created_at"], "2026-01-01T00:00:00Z")
         self.assertEqual(
             result["comments"],
             [
@@ -113,19 +180,6 @@ class GitHubFetcherTests(unittest.TestCase):
                     "merged": True,
                 }
             ],
-        )
-
-    def test_next_link_extracts_rel_next(self):
-        link_header = (
-            '<https://api.github.com/repos/o/r/issues/1/comments?page=2>; '
-            'rel="next", '
-            '<https://api.github.com/repos/o/r/issues/1/comments?page=3>; '
-            'rel="last"'
-        )
-
-        self.assertEqual(
-            fetcher._next_link(link_header),
-            "https://api.github.com/repos/o/r/issues/1/comments?page=2",
         )
 
 
