@@ -11,10 +11,12 @@ import os
 import re
 import shlex
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, TextIO
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from stage1_model_blacklist import is_stage1_model_blacklisted
 
@@ -114,6 +116,19 @@ class StageDebugResult:
     output_dir: str
     output_file: str | None = None
     metadata: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class _OutputChannelMessage:
+    """Local ChannelMessage-compatible payload for Terrarium channels."""
+
+    sender: str
+    content: str | dict | list[dict]
+    metadata: dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.now)
+    message_id: str = field(default_factory=lambda: f"msg_{uuid4().hex[:12]}")
+    reply_to: str | None = None
+    channel: str | None = None
 
 
 class _NullOutput:
@@ -365,6 +380,7 @@ async def run_issue(
     issue_thread = await _prefetch_issue_thread(issue_url, issue_fetcher)
     logger.info("Loading Terrarium recipe from %s", recipe_path)
     engine = await _load_engine(recipe_path, engine_factory=engine_factory)
+    _bind_channel_named_outputs(engine)
     _apply_default_execution_budget(engine)
 
     terminal_task = asyncio.create_task(_wait_for_terminal_message(engine))
@@ -533,6 +549,7 @@ async def run_analysis_stage(
     )
 
     engine = await _load_stage_engine("analysis", engine_factory=engine_factory)
+    _bind_channel_named_outputs(engine)
     plan_task = asyncio.create_task(_receive_channel_message(engine, "plan_ready"))
     await asyncio.sleep(0)
     transcript_parts: list[str] = []
@@ -1521,6 +1538,89 @@ def _apply_default_execution_budget(engine: Any) -> None:
         termination["max_turns"] = max(termination.get("max_turns", 0), max_turns)
     else:
         _set_if_present(termination, "max_turns", max_turns)
+
+
+class _ChannelOutput:
+    """Named output adapter that writes output blocks to a Terrarium channel."""
+
+    def __init__(self, channel: Any, *, channel_name: str, sender: str) -> None:
+        self._channel = channel
+        self._channel_name = channel_name
+        self._sender = sender
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def write(self, content: str) -> None:
+        message = _OutputChannelMessage(sender=self._sender, content=content)
+        await _maybe_await(self._channel.send(message))
+
+    async def write_stream(self, _chunk: str) -> None:
+        pass
+
+    async def flush(self) -> None:
+        pass
+
+    async def on_processing_start(self) -> None:
+        pass
+
+    async def on_processing_end(self) -> None:
+        pass
+
+    def on_activity(self, _activity_type: str, _detail: str) -> None:
+        pass
+
+    async def on_user_input(self, _text: str) -> None:
+        pass
+
+
+def _bind_channel_named_outputs(engine: Any) -> None:
+    """Bind ``type: channel`` named outputs to Terrarium shared channels.
+
+    KohakuTerrarium's generic output factory does not currently ship a builtin
+    ``channel`` output type, so those entries otherwise fall back to stdout.
+    """
+
+    for agent_name in ("analysis_agent", "execution_agent", "report_agent"):
+        try:
+            agent = _get_agent(engine, agent_name)
+        except Exception:
+            continue
+
+        router = getattr(agent, "output_router", None)
+        named_outputs = getattr(router, "named_outputs", None)
+        if not isinstance(named_outputs, dict):
+            continue
+
+        config = getattr(agent, "config", None)
+        output_config = getattr(config, "output", None)
+        output_items = getattr(output_config, "named_outputs", None)
+        if not isinstance(output_items, dict):
+            continue
+
+        sender = _nonempty_string(getattr(config, "name", None)) or agent_name
+        for output_name, output_item in output_items.items():
+            if getattr(output_item, "type", None) != "channel":
+                continue
+            options = getattr(output_item, "options", {}) or {}
+            channel_name = options.get("channel") or output_name
+            channel = _get_channel(engine, channel_name)
+            if channel is None:
+                _logger().warning(
+                    "Named output channel not found for %s.%s -> %s",
+                    agent_name,
+                    output_name,
+                    channel_name,
+                )
+                continue
+            named_outputs[output_name] = _ChannelOutput(
+                channel,
+                channel_name=channel_name,
+                sender=sender,
+            )
 
 
 def apply_execution_turn_budget(engine: Any, plan: dict[str, Any]) -> tuple[int, int]:

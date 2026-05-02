@@ -16,6 +16,7 @@ from main import (
     _build_stage_parser,
     _assert_stage1_model_allowed_for_recipe,
     _assert_stage1_model_config_allowed,
+    _bind_channel_named_outputs,
     _default_log_level,
     _default_log_stderr,
     _normalize_stage_argv,
@@ -55,6 +56,7 @@ class FakeDefaultOutput:
 class FakeOutputRouter:
     def __init__(self):
         self.default_output = FakeDefaultOutput()
+        self.named_outputs = {}
 
 
 class FakeInnerAgent:
@@ -169,6 +171,40 @@ class FakeExecutionAgent:
     def __init__(self):
         self.max_iterations = 1
         self.termination = {"max_turns": 1}
+
+
+class FakeOutputConfigItem:
+    def __init__(self, output_type, options=None):
+        self.type = output_type
+        self.options = options or {}
+
+
+class FakeOutputConfig:
+    def __init__(self, named_outputs):
+        self.named_outputs = named_outputs
+
+
+class FakeAgentConfig:
+    def __init__(self, name, named_outputs):
+        self.name = name
+        self.output = FakeOutputConfig(named_outputs)
+
+
+class FakeNamedOutputAgent:
+    def __init__(self, name, named_outputs):
+        self.output_router = FakeOutputRouter()
+        self.output_router.named_outputs = {
+            name: FakeDefaultOutput() for name in named_outputs
+        }
+        self.config = FakeAgentConfig(name, named_outputs)
+
+
+class CapturingAsyncChannel:
+    def __init__(self):
+        self.messages = []
+
+    async def send(self, message):
+        self.messages.append(message)
 
 
 class FakeChannel:
@@ -646,6 +682,28 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("REJECTED", analysis_agent.prompts[1])
         self.assertIn("attempt 2 of 3", analysis_agent.prompts[1])
         self.assertTrue(analysis_agent.cancelled)
+
+    async def test_binds_channel_named_outputs_to_shared_channels(self):
+        channel = CapturingAsyncChannel()
+        named_outputs = {
+            "plan_ready": FakeOutputConfigItem(
+                "channel",
+                {"channel": "plan_ready"},
+            )
+        }
+        analysis_agent = FakeNamedOutputAgent("analysis_agent", named_outputs)
+        engine = FakeEngine(
+            [],
+            channels={"plan_ready": channel},
+            analysis_agent=analysis_agent,
+        )
+
+        _bind_channel_named_outputs(engine)
+        await analysis_agent.output_router.named_outputs["plan_ready"].write('{"ok": true}')
+
+        self.assertEqual(len(channel.messages), 1)
+        self.assertEqual(channel.messages[0].sender, "analysis_agent")
+        self.assertEqual(channel.messages[0].content, '{"ok": true}')
 
     async def test_run_issue_stops_on_insufficient_information(self):
         engine = FakeEngine(["INSUFFICIENT_INFORMATION\nmissing steps\n"])
