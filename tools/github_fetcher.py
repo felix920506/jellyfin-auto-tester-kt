@@ -767,7 +767,7 @@ def _format_discussion_payload(
     return {
         "kind": "discussion",
         "number": number if number is not None else getattr(discussion, "number", None),
-        "url": _discussion_url(discussion),
+        "url": _discussion_url(discussion, fallback_number=number),
         "title": discussion.title or "",
         "body": _discussion_body(discussion),
         "labels": [],
@@ -785,7 +785,10 @@ def _format_discussion_payload(
 
 def _format_discussion_summary(discussion: Any) -> dict[str, Any]:
     return {
-        "url": _discussion_url(discussion),
+        "url": _discussion_url(
+            discussion,
+            fallback_number=getattr(discussion, "number", None),
+        ),
         "title": discussion.title or "",
         "state": "",
         "category": _discussion_category_name(discussion),
@@ -807,8 +810,48 @@ def _discussion_body(value: Any) -> str:
     return getattr(value, "body", "") or ""
 
 
-def _discussion_url(discussion: Any) -> str:
-    return getattr(discussion, "url", "") or getattr(discussion, "html_url", "") or ""
+def _discussion_url(
+    discussion: Any,
+    fallback_number: int | None = None,
+) -> str:
+    raw_url = _raw_graphql_value(discussion, "url")
+    if raw_url:
+        return raw_url
+
+    for attr_name in ("html_url", "url"):
+        try:
+            value = getattr(discussion, attr_name, "")
+        except GithubException:
+            value = ""
+        if value:
+            return value
+
+    if fallback_number is not None:
+        repo = _discussion_repository_full_name(discussion)
+        if repo:
+            return f"https://github.com/{repo}/discussions/{fallback_number}"
+    return ""
+
+
+def _raw_graphql_value(value: Any, key: str) -> str:
+    raw_data = getattr(value, "_rawData", None)
+    if isinstance(raw_data, dict):
+        raw_value = raw_data.get(key)
+        if isinstance(raw_value, str):
+            return raw_value
+    return ""
+
+
+def _discussion_repository_full_name(discussion: Any) -> str:
+    raw_data = getattr(discussion, "_rawData", {})
+    if not isinstance(raw_data, dict):
+        return ""
+    repository_data = raw_data.get("repository")
+    if isinstance(repository_data, dict):
+        name_with_owner = repository_data.get("nameWithOwner")
+        if isinstance(name_with_owner, str):
+            return name_with_owner
+    return ""
 
 
 def _discussion_category_name(discussion: Any) -> str:

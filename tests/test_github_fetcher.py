@@ -68,6 +68,42 @@ class _FakeDiscussion:
         return list(self._comments)
 
 
+class _FakePyGithubDiscussion:
+    def __init__(
+        self,
+        *,
+        number=1,
+        title="",
+        body="",
+        category="General",
+        created_at=None,
+        updated_at=None,
+        login=None,
+        url="",
+        comments=(),
+    ):
+        self.number = number
+        self.title = title
+        self.body = body
+        self.body_text = body
+        self.category = _FakeCategory(category)
+        self.created_at = created_at
+        self.updated_at = updated_at
+        self.author = _FakeUser(login) if login else None
+        self._comments = list(comments)
+        self._rawData = {
+            "url": url,
+            "repository": {"nameWithOwner": "jellyfin/jellyfin"},
+        }
+
+    @property
+    def url(self):
+        raise GithubException(400, {"message": "Returned object contains no URL"}, None)
+
+    def get_comments(self, _schema):
+        return list(self._comments)
+
+
 class _FakeContent:
     def __init__(
         self,
@@ -519,6 +555,41 @@ class GitHubFetcherTests(unittest.TestCase):
 
         self.assertEqual(result["linked_issues"], [])
         self.assertEqual(result["linked_prs"], [])
+        self.assertEqual(
+            result["linked_discussions"],
+            [
+                {
+                    "url": "https://github.com/jellyfin/jellyfin/discussions/7328",
+                    "title": "LG Smart TV profile",
+                    "state": "",
+                    "category": "Troubleshooting",
+                }
+            ],
+        )
+
+    def test_linked_discussion_uses_raw_graphql_url(self):
+        target = _FakeIssue(
+            title="Playback regression",
+            body="See #7328.",
+            html_url="https://github.com/jellyfin/jellyfin/issues/10",
+        )
+        discussion = _FakePyGithubDiscussion(
+            number=7328,
+            title="LG Smart TV profile",
+            category="Troubleshooting",
+            url="https://github.com/jellyfin/jellyfin/discussions/7328",
+        )
+        repo = _FakeRepo(
+            issues={10: target},
+            discussions={7328: discussion},
+        )
+        client = _FakeClient({"jellyfin/jellyfin": repo})
+
+        with patch.object(fetcher, "_client", return_value=client):
+            result = fetcher.github_fetcher(
+                "https://github.com/jellyfin/jellyfin/issues/10"
+            )
+
         self.assertEqual(
             result["linked_discussions"],
             [
