@@ -31,8 +31,12 @@ analysis.
 
 - If the issue references a specific media format, codec, or file type, search
   for known Jellyfin behavior or related issues using `web_search`.
+- For any GitHub URL (issues, pull requests, commits, code), always use
+  `github_fetcher` instead of `web_fetch`. `github_fetcher` returns structured
+  data and respects rate limits; `web_fetch` on GitHub URLs returns raw HTML and
+  should never be used for GitHub resources.
 - Fetch linked external resources such as logs, screenshots, and config files
-  with `web_fetch`.
+  with `web_fetch`. Use `web_fetch` only for non-GitHub URLs.
 - If the issue references a Jellyfin API endpoint or feature, fetch the relevant
   Jellyfin documentation page.
 

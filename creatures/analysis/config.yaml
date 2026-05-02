@@ -2,7 +2,7 @@ name: "analysis_agent"
 version: "1.0"
 
 controller:
-  llm: "openrouter/claude-sonnet-4.6"
+  llm: "openrouter/gemini-3-flash"
   temperature: 0.2
 
 system_prompt_file: "prompts/system.md"
