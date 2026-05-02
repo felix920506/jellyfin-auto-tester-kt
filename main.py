@@ -16,10 +16,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, TextIO
 from urllib.parse import urlparse
 
+from stage1_model_blacklist import is_stage1_model_blacklisted
+
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_RECIPE_PATH = REPO_ROOT / "terrarium.yaml"
 DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
+DEFAULT_ANALYSIS_CONFIG_PATH = REPO_ROOT / "creatures" / "analysis" / "config.yaml"
 TERMINAL_CHANNELS = ("final_report", "human_review_queue")
 STAGE_CHOICES = ("analysis", "execution", "report")
 STAGE_CHANNEL_GRACE_S = 2.0
@@ -91,6 +94,10 @@ class PipelineTimeoutError(TimeoutError):
 
 class AnalysisAgentEmptyResponseError(AssertionError):
     """Raised when Stage 1 returns no text and no ReproductionPlan."""
+
+
+class BlockedStage1ModelError(RuntimeError):
+    """Raised when Stage 1 is configured with a blacklisted model."""
 
 
 @dataclass(slots=True)
@@ -347,6 +354,8 @@ async def run_issue(
     load_env_file()
     logger = _logger()
     logger.info("Starting full pipeline for %s on Jellyfin %s", issue_url, container_version)
+    if engine_factory is None:
+        _assert_stage1_model_allowed_for_recipe(recipe_path)
     logger.info("Prefetching GitHub issue thread")
     issue_thread = await _prefetch_issue_thread(issue_url, issue_fetcher)
     logger.info("Loading Terrarium recipe from %s", recipe_path)
@@ -437,6 +446,8 @@ async def run_analysis_stage(
         issue_url,
         container_version,
     )
+    if engine_factory is None:
+        _assert_stage1_model_config_allowed(DEFAULT_ANALYSIS_CONFIG_PATH)
     issue_thread = await _prefetch_issue_thread(issue_url, issue_fetcher)
     output_dir = _prepare_output_dir(out_dir)
     _write_json_file(
@@ -718,9 +729,12 @@ async def _load_engine(
     *,
     engine_factory: Callable[[str], Any] | None,
 ) -> Any:
-    recipe = str(Path(recipe_path).expanduser())
+    recipe_path = Path(recipe_path).expanduser()
+    recipe = str(recipe_path)
     if engine_factory is not None:
         return await _maybe_await(engine_factory(recipe))
+
+    _assert_stage1_model_allowed_for_recipe(recipe_path)
 
     try:
         from kohakuterrarium import Terrarium
@@ -742,6 +756,8 @@ async def _load_stage_engine(
         return await _maybe_await(engine_factory(stage))
     if stage != "analysis":
         raise ValueError(f"no isolated Terrarium recipe is defined for stage {stage!r}")
+
+    _assert_stage1_model_config_allowed(DEFAULT_ANALYSIS_CONFIG_PATH)
 
     try:
         from kohakuterrarium import Terrarium
@@ -772,6 +788,116 @@ async def _load_stage_engine(
         channels=[ChannelConfig(name="plan_ready", channel_type="queue")],
     )
     return await _maybe_await(Terrarium.from_recipe(recipe))
+
+
+def _assert_stage1_model_allowed_for_recipe(recipe_path: str | Path) -> None:
+    config_path = _stage1_config_path_from_recipe(recipe_path)
+    _assert_stage1_model_config_allowed(config_path)
+
+
+def _assert_stage1_model_config_allowed(config_path: str | Path) -> None:
+    model = _stage1_model_identifier_from_config(config_path)
+    if not model or not is_stage1_model_blacklisted(model):
+        return
+
+    relative_path = _display_path(config_path)
+    raise BlockedStage1ModelError(
+        "Stage 1 model "
+        f"{model!r} from {relative_path} is blacklisted. Gemini 3.1 Pro and "
+        "Gemini 3.1 Flash Lite currently cause Stage 1 errors; choose a "
+        "different Stage 1 model before continuing."
+    )
+
+
+def _stage1_config_path_from_recipe(recipe_path: str | Path) -> Path:
+    recipe_path = _absolute_path(recipe_path)
+    recipe = _load_yaml_mapping(recipe_path)
+    creatures = recipe.get("creatures")
+    if not isinstance(creatures, list):
+        return DEFAULT_ANALYSIS_CONFIG_PATH
+
+    for creature in creatures:
+        if not isinstance(creature, dict):
+            continue
+        if creature.get("name") != "analysis_agent":
+            continue
+        config_value = creature.get("base_config") or creature.get("config")
+        if not isinstance(config_value, str) or not config_value.strip():
+            return DEFAULT_ANALYSIS_CONFIG_PATH
+        config_path = Path(config_value).expanduser()
+        if not config_path.is_absolute():
+            config_path = recipe_path.parent / config_path
+        return _creature_config_file(config_path)
+
+    return DEFAULT_ANALYSIS_CONFIG_PATH
+
+
+def _stage1_model_identifier_from_config(config_path: str | Path) -> str | None:
+    config = _load_yaml_mapping(_creature_config_file(Path(config_path).expanduser()))
+    controller = config.get("controller")
+    sources = [controller, config] if isinstance(controller, dict) else [config]
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        model = _nonempty_string(source.get("model"))
+        provider = _nonempty_string(source.get("provider"))
+        if model:
+            if provider and "/" not in model:
+                return f"{provider}/{model}"
+            return model
+
+        llm = _nonempty_string(source.get("llm"))
+        if llm:
+            return llm
+
+    return None
+
+
+def _load_yaml_mapping(path: str | Path) -> dict[str, Any]:
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency install issue
+        raise RuntimeError(
+            "PyYAML is required to inspect Stage 1 model configuration. "
+            "Install dependencies with `.venv/bin/python -m pip install -r "
+            "requirements.txt`."
+        ) from exc
+
+    path = Path(path)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected YAML mapping in {_display_path(path)}")
+    return data
+
+
+def _creature_config_file(path: Path) -> Path:
+    if path.suffix.lower() in {".yaml", ".yml"}:
+        return path
+    return path / "config.yaml"
+
+
+def _absolute_path(path: str | Path) -> Path:
+    resolved = Path(path).expanduser()
+    if resolved.is_absolute():
+        return resolved
+    return (Path.cwd() / resolved).resolve()
+
+
+def _display_path(path: str | Path) -> str:
+    path = Path(path)
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _nonempty_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
 
 
 async def _prefetch_issue_thread(

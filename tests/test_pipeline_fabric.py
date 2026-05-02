@@ -10,12 +10,17 @@ from unittest.mock import patch
 from main import (
     ANALYSIS_TRANSCRIPT_FILE,
     AnalysisAgentEmptyResponseError,
+    BlockedStage1ModelError,
     _build_parser,
     _build_stage_parser,
+    _assert_stage1_model_allowed_for_recipe,
+    _assert_stage1_model_config_allowed,
     _default_log_level,
     _default_log_stderr,
     _normalize_stage_argv,
     _parse_stage_choice,
+    _stage1_config_path_from_recipe,
+    _stage1_model_identifier_from_config,
     _receive_channel_message,
     apply_execution_turn_budget,
     execution_turn_budget,
@@ -519,6 +524,42 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events[:2], ["issue_fetch", "engine_load"])
 
+    async def test_run_issue_rejects_blacklisted_stage1_model_before_prefetch(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            analysis_dir = root / "creatures" / "analysis"
+            analysis_dir.mkdir(parents=True)
+            (analysis_dir / "config.yaml").write_text(
+                "name: analysis_agent\n"
+                "controller:\n"
+                "  llm: openrouter/gemini-3.1-pro\n",
+                encoding="utf-8",
+            )
+            recipe_path = root / "terrarium.yaml"
+            recipe_path.write_text(
+                "version: '1.0'\n"
+                "creatures:\n"
+                "  - name: analysis_agent\n"
+                "    base_config: creatures/analysis\n",
+                encoding="utf-8",
+            )
+
+            def issue_fetcher(**_kwargs):
+                calls.append("issue_fetch")
+                return _sample_issue_thread()
+
+            with self.assertRaises(BlockedStage1ModelError):
+                await run_issue(
+                    "https://github.com/jellyfin/jellyfin/issues/1",
+                    "10.9.7",
+                    recipe_path=recipe_path,
+                    stream=None,
+                    issue_fetcher=issue_fetcher,
+                )
+
+        self.assertEqual(calls, [])
+
     async def test_run_issue_treats_plan_ready_as_analysis_completion(self):
         plan_channel = FakeOnSendChannel("plan_ready")
         payload = {"report_path": "/tmp/artifacts/run-1/report.md"}
@@ -983,6 +1024,76 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(budget, (96, 106))
         self.assertEqual(engine.execution_agent.max_iterations, 96)
         self.assertEqual(engine.execution_agent.termination["max_turns"], 106)
+
+    def test_stage1_model_config_rejects_blacklisted_models(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.yaml"
+            config_path.write_text(
+                "name: analysis_agent\n"
+                "controller:\n"
+                "  llm: openrouter/gemini-3.1-pro\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(BlockedStage1ModelError) as context:
+                _assert_stage1_model_config_allowed(config_path)
+
+            self.assertIn("gemini-3.1-pro", str(context.exception))
+
+    def test_stage1_model_config_allows_other_gemini_models(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.yaml"
+            config_path.write_text(
+                "name: analysis_agent\n"
+                "controller:\n"
+                "  llm: openrouter/gemini-2.5-pro\n",
+                encoding="utf-8",
+            )
+
+            _assert_stage1_model_config_allowed(config_path)
+
+    def test_stage1_model_config_supports_provider_and_model_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.yaml"
+            config_path.write_text(
+                "name: analysis_agent\n"
+                "controller:\n"
+                "  provider: openrouter\n"
+                "  model: gemini-3.1-flash-lite\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                _stage1_model_identifier_from_config(config_path),
+                "openrouter/gemini-3.1-flash-lite",
+            )
+            with self.assertRaises(BlockedStage1ModelError):
+                _assert_stage1_model_config_allowed(config_path)
+
+    def test_stage1_model_recipe_resolution_checks_analysis_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            analysis_dir = root / "agents" / "analysis"
+            analysis_dir.mkdir(parents=True)
+            config_path = analysis_dir / "config.yaml"
+            config_path.write_text(
+                "name: analysis_agent\n"
+                "controller:\n"
+                "  llm: openrouter/gemini-3.1-pro\n",
+                encoding="utf-8",
+            )
+            recipe_path = root / "terrarium.yaml"
+            recipe_path.write_text(
+                "version: '1.0'\n"
+                "creatures:\n"
+                "  - name: analysis_agent\n"
+                "    base_config: agents/analysis\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(_stage1_config_path_from_recipe(recipe_path), config_path)
+            with self.assertRaises(BlockedStage1ModelError):
+                _assert_stage1_model_allowed_for_recipe(recipe_path)
 
     def test_load_env_file_loads_values_without_overriding_existing_env(self):
         with tempfile.TemporaryDirectory() as temp_dir:

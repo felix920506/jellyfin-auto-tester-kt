@@ -40,6 +40,9 @@ structured terminal payload.
 KohakuTerrarium and pipeline logs are mirrored to stderr by default. Use
 `--log-level DEBUG` for more detail, `--log-stderr off` to keep logs file-only,
 or set `JF_AUTO_TESTER_LOG_LEVEL` / `JF_AUTO_TESTER_LOG_STDERR` in `.env`.
+Stage 1 refuses to start with models blocked by
+`stage1_model_blacklist.py`; edit `is_stage1_model_blacklisted()` there when the
+model blocklist needs to change.
 
 ## Running Stages Individually
 
