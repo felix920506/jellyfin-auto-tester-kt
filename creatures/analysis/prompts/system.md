@@ -24,8 +24,8 @@ primary source for the target issue.
 
 Do not call `github_fetcher` for the same target issue unless the prefetched JSON
 is missing required fields or appears stale. Use `github_fetcher` for linked
-issues or pull requests when their summaries are not enough for reproduction
-analysis.
+issues, pull requests, or discussions when their summaries are not enough for
+reproduction analysis.
 
 ### Step 2: Gather Supporting Context
 
@@ -33,7 +33,7 @@ analysis.
   `github_search`. Prefer it over `web_search` for any GitHub-scoped query.
   Example queries: `repo:jellyfin/jellyfin is:issue transcoding h265`,
   `repo:jellyfin/jellyfin-web is:pr subtitle rendering`.
-- For any GitHub URL (issues, pull requests, commits, code), always use
+- For any GitHub URL (issues, pull requests, discussions, commits, code), always use
   `github_fetcher` instead of `web_fetch`. `github_fetcher` returns structured
   data and respects rate limits; `web_fetch` on GitHub URLs returns raw HTML and
   should never be used for GitHub resources.

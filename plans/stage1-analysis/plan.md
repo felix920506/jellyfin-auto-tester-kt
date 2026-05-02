@@ -166,13 +166,14 @@ result, output only the tool call block and wait for the next turn.
 # Arguments:
 #   issue_url: str         — full GitHub issue URL
 #   include_comments: bool — default True
-#   include_linked: bool   — default True (fetches linked PRs/issues)
+#   include_linked: bool   — default True (fetches linked PRs/issues/discussions)
 
 # Returns: dict with keys:
 #   title, body, labels, state, created_at, author
 #   comments: list of {author, body, created_at}
 #   linked_issues: list of {url, title, state}
 #   linked_prs: list of {url, title, state, merged}
+#   linked_discussions: list of {url, title, state, category}
 ```
 
 **Implementation Notes:**

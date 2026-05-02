@@ -4,6 +4,8 @@ import logging
 import unittest
 from unittest.mock import patch
 
+from github import GithubException
+
 from tools import github_fetcher as fetcher
 
 
@@ -22,6 +24,48 @@ class _FakeComment:
         self.body = body
         self.created_at = created_at
         self.user = _FakeUser(login)
+
+
+class _FakeCategory:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeDiscussionComment:
+    def __init__(self, body, created_at, login):
+        self.body = body
+        self.body_text = body
+        self.created_at = created_at
+        self.author = _FakeUser(login)
+
+
+class _FakeDiscussion:
+    def __init__(
+        self,
+        *,
+        number=1,
+        title="",
+        body="",
+        category="General",
+        created_at=None,
+        updated_at=None,
+        login=None,
+        url="",
+        comments=(),
+    ):
+        self.number = number
+        self.title = title
+        self.body = body
+        self.body_text = body
+        self.category = _FakeCategory(category)
+        self.created_at = created_at
+        self.updated_at = updated_at
+        self.author = _FakeUser(login) if login else None
+        self.url = url
+        self._comments = list(comments)
+
+    def get_comments(self, _schema):
+        return list(self._comments)
 
 
 class _FakeIssue:
@@ -58,15 +102,23 @@ class _FakePull:
 
 
 class _FakeRepo:
-    def __init__(self, issues, pulls=None):
+    def __init__(self, issues, pulls=None, discussions=None):
         self._issues = issues
         self._pulls = pulls or {}
+        self._discussions = discussions or {}
 
     def get_issue(self, number):
+        if number not in self._issues:
+            raise GithubException(404, {"message": "Not Found"}, None)
         return self._issues[number]
 
     def get_pull(self, number):
         return self._pulls[number]
+
+    def get_discussion(self, number, _schema):
+        if number not in self._discussions:
+            raise GithubException(404, {"message": "Not Found"}, None)
+        return self._discussions[number]
 
 
 class _FakeClient:
@@ -87,6 +139,20 @@ class GitHubFetcherTests(unittest.TestCase):
             fetcher._parse_issue_url("https://github.com/jellyfin/jellyfin/pull/456"),
             ("jellyfin", "jellyfin", 456),
         )
+        self.assertEqual(
+            fetcher._parse_issue_url(
+                "https://github.com/jellyfin/jellyfin/discussions/789"
+            ),
+            ("jellyfin", "jellyfin", 789),
+        )
+
+    def test_parse_github_url_includes_resource_kind(self):
+        self.assertEqual(
+            fetcher._parse_github_url(
+                "https://github.com/jellyfin/jellyfin/discussions/789"
+            ),
+            ("jellyfin", "jellyfin", "discussions", 789),
+        )
 
     def test_parse_issue_url_rejects_non_github_url(self):
         with self.assertRaises(ValueError):
@@ -96,7 +162,8 @@ class GitHubFetcherTests(unittest.TestCase):
         references = fetcher._extract_references(
             [
                 "Fixes #1, relates to jellyfin/jellyfin-web#2, "
-                "and https://github.com/jellyfin/jellyfin/pull/3."
+                "and https://github.com/jellyfin/jellyfin/pull/3. "
+                "See https://github.com/jellyfin/jellyfin/discussions/4 too."
             ],
             "jellyfin",
             "jellyfin",
@@ -105,9 +172,10 @@ class GitHubFetcherTests(unittest.TestCase):
         self.assertEqual(
             references,
             {
-                ("jellyfin", "jellyfin", 1),
-                ("jellyfin", "jellyfin-web", 2),
-                ("jellyfin", "jellyfin", 3),
+                ("jellyfin", "jellyfin", "unknown", 1),
+                ("jellyfin", "jellyfin-web", "unknown", 2),
+                ("jellyfin", "jellyfin", "pull", 3),
+                ("jellyfin", "jellyfin", "discussions", 4),
             },
         )
 
@@ -183,6 +251,86 @@ class GitHubFetcherTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(result["linked_discussions"], [])
+
+    def test_github_fetcher_fetches_discussion_url(self):
+        created = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        updated = dt.datetime(2026, 1, 2, tzinfo=dt.timezone.utc)
+        comment_created = dt.datetime(2026, 1, 3, tzinfo=dt.timezone.utc)
+        discussion = _FakeDiscussion(
+            number=7328,
+            title="LG Smart TV profile",
+            body="Discussion body",
+            category="Troubleshooting",
+            created_at=created,
+            updated_at=updated,
+            login="reporter",
+            url="https://github.com/jellyfin/jellyfin/discussions/7328",
+            comments=[
+                _FakeDiscussionComment("Discussion comment", comment_created, "helper")
+            ],
+        )
+        repo = _FakeRepo(issues={}, discussions={7328: discussion})
+        client = _FakeClient({"jellyfin/jellyfin": repo})
+
+        with patch.object(fetcher, "_client", return_value=client):
+            result = fetcher.github_fetcher(
+                "https://github.com/jellyfin/jellyfin/discussions/7328"
+            )
+
+        self.assertEqual(result["kind"], "discussion")
+        self.assertEqual(result["title"], "LG Smart TV profile")
+        self.assertEqual(result["category"], "Troubleshooting")
+        self.assertEqual(result["author"], "reporter")
+        self.assertEqual(result["created_at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(result["updated_at"], "2026-01-02T00:00:00Z")
+        self.assertEqual(
+            result["comments"],
+            [
+                {
+                    "author": "helper",
+                    "body": "Discussion comment",
+                    "created_at": "2026-01-03T00:00:00Z",
+                }
+            ],
+        )
+
+    def test_linked_item_falls_back_to_discussion_after_issue_404(self):
+        target = _FakeIssue(
+            title="Playback regression",
+            body="See #7328.",
+            html_url="https://github.com/jellyfin/jellyfin/issues/10",
+        )
+        discussion = _FakeDiscussion(
+            number=7328,
+            title="LG Smart TV profile",
+            category="Troubleshooting",
+            url="https://github.com/jellyfin/jellyfin/discussions/7328",
+        )
+        repo = _FakeRepo(
+            issues={10: target},
+            discussions={7328: discussion},
+        )
+        client = _FakeClient({"jellyfin/jellyfin": repo})
+
+        with patch.object(fetcher, "_client", return_value=client):
+            result = fetcher.github_fetcher(
+                "https://github.com/jellyfin/jellyfin/issues/10"
+            )
+
+        self.assertEqual(result["linked_issues"], [])
+        self.assertEqual(result["linked_prs"], [])
+        self.assertEqual(
+            result["linked_discussions"],
+            [
+                {
+                    "url": "https://github.com/jellyfin/jellyfin/discussions/7328",
+                    "title": "LG Smart TV profile",
+                    "state": "",
+                    "category": "Troubleshooting",
+                }
+            ],
+        )
 
     def test_tool_debug_logging_does_not_conflict_with_log_record_args(self):
         original_level = fetcher.logger.level
@@ -195,7 +343,12 @@ class GitHubFetcherTests(unittest.TestCase):
         self.assertIn("No issue_url provided", result.error)
 
     def test_tool_accepts_url_alias(self):
-        payload = {"comments": [], "linked_issues": [], "linked_prs": []}
+        payload = {
+            "comments": [],
+            "linked_issues": [],
+            "linked_prs": [],
+            "linked_discussions": [],
+        }
 
         with patch.object(fetcher, "github_fetcher", return_value=payload) as github_fetcher:
             result = asyncio.run(
