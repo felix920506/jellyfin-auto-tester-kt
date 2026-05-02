@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from main import (
     ANALYSIS_TRANSCRIPT_FILE,
+    AnalysisAgentEmptyResponseError,
     _build_parser,
     _build_stage_parser,
     _default_log_level,
@@ -824,6 +825,31 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status, "no_plan")
             self.assertEqual(result.output_file, ANALYSIS_TRANSCRIPT_FILE)
             self.assertFalse((Path(temp_dir) / "plan.json").exists())
+
+    async def test_run_analysis_stage_raises_on_empty_response(self):
+        engine = FakeEngine([""])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(
+                AnalysisAgentEmptyResponseError,
+                "empty response",
+            ):
+                await asyncio.wait_for(
+                    run_analysis_stage(
+                        "https://github.com/jellyfin/jellyfin/issues/1",
+                        "10.9.7",
+                        temp_dir,
+                        timeout_s=0.01,
+                        stream=None,
+                        engine_factory=lambda stage: engine,
+                        issue_fetcher=_sample_issue_fetcher,
+                    ),
+                    timeout=1,
+                )
+
+            transcript_payload = _read_stage_transcript(temp_dir)
+            self.assertEqual(transcript_payload["output"]["assistant"], "")
+            self.assertFalse((Path(temp_dir) / "plan.json").exists())
+            self.assertFalse((Path(temp_dir) / "stage_result.json").exists())
 
     def test_run_execution_stage_reads_plan_and_writes_result_handoff(self):
         plan = _sample_plan()

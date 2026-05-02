@@ -89,6 +89,10 @@ class PipelineTimeoutError(TimeoutError):
     """Raised when the pipeline does not reach a terminal channel in time."""
 
 
+class AnalysisAgentEmptyResponseError(AssertionError):
+    """Raised when Stage 1 returns no text and no ReproductionPlan."""
+
+
 @dataclass(slots=True)
 class StageDebugResult:
     """Disk handoff result for a single-stage debug run."""
@@ -543,6 +547,7 @@ async def run_analysis_stage(
                 timeout_s=timeout_s,
             )
         if plan is None:
+            _assert_analysis_response_not_empty(transcript)
             logger.warning(
                 "Stage 1 debug run completed without a plan_ready channel message "
                 "or transcript ReproductionPlan"
@@ -894,6 +899,14 @@ def _analysis_channel_grace(timeout_s: float | None) -> float:
     if timeout_s is None:
         return STAGE_CHANNEL_GRACE_S
     return max(0.0, min(float(timeout_s), STAGE_CHANNEL_GRACE_S))
+
+
+def _assert_analysis_response_not_empty(transcript: str) -> None:
+    if transcript.strip():
+        return
+    raise AnalysisAgentEmptyResponseError(
+        "analysis agent returned an empty response without emitting plan_ready"
+    )
 
 
 def _completed_channel_plan(
