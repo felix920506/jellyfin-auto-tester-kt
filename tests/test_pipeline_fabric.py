@@ -1038,7 +1038,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(BlockedStage1ModelError) as context:
                 _assert_stage1_model_config_allowed(config_path)
 
-            self.assertIn("gemini-3.1-pro", str(context.exception))
+            error_message = str(context.exception)
+            self.assertIn("currently blocked", error_message)
+            self.assertIn("stage1_model_blacklist.py", error_message)
+            self.assertNotIn("gemini", error_message.lower())
 
     def test_stage1_model_config_allows_other_gemini_models(self):
         with tempfile.TemporaryDirectory() as temp_dir:

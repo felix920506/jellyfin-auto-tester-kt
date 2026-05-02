@@ -802,10 +802,9 @@ def _assert_stage1_model_config_allowed(config_path: str | Path) -> None:
 
     relative_path = _display_path(config_path)
     raise BlockedStage1ModelError(
-        "Stage 1 model "
-        f"{model!r} from {relative_path} is blacklisted. Gemini 3.1 Pro and "
-        "Gemini 3.1 Flash Lite currently cause Stage 1 errors; choose a "
-        "different Stage 1 model before continuing."
+        "Stage 1 is configured with a model that is currently blocked. "
+        f"Update {relative_path} to use a different Stage 1 model, or edit "
+        "stage1_model_blacklist.py if the blocklist should change."
     )
 
 

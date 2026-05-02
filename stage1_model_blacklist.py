@@ -12,7 +12,8 @@ import re
 
 
 BLACKLISTED_STAGE1_MODEL_PATTERNS = (
-    "gemini-3.1-*",
+    "gemini-3.1-pro*",
+    "gemini-3.1-flash-lite*",
 )
 
 
