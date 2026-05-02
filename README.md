@@ -27,7 +27,7 @@ This project relies on [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTer
 .venv/bin/kt login openrouter
 ```
 
-For more details on managing credentials, refer to the [KohakuTerrarium documentation](https://github.com/Kohaku-Lab/KohakuTerrarium/tree/main/docs).
+For more details on authentication, refer to the [KohakuTerrarium documentation](https://github.com/Kohaku-Lab/KohakuTerrarium/blob/main/docs/en/guides/getting-started.md#3-authenticate-a-model-provider).
 
 The CLI also loads `.env` automatically for project runtime settings. Provider API keys (e.g., `OPENROUTER_API_KEY`) should only be added to `.env` if you want to bypass the KohakuTerrarium saved login store for a specific environment.
 
