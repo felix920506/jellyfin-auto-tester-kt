@@ -31,6 +31,7 @@ LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR")
 LOG_STDERR_CHOICES = ("auto", "on", "off")
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_LOG_STDERR = "auto"
+ANALYSIS_PLAN_MAX_ATTEMPTS = 3
 STAGE_HANDOFF_FILES = {
     "analysis": ("plan.json", "reproduction_plan.json"),
     "execution": ("result.json", "execution_result.json"),
@@ -376,16 +377,72 @@ async def run_issue(
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
         analysis_agent = _get_agent(engine, "analysis_agent")
         _suppress_default_output(analysis_agent)
-        logger.info("Starting Stage 1 analysis")
-        chat_task = asyncio.create_task(
-            _collect_analysis_chat(analysis_agent, prompt, analysis_output)
-        )
+        current_prompt = prompt
+        plan_ready_observed = False
+        observer_failed = False
+        for attempt in range(1, ANALYSIS_PLAN_MAX_ATTEMPTS + 1):
+            logger.info(
+                "Starting Stage 1 analysis attempt %s/%s",
+                attempt,
+                ANALYSIS_PLAN_MAX_ATTEMPTS,
+            )
+            chat_task = asyncio.create_task(
+                _collect_analysis_chat(analysis_agent, current_prompt, analysis_output)
+            )
 
-        await _wait_for_analysis_completion_signal(
-            chat_task=chat_task,
-            plan_observer_task=plan_observer_task,
-            analysis_agent=analysis_agent,
-        )
+            if plan_observer_task is None or observer_failed:
+                await chat_task
+                break
+
+            done, _pending = await asyncio.wait(
+                {chat_task, plan_observer_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if plan_observer_task in done:
+                try:
+                    plan_observer_task.result()
+                except Exception as exc:
+                    _logger().debug("plan_ready observer failed: %s", exc)
+                    observer_failed = True
+                    if not chat_task.done():
+                        await chat_task
+                    break
+
+                _logger().info("Observed plan_ready; stopping Stage 1 analysis")
+                await _stop_analysis_agent(analysis_agent)
+                if not chat_task.done():
+                    chat_task.cancel()
+                    await _cancel_task(chat_task)
+                chat_task = None
+                plan_ready_observed = True
+                break
+
+            await chat_task
+            chat_task = None
+            transcript = "".join(analysis_output)
+            if _is_insufficient_information(transcript):
+                logger.info("Stage 1 stopped with insufficient information")
+                terminal_task.cancel()
+                await _cancel_task(terminal_task)
+                return PipelineResult(
+                    channel="analysis",
+                    message=transcript.strip(),
+                    issue_url=issue_url,
+                    analysis_output=transcript,
+                )
+
+            if attempt >= ANALYSIS_PLAN_MAX_ATTEMPTS:
+                break
+
+            logger.warning(
+                "Rejecting Stage 1 attempt %s/%s: no plan_ready output observed",
+                attempt,
+                ANALYSIS_PLAN_MAX_ATTEMPTS,
+            )
+            current_prompt = _analysis_plan_retry_prompt(
+                attempt + 1,
+                ANALYSIS_PLAN_MAX_ATTEMPTS,
+            )
 
         transcript = "".join(analysis_output)
         if _is_insufficient_information(transcript):
@@ -397,6 +454,17 @@ async def run_issue(
                 message=transcript.strip(),
                 issue_url=issue_url,
                 analysis_output=transcript,
+            )
+        if (
+            plan_observer_task is not None
+            and not observer_failed
+            and not plan_ready_observed
+        ):
+            terminal_task.cancel()
+            await _cancel_task(terminal_task)
+            _raise_analysis_plan_protocol_error(
+                transcript,
+                attempts=ANALYSIS_PLAN_MAX_ATTEMPTS,
             )
 
         try:
@@ -477,94 +545,140 @@ async def run_analysis_stage(
         )
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
         system_prompt = _agent_system_prompt_text(analysis_agent)
-        logger.info("Capturing Stage 1 analysis transcript")
         channel_plan: dict[str, Any] | None = None
+        plan: dict[str, Any] | None = None
+        plan_source: str | None = None
+        transcript = ""
+        current_prompt = prompt
         try:
-            chat_task = asyncio.create_task(
-                _collect_analysis_chat(
-                    analysis_agent,
-                    prompt,
-                    transcript_parts,
-                    transcript_capture=transcript_capture,
+            for attempt in range(1, ANALYSIS_PLAN_MAX_ATTEMPTS + 1):
+                logger.info(
+                    "Capturing Stage 1 analysis transcript attempt %s/%s",
+                    attempt,
+                    ANALYSIS_PLAN_MAX_ATTEMPTS,
                 )
-            )
-            done, _pending = await asyncio.wait(
-                {chat_task, plan_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if plan_task in done:
-                channel_plan, _channel_error = _completed_channel_plan(
-                    plan_task,
-                    issue_url=issue_url,
-                    container_version=container_version,
-                    issue_thread=issue_thread,
+                chat_task = asyncio.create_task(
+                    _collect_analysis_chat(
+                        analysis_agent,
+                        current_prompt,
+                        transcript_parts,
+                        transcript_capture=transcript_capture,
+                    )
                 )
-                await _stop_analysis_agent(analysis_agent)
-                if not chat_task.done():
-                    chat_task.cancel()
-                    await _cancel_task(chat_task)
-            else:
-                await chat_task
-            if transcript_capture is not None:
-                await transcript_capture.flush()
+                done, _pending = await asyncio.wait(
+                    {chat_task, plan_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if plan_task in done:
+                    channel_plan, _channel_error = _completed_channel_plan(
+                        plan_task,
+                        issue_url=issue_url,
+                        container_version=container_version,
+                        issue_thread=issue_thread,
+                    )
+                    await _stop_analysis_agent(analysis_agent)
+                    if not chat_task.done():
+                        chat_task.cancel()
+                        await _cancel_task(chat_task)
+                else:
+                    await chat_task
+                chat_task = None
+
+                if transcript_capture is not None:
+                    await transcript_capture.flush()
+
+                captured_transcript = (
+                    transcript_capture.text if transcript_capture is not None else ""
+                )
+                conversation_transcript = _assistant_conversation_text(analysis_agent)
+                transcript_sources = _transcript_sources(
+                    ("conversation", conversation_transcript),
+                    ("output_router", captured_transcript),
+                    ("chat_chunks", "".join(transcript_parts)),
+                )
+                transcript = _merge_transcript_sources(
+                    *(source["content"] for source in transcript_sources)
+                )
+                _write_json_file(
+                    output_dir / ANALYSIS_TRANSCRIPT_FILE,
+                    _analysis_transcript_payload(
+                        issue_url=issue_url,
+                        container_version=container_version,
+                        prompt=prompt,
+                        issue_thread=issue_thread,
+                        system_prompt=system_prompt,
+                        assistant_output=transcript,
+                        output_sources=transcript_sources,
+                    ),
+                )
+
+                if _is_insufficient_information(transcript):
+                    logger.info("Stage 1 debug run stopped with insufficient information")
+                    plan_task.cancel()
+                    await _cancel_task(plan_task)
+                    return _write_stage_result(
+                        StageDebugResult(
+                            stage="analysis",
+                            status="insufficient_information",
+                            output_dir=str(output_dir),
+                            output_file=ANALYSIS_TRANSCRIPT_FILE,
+                            metadata={"message": transcript.strip()},
+                        )
+                    )
+
+                plan = channel_plan
+                plan_source = "channel" if channel_plan is not None else None
+                if plan is None:
+                    plan, plan_source = await _resolve_analysis_stage_plan(
+                        plan_task,
+                        transcript,
+                        issue_url=issue_url,
+                        container_version=container_version,
+                        issue_thread=issue_thread,
+                        timeout_s=timeout_s,
+                    )
+                if plan is not None:
+                    break
+
+                if attempt >= ANALYSIS_PLAN_MAX_ATTEMPTS:
+                    break
+
+                logger.warning(
+                    "Rejecting Stage 1 attempt %s/%s: no plan_ready output received",
+                    attempt,
+                    ANALYSIS_PLAN_MAX_ATTEMPTS,
+                )
+                if plan_task.done():
+                    channel_plan, _channel_error = _completed_channel_plan(
+                        plan_task,
+                        issue_url=issue_url,
+                        container_version=container_version,
+                        issue_thread=issue_thread,
+                    )
+                    if channel_plan is not None:
+                        plan = channel_plan
+                        plan_source = "channel"
+                        break
+                    plan_task = asyncio.create_task(
+                        _receive_channel_message(engine, "plan_ready")
+                    )
+                    await asyncio.sleep(0)
+                current_prompt = _analysis_plan_retry_prompt(
+                    attempt + 1,
+                    ANALYSIS_PLAN_MAX_ATTEMPTS,
+                )
         finally:
             if chat_task is not None and not chat_task.done():
                 chat_task.cancel()
                 await _cancel_task(chat_task)
             _restore_transcript_output(transcript_capture_state)
-
-        captured_transcript = transcript_capture.text if transcript_capture is not None else ""
-        conversation_transcript = _assistant_conversation_text(analysis_agent)
-        transcript_sources = _transcript_sources(
-            ("conversation", conversation_transcript),
-            ("output_router", captured_transcript),
-            ("chat_chunks", "".join(transcript_parts)),
-        )
-        transcript = _merge_transcript_sources(
-            *(source["content"] for source in transcript_sources)
-        )
-        _write_json_file(
-            output_dir / ANALYSIS_TRANSCRIPT_FILE,
-            _analysis_transcript_payload(
-                issue_url=issue_url,
-                container_version=container_version,
-                prompt=prompt,
-                issue_thread=issue_thread,
-                system_prompt=system_prompt,
-                assistant_output=transcript,
-                output_sources=transcript_sources,
-            ),
-        )
-
-        if _is_insufficient_information(transcript):
-            logger.info("Stage 1 debug run stopped with insufficient information")
+        if plan is None:
             plan_task.cancel()
             await _cancel_task(plan_task)
-            return _write_stage_result(
-                StageDebugResult(
-                    stage="analysis",
-                    status="insufficient_information",
-                    output_dir=str(output_dir),
-                    output_file=ANALYSIS_TRANSCRIPT_FILE,
-                    metadata={"message": transcript.strip()},
-                )
-            )
-
-        plan = channel_plan
-        plan_source = "channel" if channel_plan is not None else None
-        if plan is None:
-            plan, plan_source = await _resolve_analysis_stage_plan(
-                plan_task,
+            _raise_analysis_plan_protocol_error(
                 transcript,
-                issue_url=issue_url,
-                container_version=container_version,
-                issue_thread=issue_thread,
-                timeout_s=timeout_s,
+                attempts=ANALYSIS_PLAN_MAX_ATTEMPTS,
             )
-        if plan is None:
-            plan_task.cancel()
-            await _cancel_task(plan_task)
-            _raise_analysis_plan_protocol_error(transcript)
 
         _write_json_file(output_dir / "plan.json", plan)
         logger.info("Stage 1 debug run wrote plan.json from %s", plan_source)
@@ -947,6 +1061,25 @@ def _analysis_prompt(
     )
 
 
+def _analysis_plan_retry_prompt(attempt: int, max_attempts: int) -> str:
+    return (
+        "REJECTED: Your previous Stage 1 response did not deliver a valid "
+        "`ReproductionPlan` to the `plan_ready` named output. You may have "
+        "claimed that the plan was sent, but the runner did not receive an "
+        "`[/output_plan_ready]... [output_plan_ready/]` block with the actual "
+        "JSON payload.\n\n"
+        f"This is attempt {attempt} of {max_attempts}. Reply with no prose, no "
+        "summary, and no tool calls. Your entire response must be exactly one "
+        "named output block in this form:\n\n"
+        "[/output_plan_ready]\n"
+        "{ ... valid ReproductionPlan JSON ... }\n"
+        "[output_plan_ready/]\n\n"
+        "Do not say the plan has been sent. Do not use `send_message`. If an "
+        "executable plan cannot be produced, reply with "
+        "`INSUFFICIENT_INFORMATION` and the missing details instead."
+    )
+
+
 async def _resolve_analysis_stage_plan(
     plan_task: asyncio.Task[tuple[str, Any]],
     _transcript: str,
@@ -1000,14 +1133,20 @@ def _analysis_channel_grace(timeout_s: float | None) -> float:
     return max(0.0, min(float(timeout_s), STAGE_CHANNEL_GRACE_S))
 
 
-def _raise_analysis_plan_protocol_error(transcript: str) -> None:
+def _raise_analysis_plan_protocol_error(
+    transcript: str,
+    *,
+    attempts: int = ANALYSIS_PLAN_MAX_ATTEMPTS,
+) -> None:
     if not transcript.strip():
         raise AnalysisAgentEmptyResponseError(
-            "analysis agent returned an empty response without emitting plan_ready"
+            "analysis agent returned an empty response without emitting plan_ready "
+            f"after {attempts} attempts"
         )
     raise AnalysisAgentProtocolError(
-        "analysis agent finished without emitting plan_ready; final Stage 1 "
-        "output must use [/output_plan_ready]...[output_plan_ready/]"
+        f"analysis agent failed to emit plan_ready after {attempts} attempts; "
+        "final Stage 1 output must use "
+        "[/output_plan_ready]...[output_plan_ready/]"
     )
 
 

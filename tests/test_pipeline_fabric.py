@@ -124,6 +124,29 @@ class PlanReadyThenHangingAnalysisAgent:
             yield ""
 
 
+class RetryThenPlanReadyAnalysisAgent:
+    def __init__(self, plan_channel, plan):
+        self.plan_channel = plan_channel
+        self.plan = plan
+        self.prompts = []
+        self.cancelled = False
+
+    async def chat(self, prompt):
+        self.prompts.append(prompt)
+        if len(self.prompts) == 1:
+            yield "The reproduction plan has been sent to `plan_ready`.\n"
+            return
+
+        self.plan_channel.send(self.plan)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        if False:
+            yield ""
+
+
 class FakeMessage:
     def __init__(self, content):
         self.content = content
@@ -591,6 +614,39 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "complete")
         self.assertTrue(analysis_agent.cancelled)
 
+    async def test_run_issue_retries_after_hallucinated_plan_ready(self):
+        plan_channel = FakeOnSendChannel("plan_ready")
+        payload = {"report_path": "/tmp/artifacts/run-1/report.md"}
+        analysis_agent = RetryThenPlanReadyAnalysisAgent(
+            plan_channel,
+            _sample_plan(),
+        )
+        engine = FakeEngine(
+            [],
+            channels={
+                "plan_ready": plan_channel,
+                "final_report": FakeChannel({"content": payload}),
+            },
+            analysis_agent=analysis_agent,
+        )
+
+        result = await asyncio.wait_for(
+            run_issue(
+                "https://github.com/jellyfin/jellyfin/issues/1",
+                "10.9.7",
+                stream=None,
+                engine_factory=lambda recipe: engine,
+                issue_fetcher=_sample_issue_fetcher,
+            ),
+            timeout=1,
+        )
+
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(len(analysis_agent.prompts), 2)
+        self.assertIn("REJECTED", analysis_agent.prompts[1])
+        self.assertIn("attempt 2 of 3", analysis_agent.prompts[1])
+        self.assertTrue(analysis_agent.cancelled)
+
     async def test_run_issue_stops_on_insufficient_information(self):
         engine = FakeEngine(["INSUFFICIENT_INFORMATION\nmissing steps\n"])
 
@@ -659,6 +715,45 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(stream.getvalue(), "")
 
+    async def test_run_analysis_stage_retries_after_hallucinated_plan_ready(self):
+        plan = _sample_plan()
+        plan_channel = FakeOnSendChannel("plan_ready")
+        analysis_agent = RetryThenPlanReadyAnalysisAgent(plan_channel, plan)
+        engine = FakeEngine(
+            [],
+            channels={"plan_ready": plan_channel},
+            analysis_agent=analysis_agent,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/1",
+                    "10.9.7",
+                    temp_dir,
+                    timeout_s=0.01,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
+            )
+
+            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+            transcript_payload = _read_stage_transcript(temp_dir)
+
+        self.assertEqual(result.status, "plan_ready")
+        self.assertEqual(result.metadata["source"], "channel")
+        self.assertEqual(written_plan, plan)
+        self.assertEqual(len(analysis_agent.prompts), 2)
+        self.assertIn("REJECTED", analysis_agent.prompts[1])
+        self.assertIn("attempt 2 of 3", analysis_agent.prompts[1])
+        self.assertIn(
+            "has been sent to `plan_ready`",
+            transcript_payload["output"]["assistant"],
+        )
+        self.assertTrue(analysis_agent.cancelled)
+
     async def test_run_analysis_stage_rejects_printed_plan_without_channel(self):
         plan = _sample_plan()
         transcript = (
@@ -672,7 +767,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(
                 AnalysisAgentProtocolError,
-                "without emitting plan_ready",
+                "emit plan_ready",
             ):
                 await asyncio.wait_for(
                     run_analysis_stage(
@@ -689,6 +784,9 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
             transcript_payload = _read_stage_transcript(temp_dir)
             self.assertIn("analysis started", transcript_payload["output"]["assistant"])
+            self.assertEqual(len(engine.analysis_agent.prompts), 3)
+            self.assertIn("attempt 2 of 3", engine.analysis_agent.prompts[1])
+            self.assertIn("attempt 3 of 3", engine.analysis_agent.prompts[2])
             self.assertFalse((Path(temp_dir) / "plan.json").exists())
             self.assertFalse((Path(temp_dir) / "stage_result.json").exists())
 
@@ -707,7 +805,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(
                 AnalysisAgentProtocolError,
-                "without emitting plan_ready",
+                "emit plan_ready",
             ):
                 await asyncio.wait_for(
                     run_analysis_stage(
@@ -749,7 +847,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(
                 AnalysisAgentProtocolError,
-                "without emitting plan_ready",
+                "emit plan_ready",
             ):
                 await asyncio.wait_for(
                     run_analysis_stage(
@@ -792,7 +890,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(
                 AnalysisAgentProtocolError,
-                "without emitting plan_ready",
+                "emit plan_ready",
             ):
                 await asyncio.wait_for(
                     run_analysis_stage(
@@ -816,7 +914,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(
                 AnalysisAgentProtocolError,
-                "without emitting plan_ready",
+                "emit plan_ready",
             ):
                 await asyncio.wait_for(
                     run_analysis_stage(
@@ -858,6 +956,9 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
             transcript_payload = _read_stage_transcript(temp_dir)
             self.assertEqual(transcript_payload["output"]["assistant"], "")
+            self.assertEqual(len(engine.analysis_agent.prompts), 3)
+            self.assertIn("attempt 2 of 3", engine.analysis_agent.prompts[1])
+            self.assertIn("attempt 3 of 3", engine.analysis_agent.prompts[2])
             self.assertFalse((Path(temp_dir) / "plan.json").exists())
             self.assertFalse((Path(temp_dir) / "stage_result.json").exists())
 
