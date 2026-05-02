@@ -199,6 +199,17 @@ class FakeNamedOutputAgent:
         self.config = FakeAgentConfig(name, named_outputs)
 
 
+class FakeCreature:
+    """Mimic the Terrarium ``Creature`` wrapper around an inner agent.
+
+    The real engine returns a Creature whose ``output_router`` and
+    ``config`` live one level deeper at ``creature.agent``.
+    """
+
+    def __init__(self, inner_agent):
+        self.agent = inner_agent
+
+
 class CapturingAsyncChannel:
     def __init__(self):
         self.messages = []
@@ -700,6 +711,31 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
         _bind_channel_named_outputs(engine)
         await analysis_agent.output_router.named_outputs["plan_ready"].write('{"ok": true}')
+
+        self.assertEqual(len(channel.messages), 1)
+        self.assertEqual(channel.messages[0].sender, "analysis_agent")
+        self.assertEqual(channel.messages[0].content, '{"ok": true}')
+
+    async def test_binds_channel_named_outputs_through_creature_wrapper(self):
+        channel = CapturingAsyncChannel()
+        named_outputs = {
+            "plan_ready": FakeOutputConfigItem(
+                "channel",
+                {"channel": "plan_ready"},
+            )
+        }
+        inner_agent = FakeNamedOutputAgent("analysis_agent", named_outputs)
+        creature = FakeCreature(inner_agent)
+        engine = FakeEngine(
+            [],
+            channels={"plan_ready": channel},
+            analysis_agent=creature,
+        )
+
+        _bind_channel_named_outputs(engine)
+        await inner_agent.output_router.named_outputs["plan_ready"].write(
+            '{"ok": true}'
+        )
 
         self.assertEqual(len(channel.messages), 1)
         self.assertEqual(channel.messages[0].sender, "analysis_agent")
