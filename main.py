@@ -1586,9 +1586,13 @@ def _bind_channel_named_outputs(engine: Any) -> None:
 
     for agent_name in ("analysis_agent", "execution_agent", "report_agent"):
         try:
-            agent = _get_agent(engine, agent_name)
+            creature_or_agent = _get_agent(engine, agent_name)
         except Exception:
             continue
+
+        # Terrarium returns a ``Creature`` wrapper; the OutputRouter and the
+        # AgentConfig with named_outputs live on the inner Agent.
+        agent = getattr(creature_or_agent, "agent", creature_or_agent)
 
         router = getattr(agent, "output_router", None)
         named_outputs = getattr(router, "named_outputs", None)
