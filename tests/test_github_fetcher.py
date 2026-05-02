@@ -2,7 +2,7 @@ import datetime as dt
 import unittest
 from unittest.mock import patch
 
-from creatures.analysis.tools import github_fetcher as fetcher
+from tools import github_fetcher as fetcher
 
 
 class _FakeUser:

@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 
-from creatures.execution.tools.criteria import (
+from tools.criteria import (
     CaptureError,
     UnboundVariableError,
     evaluate_criteria,

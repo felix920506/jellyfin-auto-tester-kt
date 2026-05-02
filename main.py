@@ -732,7 +732,7 @@ def run_execution_stage(
     _write_json_file(output_dir / "plan.json", plan)
 
     if runner_factory is None:
-        from creatures.execution.tools.execution_runner import ExecutionRunner
+        from tools.execution_runner import ExecutionRunner
 
         runner = ExecutionRunner(artifacts_root=output_dir)
     else:
@@ -782,7 +782,7 @@ def run_report_stage(
         else None
     )
 
-    from creatures.report.tools import report_writer
+    from tools import report_writer
 
     written_steps = _debug_report_steps(execution_result)
     metadata = report_writer.generate(
@@ -1044,7 +1044,7 @@ async def _prefetch_issue_thread(
 
 
 def _default_issue_fetcher() -> Callable[..., Any]:
-    from creatures.analysis.tools.github_fetcher import github_fetcher
+    from tools.github_fetcher import github_fetcher
 
     return github_fetcher
 

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from creatures.execution.tools.screenshot import (
+from tools.screenshot import (
     BROWSER_HEADLESS_ENV,
     Screenshotter,
     browser_should_run_headless,

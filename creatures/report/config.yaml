@@ -20,8 +20,8 @@ tools:
   - name: "send_message"
     type: "builtin"
   - name: "report_writer"
-    type: "custom"
-    module: "tools/report_writer.py"
+    type: "package"
+    module: "tools.report_writer"
 
 triggers:
   - type: "channel"

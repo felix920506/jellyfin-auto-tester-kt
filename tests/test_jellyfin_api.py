@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from creatures.execution.tools.jellyfin_api import JellyfinAPI
+from tools.jellyfin_api import JellyfinAPI
 
 
 class FakeResponse:

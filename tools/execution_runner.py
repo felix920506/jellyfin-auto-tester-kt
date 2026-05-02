@@ -15,31 +15,19 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlretrieve
 
-try:  # Support package imports and direct custom-tool loading.
-    from .criteria import (
-        CaptureError,
-        UnboundVariableError,
-        evaluate_criteria,
-        extract_captures,
-        resolve_references,
-    )
-    from .docker_manager import DockerManager
-    from .jellyfin_api import JellyfinAPI
-    from .screenshot import Screenshotter
-except ImportError:  # pragma: no cover - exercised by external tool loaders
-    from criteria import (  # type: ignore[no-redef]
-        CaptureError,
-        UnboundVariableError,
-        evaluate_criteria,
-        extract_captures,
-        resolve_references,
-    )
-    from docker_manager import DockerManager  # type: ignore[no-redef]
-    from jellyfin_api import JellyfinAPI  # type: ignore[no-redef]
-    from screenshot import Screenshotter  # type: ignore[no-redef]
+from tools.criteria import (
+    CaptureError,
+    UnboundVariableError,
+    evaluate_criteria,
+    extract_captures,
+    resolve_references,
+)
+from tools.docker_manager import DockerManager
+from tools.jellyfin_api import JellyfinAPI
+from tools.screenshot import Screenshotter
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACTS_ROOT = Path(
     os.environ.get("JF_AUTO_TESTER_ARTIFACTS_ROOT", REPO_ROOT / "artifacts")
 ).resolve()

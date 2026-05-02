@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from creatures.execution.tools import docker_manager
+from tools import docker_manager
 
 
 class FakeImage:

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from creatures.report.tools import report_writer
+from tools import report_writer
 
 
 def sample_plan():

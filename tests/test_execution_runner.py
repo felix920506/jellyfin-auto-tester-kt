@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from creatures.execution.tools.execution_runner import ExecutionRunner
+from tools.execution_runner import ExecutionRunner
 
 
 class FakeDocker:
