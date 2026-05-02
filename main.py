@@ -206,7 +206,7 @@ class _TranscriptOutput:
 
     def _write(self, value: Any) -> None:
         text = _chunk_text(value)
-        if not text:
+        if not text or not text.strip():
             return
         self._parts.append(text)
         if self._on_write is not None:
@@ -232,54 +232,120 @@ class _AnalysisTranscriptWriter:
         self.prompt = prompt
         self.issue_thread = issue_thread
         self.system_prompt = system_prompt
-        self._messages: list[dict[str, str]] = []
+        self._fallback_messages: list[dict[str, Any]] = []
+        self._conversation_messages: list[dict[str, Any]] = []
+        self._provider_messages: list[dict[str, Any]] = []
+        self._provider_requests: list[dict[str, Any]] = []
+        self._events: list[dict[str, Any]] = []
         self._assistant_parts: list[str] = []
         self._current_assistant_index: int | None = None
+        self._provider_active = False
+        self._provider_request_count = 0
         if system_prompt:
-            self._messages.append({"role": "system", "content": system_prompt})
+            self._fallback_messages.append(
+                {"role": "system", "content": system_prompt}
+            )
 
     @property
     def assistant_text(self) -> str:
         return "".join(self._assistant_parts)
 
+    @property
+    def has_provider_traffic(self) -> bool:
+        return self._provider_request_count > 0
+
     def initialize(self) -> None:
         self.write_snapshot(status="initialized")
 
     def record_prompt(self, prompt: str, *, attempt: int) -> None:
-        self._messages.append(
+        self._fallback_messages.append(
             {
                 "role": "user",
                 "content": prompt,
                 "source": "provider_send",
-                "attempt": str(attempt),
+                "attempt": attempt,
             }
         )
-        self._messages.append(
+        self._fallback_messages.append(
             {
                 "role": "assistant",
                 "content": "",
                 "source": "provider_receive",
-                "attempt": str(attempt),
+                "attempt": attempt,
             }
         )
-        self._current_assistant_index = len(self._messages) - 1
+        self._current_assistant_index = len(self._fallback_messages) - 1
+        self._events.append(
+            {
+                "type": "fallback_prompt",
+                "attempt": attempt,
+                "message_count": len(self._fallback_messages),
+            }
+        )
         self.write_snapshot(status="running")
 
     def record_assistant_text(self, text: str, *, source: str) -> None:
-        if not text:
+        if not _has_transcript_text(text):
             return
         self._assistant_parts.append(text)
         if self._current_assistant_index is None:
-            self._messages.append(
+            self._fallback_messages.append(
                 {
                     "role": "assistant",
                     "content": "",
                     "source": source,
                 }
             )
-            self._current_assistant_index = len(self._messages) - 1
-        self._messages[self._current_assistant_index]["content"] += text
-        self._messages[self._current_assistant_index]["source"] = source
+            self._current_assistant_index = len(self._fallback_messages) - 1
+        self._fallback_messages[self._current_assistant_index]["content"] += text
+        self._fallback_messages[self._current_assistant_index]["source"] = source
+        self.write_snapshot(status="running")
+
+    def record_provider_request(self, messages: Any) -> None:
+        provider_messages = _normalize_transcript_messages(messages)
+        if not provider_messages:
+            return
+        self._provider_request_count += 1
+        self._provider_active = True
+        self._provider_messages = provider_messages
+        self._assistant_parts = []
+        self._provider_requests.append(
+            {
+                "request_index": self._provider_request_count,
+                "message_count": len(provider_messages),
+                "messages": provider_messages,
+            }
+        )
+        self._events.append(
+            {
+                "type": "provider_request",
+                "request_index": self._provider_request_count,
+                "message_count": len(provider_messages),
+            }
+        )
+        self.write_snapshot(status="running")
+
+    def record_provider_chunk(self, text: str) -> None:
+        if not _has_transcript_text(text):
+            return
+        self._assistant_parts.append(text)
+        self.write_snapshot(status="running")
+
+    def record_conversation(self, conversation: Any, *, source: str) -> None:
+        messages = _conversation_to_transcript_messages(conversation)
+        if not messages:
+            return
+        self._conversation_messages = messages
+        last_role = messages[-1].get("role")
+        if self._provider_active and last_role == "assistant":
+            self._provider_active = False
+            self._assistant_parts = []
+        self._events.append(
+            {
+                "type": source,
+                "message_count": len(messages),
+            }
+        )
         self.write_snapshot(status="running")
 
     def write_snapshot(
@@ -306,11 +372,19 @@ class _AnalysisTranscriptWriter:
                 ),
                 messages=self._messages_for_output(assistant),
                 status=status,
+                provider_requests=self._provider_requests,
+                events=self._events,
             ),
         )
 
-    def _messages_for_output(self, assistant_output: str) -> list[dict[str, str]]:
-        messages = [dict(message) for message in self._messages]
+    def _messages_for_output(self, assistant_output: str) -> list[dict[str, Any]]:
+        messages = self._current_messages()
+        if (
+            self._provider_active
+            or self._conversation_messages
+            or self._provider_messages
+        ):
+            return messages
         assistant_indexes = [
             index
             for index, message in enumerate(messages)
@@ -321,6 +395,25 @@ class _AnalysisTranscriptWriter:
         else:
             messages[assistant_indexes[0]]["content"] = assistant_output
         return messages
+
+    def _current_messages(self) -> list[dict[str, Any]]:
+        if self._provider_active and self._provider_messages:
+            messages = [dict(message) for message in self._provider_messages]
+            draft = self.assistant_text
+            if draft:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": draft,
+                        "source": "provider_stream",
+                    }
+                )
+            return messages
+        if self._conversation_messages:
+            return [dict(message) for message in self._conversation_messages]
+        if self._provider_messages:
+            return [dict(message) for message in self._provider_messages]
+        return [dict(message) for message in self._fallback_messages]
 
 
 def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
@@ -679,6 +772,7 @@ async def run_analysis_stage(
     await asyncio.sleep(0)
     transcript_parts: list[str] = []
     chat_task: asyncio.Task[None] | None = None
+    transcript_message_hooks: list[tuple[Any, str, Any]] = []
     try:
         analysis_agent = _get_agent(engine, "analysis_agent")
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
@@ -692,13 +786,11 @@ async def run_analysis_stage(
             system_prompt=system_prompt,
         )
         transcript_writer.initialize()
-        transcript_capture_state = _install_transcript_output(
+        transcript_message_hooks = _install_transcript_message_hooks(
             analysis_agent,
-            on_write=lambda text: transcript_writer.record_assistant_text(
-                text,
-                source="output_router",
-            ),
+            transcript_writer,
         )
+        transcript_capture_state = _install_transcript_output(analysis_agent)
         transcript_capture = (
             transcript_capture_state[0] if transcript_capture_state is not None else None
         )
@@ -830,6 +922,7 @@ async def run_analysis_stage(
                 chat_task.cancel()
                 await _cancel_task(chat_task)
             _restore_transcript_output(transcript_capture_state)
+            _restore_transcript_message_hooks(transcript_message_hooks)
         if plan is None:
             transcript_writer.write_snapshot(
                 assistant_output=transcript,
@@ -2141,6 +2234,76 @@ def _restore_transcript_output(
     setattr(output_router, "default_output", default_output)
 
 
+def _install_transcript_message_hooks(
+    creature_or_agent: Any,
+    transcript_writer: _AnalysisTranscriptWriter,
+) -> list[tuple[Any, str, Any]]:
+    states: list[tuple[Any, str, Any]] = []
+    conversation = _agent_conversation(creature_or_agent)
+    if conversation is not None:
+        transcript_writer.record_conversation(
+            conversation,
+            source="conversation_initial",
+        )
+        for method_name in ("append", "append_message", "clear", "truncate_from"):
+            original = getattr(conversation, method_name, None)
+            if callable(original):
+                setattr(
+                    conversation,
+                    method_name,
+                    _conversation_hook(
+                        original,
+                        conversation,
+                        transcript_writer,
+                        method_name,
+                    ),
+                )
+                states.append((conversation, method_name, original))
+
+    llm = _agent_llm(creature_or_agent)
+    chat = getattr(llm, "chat", None) if llm is not None else None
+    if callable(chat):
+        setattr(llm, "chat", _provider_chat_hook(chat, transcript_writer))
+        states.append((llm, "chat", chat))
+
+    return states
+
+
+def _restore_transcript_message_hooks(states: list[tuple[Any, str, Any]]) -> None:
+    for target, name, original in reversed(states):
+        setattr(target, name, original)
+
+
+def _conversation_hook(
+    original: Callable[..., Any],
+    conversation: Any,
+    transcript_writer: _AnalysisTranscriptWriter,
+    method_name: str,
+) -> Callable[..., Any]:
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        transcript_writer.record_conversation(
+            conversation,
+            source=f"conversation_{method_name}",
+        )
+        return result
+
+    return wrapper
+
+
+def _provider_chat_hook(
+    original_chat: Callable[..., Any],
+    transcript_writer: _AnalysisTranscriptWriter,
+) -> Callable[..., Any]:
+    async def wrapper(messages: Any, *args: Any, **kwargs: Any):
+        transcript_writer.record_provider_request(messages)
+        async for chunk in original_chat(messages, *args, **kwargs):
+            transcript_writer.record_provider_chunk(_chunk_text(chunk))
+            yield chunk
+
+    return wrapper
+
+
 def _assistant_conversation_text(creature_or_agent: Any) -> str:
     """Read the final assistant message from Kohaku's conversation model."""
 
@@ -2174,6 +2337,15 @@ def _agent_conversation(creature_or_agent: Any) -> Any | None:
     return getattr(controller, "conversation", None)
 
 
+def _agent_llm(creature_or_agent: Any) -> Any | None:
+    agent = getattr(creature_or_agent, "agent", creature_or_agent)
+    llm = getattr(agent, "llm", None)
+    if llm is not None:
+        return llm
+    controller = getattr(agent, "controller", None)
+    return getattr(controller, "llm", None)
+
+
 def _message_content_text(content: Any) -> str:
     if content is None:
         return ""
@@ -2193,10 +2365,63 @@ def _message_content_text(content: Any) -> str:
     return _chunk_text(content)
 
 
+def _has_transcript_text(text: Any) -> bool:
+    return bool(_chunk_text(text).strip())
+
+
+def _conversation_to_transcript_messages(conversation: Any) -> list[dict[str, Any]]:
+    to_messages = getattr(conversation, "to_messages", None)
+    if callable(to_messages):
+        try:
+            messages = _normalize_transcript_messages(to_messages())
+        except Exception as exc:
+            _logger().debug("Failed to serialize conversation messages: %s", exc)
+        else:
+            if messages:
+                return messages
+
+    get_messages = getattr(conversation, "get_messages", None)
+    if callable(get_messages):
+        try:
+            return _normalize_transcript_messages(get_messages())
+        except Exception as exc:
+            _logger().debug("Failed to serialize raw conversation messages: %s", exc)
+    return []
+
+
+def _normalize_transcript_messages(messages: Any) -> list[dict[str, Any]]:
+    if messages is None or isinstance(messages, (str, bytes, dict)):
+        return []
+    if not isinstance(messages, Iterable):
+        return []
+
+    result: list[dict[str, Any]] = []
+    for item in messages:
+        if isinstance(item, dict):
+            message = dict(item)
+        else:
+            to_dict = getattr(item, "to_dict", None)
+            if not callable(to_dict):
+                continue
+            message = dict(to_dict())
+        role = message.get("role")
+        if not role:
+            continue
+        message["role"] = str(role)
+        if "content" not in message:
+            message["content"] = ""
+        result.append(_json_safe_value(message))
+    return result
+
+
+def _json_safe_value(value: Any) -> Any:
+    return json.loads(json.dumps(value, default=str))
+
+
 def _transcript_sources(*sources: tuple[str, str]) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     for name, content in sources:
-        if not content:
+        if not content or not content.strip():
             continue
         if any(content == item["content"] for item in result):
             continue
@@ -2227,6 +2452,8 @@ def _analysis_transcript_payload(
     output_sources: list[dict[str, str]],
     messages: list[dict[str, Any]] | None = None,
     status: str | None = None,
+    provider_requests: list[dict[str, Any]] | None = None,
+    events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload_messages = messages
     if payload_messages is None:
@@ -2270,6 +2497,10 @@ def _analysis_transcript_payload(
     }
     if status is not None:
         payload["status"] = status
+    if provider_requests is not None:
+        payload["provider_requests"] = provider_requests
+    if events is not None:
+        payload["events"] = events
     return payload
 
 
@@ -2285,7 +2516,7 @@ async def _collect_analysis_chat(
         text = _chunk_text(chunk)
         if transcript_capture is None or not transcript_capture.has_text:
             transcript_parts.append(text)
-            if transcript_writer is not None:
+            if transcript_writer is not None and not transcript_writer.has_provider_traffic:
                 transcript_writer.record_assistant_text(text, source="chat_chunks")
 
 

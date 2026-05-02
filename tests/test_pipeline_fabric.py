@@ -179,9 +179,81 @@ class FakeConversation:
         return self.message
 
 
+class FakeMessageListConversation:
+    def __init__(self):
+        self.messages = []
+
+    def append(self, role, content, **kwargs):
+        message = {"role": role, "content": content, **kwargs}
+        self.messages.append(message)
+        return FakeMessage(content)
+
+    def to_messages(self):
+        return [dict(message) for message in self.messages]
+
+    def get_last_assistant_message(self):
+        for message in reversed(self.messages):
+            if message["role"] == "assistant":
+                return FakeMessage(message["content"])
+        return None
+
+    def get_system_message(self):
+        for message in self.messages:
+            if message["role"] == "system":
+                return FakeMessage(message["content"])
+        return None
+
+
 class FakeController:
     def __init__(self, conversation):
         self.conversation = conversation
+
+
+class FakeProviderLLM:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def chat(self, messages, **_kwargs):
+        self.calls.append([dict(message) for message in messages])
+        response = self.responses.pop(0)
+        for chunk in response:
+            yield chunk
+
+
+class ProviderConversationAnalysisAgent:
+    def __init__(self, plan_channel, plan):
+        self.prompts = []
+        self.plan_channel = plan_channel
+        self.plan = plan
+        self.agent = FakeInnerAgent()
+        conversation = FakeMessageListConversation()
+        self.agent.controller = FakeController(conversation)
+        self.agent.llm = FakeProviderLLM(
+            [
+                ["need tool\n"],
+                ["plan ready\n", "REPRODUCTION_PLAN_COMPLETE\n"],
+            ]
+        )
+
+    async def chat(self, prompt):
+        self.prompts.append(prompt)
+        conversation = self.agent.controller.conversation
+
+        conversation.append("user", prompt)
+        first_parts = []
+        async for chunk in self.agent.llm.chat(conversation.to_messages(), stream=True):
+            first_parts.append(chunk)
+            yield chunk
+        conversation.append("assistant", "".join(first_parts))
+
+        conversation.append("user", "[Tool completed]\nresult")
+        second_parts = []
+        async for chunk in self.agent.llm.chat(conversation.to_messages(), stream=True):
+            second_parts.append(chunk)
+            yield chunk
+        conversation.append("assistant", "".join(second_parts))
+        self.plan_channel.send(self.plan)
 
 
 class FakeExecutionAgent:
@@ -871,7 +943,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stream.getvalue(), "")
 
     async def test_run_analysis_stage_flushes_transcript_while_streaming(self):
-        analysis_agent = CrashingAnalysisAgent(["partial response\n"])
+        analysis_agent = CrashingAnalysisAgent(["\n", "\n", "partial response\n"])
         engine = FakeEngine(
             [],
             channels={"plan_ready": HangingChannel()},
@@ -905,6 +977,48 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             transcript_payload["output"]["assistant"],
             "partial response\n",
+        )
+
+    async def test_run_analysis_stage_transcript_uses_provider_messages(self):
+        plan = _sample_plan()
+        plan_channel = FakeOnSendChannel("plan_ready")
+        analysis_agent = ProviderConversationAnalysisAgent(plan_channel, plan)
+        engine = FakeEngine(
+            [],
+            channels={"plan_ready": plan_channel},
+            analysis_agent=analysis_agent,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/1",
+                    "10.9.7",
+                    temp_dir,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
+            )
+
+            transcript_payload = _read_stage_transcript(temp_dir)
+
+        self.assertEqual(result.status, "plan_ready")
+        self.assertEqual(len(analysis_agent.agent.llm.calls), 2)
+        self.assertGreaterEqual(len(transcript_payload["messages"]), 4)
+        self.assertEqual(
+            [message["role"] for message in transcript_payload["messages"]],
+            ["user", "assistant", "user", "assistant"],
+        )
+        self.assertIn(
+            "[Tool completed]",
+            transcript_payload["messages"][2]["content"],
+        )
+        self.assertEqual(len(transcript_payload["provider_requests"]), 2)
+        self.assertEqual(
+            transcript_payload["provider_requests"][1]["message_count"],
+            3,
         )
 
     async def test_run_analysis_stage_accepts_context_filled_provider_plan(self):
