@@ -8,6 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from main import (
+    _build_parser,
+    _build_stage_parser,
+    _default_log_level,
+    _default_log_stderr,
     _normalize_stage_argv,
     _parse_stage_choice,
     _receive_channel_message,
@@ -511,6 +515,52 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             _parse_stage_choice(["--stage=report", "--input", "x", "--out", "y"]),
             "report",
         )
+
+    def test_cli_parsers_accept_logging_controls(self):
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--log-level",
+                "debug",
+                "--log-stderr",
+                "off",
+                "https://github.com/jellyfin/jellyfin/issues/1",
+                "10.9.7",
+            ]
+        )
+
+        self.assertEqual(args.log_level, "DEBUG")
+        self.assertEqual(args.log_stderr, "off")
+
+        stage_args = _build_stage_parser("analysis").parse_args(
+            [
+                "--stage",
+                "analysis",
+                "--log-level",
+                "WARNING",
+                "--log-stderr",
+                "on",
+                "https://github.com/jellyfin/jellyfin/issues/1",
+                "10.9.7",
+                "--out",
+                "debug/stage1",
+            ]
+        )
+
+        self.assertEqual(stage_args.log_level, "WARNING")
+        self.assertEqual(stage_args.log_stderr, "on")
+
+    def test_logging_defaults_read_environment(self):
+        with patch.dict(
+            os.environ,
+            {
+                "JF_AUTO_TESTER_LOG_LEVEL": "debug",
+                "JF_AUTO_TESTER_LOG_STDERR": "false",
+            },
+            clear=True,
+        ):
+            self.assertEqual(_default_log_level(), "DEBUG")
+            self.assertEqual(_default_log_stderr(), "off")
 
     def test_apply_execution_turn_budget_updates_execution_agent(self):
         engine = FakeEngine([])

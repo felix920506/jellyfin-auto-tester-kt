@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import inspect
 import json
+import logging
 import os
 import re
 import sys
@@ -20,6 +21,10 @@ DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
 TERMINAL_CHANNELS = ("final_report", "human_review_queue")
 STAGE_CHOICES = ("analysis", "execution", "report")
 STAGE_CHANNEL_GRACE_S = 2.0
+LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR")
+LOG_STDERR_CHOICES = ("auto", "on", "off")
+DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_LOG_STDERR = "auto"
 STAGE_HANDOFF_FILES = {
     "analysis": ("plan.json", "reproduction_plan.json"),
     "execution": ("result.json", "execution_result.json"),
@@ -51,6 +56,8 @@ REPRODUCTION_PLAN_KEYS = {
     "is_verification",
     "original_run_id",
 }
+LOGGER_NAME = "kohakuterrarium.jellyfin_auto_tester"
+logging.getLogger(LOGGER_NAME).addHandler(logging.NullHandler())
 
 
 @dataclass(slots=True)
@@ -155,6 +162,111 @@ def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
     return loaded
 
 
+def configure_runtime_logging(
+    log_level: str | None = None,
+    log_stderr: str | None = None,
+) -> None:
+    """Configure KohakuTerrarium and local pipeline logs for this CLI process."""
+
+    load_env_file()
+    level = _normalize_log_level(log_level or _default_log_level())
+    stderr_mode = _normalize_log_stderr(log_stderr or _default_log_stderr())
+
+    try:
+        from kohakuterrarium.utils.logging import (
+            configure_utf8_stdio,
+            disable_stderr_logging,
+            enable_stderr_logging,
+            get_logger,
+            set_level,
+        )
+    except Exception as exc:
+        _configure_stdlib_logging(level, stderr_mode)
+        _logger().debug("KohakuTerrarium logging setup unavailable: %s", exc)
+        return
+
+    configure_utf8_stdio(log=False)
+    kt_log_stderr = os.environ.pop("KT_LOG_STDERR", None) if stderr_mode == "off" else None
+    try:
+        get_logger(LOGGER_NAME)
+    finally:
+        if kt_log_stderr is not None:
+            os.environ["KT_LOG_STDERR"] = kt_log_stderr
+    set_level(level)
+    if stderr_mode in {"auto", "on"}:
+        enable_stderr_logging(level)
+    else:
+        disable_stderr_logging()
+
+
+def _configure_stdlib_logging(level: str, stderr_mode: str) -> None:
+    root_logger = logging.getLogger()
+    if stderr_mode in {"auto", "on"} and not root_logger.handlers:
+        logging.basicConfig(
+            level=getattr(logging, level),
+            format="[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    root_logger.setLevel(getattr(logging, level))
+
+
+def _logger() -> logging.Logger:
+    return logging.getLogger(LOGGER_NAME)
+
+
+def _default_log_level() -> str:
+    return _normalize_log_level(
+        os.environ.get("JF_AUTO_TESTER_LOG_LEVEL")
+        or os.environ.get("KT_LOG_LEVEL")
+        or DEFAULT_LOG_LEVEL
+    )
+
+
+def _default_log_stderr() -> str:
+    return _normalize_log_stderr(
+        os.environ.get("JF_AUTO_TESTER_LOG_STDERR") or DEFAULT_LOG_STDERR
+    )
+
+
+def _normalize_log_level(value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized not in LOG_LEVEL_CHOICES:
+        choices = ", ".join(LOG_LEVEL_CHOICES)
+        raise ValueError(f"log level must be one of: {choices}")
+    return normalized
+
+
+def _normalize_log_stderr(value: str) -> str:
+    normalized = value.strip().lower()
+    aliases = {
+        "1": "on",
+        "true": "on",
+        "yes": "on",
+        "0": "off",
+        "false": "off",
+        "no": "off",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in LOG_STDERR_CHOICES:
+        choices = ", ".join(LOG_STDERR_CHOICES)
+        raise ValueError(f"log stderr must be one of: {choices}")
+    return normalized
+
+
+def _parse_log_level(value: str) -> str:
+    try:
+        return _normalize_log_level(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _parse_log_stderr(value: str) -> str:
+    try:
+        return _normalize_log_stderr(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def execution_turn_budget(step_count: int) -> tuple[int, int]:
     """Return Stage 2 ``(max_iterations, max_turns)`` for a plan size."""
 
@@ -181,7 +293,11 @@ async def run_issue(
     """
 
     load_env_file()
+    logger = _logger()
+    logger.info("Starting full pipeline for %s on Jellyfin %s", issue_url, container_version)
+    logger.info("Prefetching GitHub issue thread")
     issue_thread = await _prefetch_issue_thread(issue_url, issue_fetcher)
+    logger.info("Loading Terrarium recipe from %s", recipe_path)
     engine = await _load_engine(recipe_path, engine_factory=engine_factory)
     _apply_default_execution_budget(engine)
 
@@ -191,6 +307,7 @@ async def run_issue(
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
         analysis_agent = _get_agent(engine, "analysis_agent")
         _suppress_default_output(analysis_agent)
+        logger.info("Starting Stage 1 analysis")
         async for chunk in _chat(analysis_agent, prompt):
             text = _chunk_text(chunk)
             analysis_output.append(text)
@@ -200,6 +317,7 @@ async def run_issue(
 
         transcript = "".join(analysis_output)
         if _is_insufficient_information(transcript):
+            logger.info("Stage 1 stopped with insufficient information")
             terminal_task.cancel()
             await _cancel_task(terminal_task)
             return PipelineResult(
@@ -210,6 +328,7 @@ async def run_issue(
             )
 
         try:
+            logger.info("Waiting for terminal pipeline channel")
             channel, message = await asyncio.wait_for(terminal_task, timeout=timeout_s)
         except asyncio.TimeoutError as exc:
             raise PipelineTimeoutError(
@@ -217,6 +336,7 @@ async def run_issue(
             ) from exc
 
         result = _pipeline_result(channel, message, transcript)
+        logger.info("Pipeline finished with status %s", result.status)
         if stream is not None:
             _print_terminal_summary(result, stream)
         return result
@@ -246,6 +366,12 @@ async def run_analysis_stage(
     """
 
     load_env_file()
+    logger = _logger()
+    logger.info(
+        "Starting Stage 1 debug run for %s on Jellyfin %s",
+        issue_url,
+        container_version,
+    )
     issue_thread = await _prefetch_issue_thread(issue_url, issue_fetcher)
     output_dir = _prepare_output_dir(out_dir)
     _write_json_file(
@@ -265,6 +391,7 @@ async def run_analysis_stage(
         analysis_agent = _get_agent(engine, "analysis_agent")
         _suppress_default_output(analysis_agent)
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
+        logger.info("Streaming Stage 1 analysis transcript")
         async for chunk in _chat(analysis_agent, prompt):
             text = _chunk_text(chunk)
             transcript_parts.append(text)
@@ -276,6 +403,7 @@ async def run_analysis_stage(
         (output_dir / "transcript.txt").write_text(transcript, encoding="utf-8")
 
         if _is_insufficient_information(transcript):
+            logger.info("Stage 1 debug run stopped with insufficient information")
             plan_task.cancel()
             await _cancel_task(plan_task)
             return _write_stage_result(
@@ -294,6 +422,10 @@ async def run_analysis_stage(
             timeout_s=timeout_s,
         )
         if plan is None:
+            logger.warning(
+                "Stage 1 debug run completed without a plan_ready channel message "
+                "or transcript ReproductionPlan"
+            )
             plan_task.cancel()
             await _cancel_task(plan_task)
             return _write_stage_result(
@@ -312,6 +444,7 @@ async def run_analysis_stage(
             )
 
         _write_json_file(output_dir / "plan.json", plan)
+        logger.info("Stage 1 debug run wrote plan.json from %s", plan_source)
         return _write_stage_result(
             StageDebugResult(
                 stage="analysis",
@@ -337,6 +470,8 @@ def run_execution_stage(
     """Run Stage 2 only from a ReproductionPlan file or folder."""
 
     load_env_file()
+    logger = _logger()
+    logger.info("Starting Stage 2 debug run from %s", input_path)
     output_dir = _prepare_output_dir(out_dir)
     plan_path = _resolve_stage_input_file(input_path, "analysis")
     plan = _read_json_file(plan_path)
@@ -351,6 +486,7 @@ def run_execution_stage(
 
     result = runner.execute_plan(plan=plan, run_id=run_id)
     _write_json_file(output_dir / "result.json", result)
+    logger.info("Stage 2 debug run wrote result.json")
     return _write_stage_result(
         StageDebugResult(
             stage="execution",
@@ -381,6 +517,8 @@ def run_report_stage(
     """
 
     load_env_file()
+    logger = _logger()
+    logger.info("Starting Stage 3 debug run from %s", input_path)
     output_dir = _prepare_output_dir(out_dir)
     result_path = _resolve_stage_input_file(input_path, "execution")
     execution_result = _read_json_file(result_path)
@@ -412,6 +550,7 @@ def run_report_stage(
             route_payload.setdefault("reason", "verification failed or was inconsistent")
         route_file = output_dir / f"{route}.json"
         _write_json_file(route_file, route_payload)
+        logger.info("Stage 3 debug run wrote %s", route_file.name)
         return _write_stage_result(
             StageDebugResult(
                 stage="report",
@@ -423,6 +562,7 @@ def run_report_stage(
         )
 
     if execution_result.get("is_verification"):
+        logger.info("Stage 3 debug run wrote report.md")
         return _write_stage_result(
             StageDebugResult(
                 stage="report",
@@ -435,6 +575,7 @@ def run_report_stage(
 
     verification_plan = report_writer.build_verification_plan(execution_result, written_steps)
     _write_json_file(output_dir / "verification_plan.json", verification_plan)
+    logger.info("Stage 3 debug run wrote report.md and verification_plan.json")
     return _write_stage_result(
         StageDebugResult(
             stage="report",
@@ -1190,6 +1331,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not stream analysis-agent output",
     )
+    _add_logging_args(parser)
     parser.add_argument(
         "--json",
         action="store_true",
@@ -1259,10 +1401,33 @@ def _build_stage_parser(stage: str) -> argparse.ArgumentParser:
         action="store_true",
         help="Print StageDebugResult as JSON",
     )
+    _add_logging_args(parser)
     return parser
 
 
+def _add_logging_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--log-level",
+        type=_parse_log_level,
+        default=_default_log_level(),
+        help=(
+            "Log level for KohakuTerrarium and pipeline logs "
+            f"(default: ${'JF_AUTO_TESTER_LOG_LEVEL'} or {DEFAULT_LOG_LEVEL})"
+        ),
+    )
+    parser.add_argument(
+        "--log-stderr",
+        type=_parse_log_stderr,
+        default=_default_log_stderr(),
+        help=(
+            "Mirror logs to stderr: auto, on, or off "
+            f"(default: ${'JF_AUTO_TESTER_LOG_STDERR'} or {DEFAULT_LOG_STDERR})"
+        ),
+    )
+
+
 async def _async_main(argv: list[str] | None = None) -> int:
+    load_env_file()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] == "stage":
         parser = _build_parser()
@@ -1276,6 +1441,7 @@ async def _async_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(raw_argv)
     if not args.issue_url or not args.container_version:
         parser.error("issue_url and container_version are required unless --stage is used")
+    configure_runtime_logging(args.log_level, args.log_stderr)
     result = await run_issue(
         args.issue_url,
         args.container_version,
@@ -1291,6 +1457,7 @@ async def _async_main(argv: list[str] | None = None) -> int:
 async def _async_stage_main(argv: list[str]) -> int:
     stage = _parse_stage_choice(argv)
     args = _build_stage_parser(stage).parse_args(argv)
+    configure_runtime_logging(args.log_level, args.log_stderr)
     if args.stage == "analysis":
         result = await run_analysis_stage(
             args.issue_url,

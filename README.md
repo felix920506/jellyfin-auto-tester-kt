@@ -36,6 +36,10 @@ the channel topology drive execution and reporting, then prints either the final
 report path or the human-review queue result. Use `--json` for the structured
 terminal payload.
 
+KohakuTerrarium and pipeline logs are mirrored to stderr by default. Use
+`--log-level DEBUG` for more detail, `--log-stderr off` to keep logs file-only,
+or set `JF_AUTO_TESTER_LOG_LEVEL` / `JF_AUTO_TESTER_LOG_STDERR` in `.env`.
+
 ## Running Stages Individually
 
 The full pipeline remains channel-driven. For debugging, each stage can also be
