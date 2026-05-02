@@ -152,16 +152,52 @@ class GitHubSearchTool(BaseTool):
     def execution_mode(self) -> ExecutionMode:
         return ExecutionMode.DIRECT
 
+    def get_parameters_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "GitHub search query using qualifier syntax, for example "
+                        "repo:jellyfin/jellyfin is:issue transcoding"
+                    ),
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["issues", "code"],
+                    "description": "Search issues/pull requests or code. Default: issues.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 30,
+                    "description": "Maximum number of results to return. Default: 10.",
+                },
+            },
+            "required": ["query"],
+        }
+
+    def prompt_contribution(self) -> str | None:
+        return (
+            "Use `query` for the GitHub search string, or place the query in "
+            "the tool block body. Use `kind='code'` only for code search."
+        )
+
     async def _execute(self, args: dict[str, Any], **kwargs: Any) -> ToolResult:
         logger.debug("github_search invoked", tool_args=args, kwargs_keys=list(kwargs))
-        query = args.get("query", "")
+        query = _query_from_args(args)
         if not query:
             logger.debug(
                 "github_search rejected: missing query",
                 arg_keys=list(args.keys()),
             )
             return ToolResult(
-                error="No query provided. Usage: github_search(query='repo:owner/name is:issue ...')"
+                error=(
+                    "No query provided. Usage: "
+                    "github_search(query='repo:owner/name is:issue ...') "
+                    "or put the search query in the tool block body."
+                )
             )
         kind = args.get("kind", "issues")
         max_results = int(args.get("max_results", 10))
@@ -205,3 +241,11 @@ class GitHubSearchTool(BaseTool):
             output=json.dumps(payload, ensure_ascii=False, indent=2),
             exit_code=0,
         )
+
+
+def _query_from_args(args: dict[str, Any]) -> str:
+    for key in ("query", "content"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
