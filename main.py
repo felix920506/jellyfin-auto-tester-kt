@@ -92,7 +92,11 @@ class PipelineTimeoutError(TimeoutError):
     """Raised when the pipeline does not reach a terminal channel in time."""
 
 
-class AnalysisAgentEmptyResponseError(AssertionError):
+class AnalysisAgentProtocolError(AssertionError):
+    """Raised when Stage 1 finishes without following the output protocol."""
+
+
+class AnalysisAgentEmptyResponseError(AnalysisAgentProtocolError):
     """Raised when Stage 1 returns no text and no ReproductionPlan."""
 
 
@@ -558,27 +562,9 @@ async def run_analysis_stage(
                 timeout_s=timeout_s,
             )
         if plan is None:
-            _assert_analysis_response_not_empty(transcript)
-            logger.warning(
-                "Stage 1 debug run completed without a plan_ready channel message "
-                "or transcript ReproductionPlan"
-            )
             plan_task.cancel()
             await _cancel_task(plan_task)
-            return _write_stage_result(
-                StageDebugResult(
-                    stage="analysis",
-                    status="no_plan",
-                    output_dir=str(output_dir),
-                    output_file=ANALYSIS_TRANSCRIPT_FILE,
-                    metadata={
-                        "message": (
-                            "analysis completed but no plan_ready channel message "
-                            "or ReproductionPlan JSON was found"
-                        )
-                    },
-                )
-            )
+            _raise_analysis_plan_protocol_error(transcript)
 
         _write_json_file(output_dir / "plan.json", plan)
         logger.info("Stage 1 debug run wrote plan.json from %s", plan_source)
@@ -963,7 +949,7 @@ def _analysis_prompt(
 
 async def _resolve_analysis_stage_plan(
     plan_task: asyncio.Task[tuple[str, Any]],
-    transcript: str,
+    _transcript: str,
     *,
     issue_url: str | None = None,
     container_version: str | None = None,
@@ -982,18 +968,6 @@ async def _resolve_analysis_stage_plan(
         )
         if plan is not None:
             return plan, "channel"
-
-    plan = _extract_reproduction_plan(
-        transcript,
-        issue_url=issue_url,
-        container_version=container_version,
-        issue_thread=issue_thread,
-    )
-    if plan is not None:
-        if not plan_task.done():
-            plan_task.cancel()
-            await _cancel_task(plan_task)
-        return plan, "transcript"
 
     if not plan_task.done():
         try:
@@ -1026,11 +1000,14 @@ def _analysis_channel_grace(timeout_s: float | None) -> float:
     return max(0.0, min(float(timeout_s), STAGE_CHANNEL_GRACE_S))
 
 
-def _assert_analysis_response_not_empty(transcript: str) -> None:
-    if transcript.strip():
-        return
-    raise AnalysisAgentEmptyResponseError(
-        "analysis agent returned an empty response without emitting plan_ready"
+def _raise_analysis_plan_protocol_error(transcript: str) -> None:
+    if not transcript.strip():
+        raise AnalysisAgentEmptyResponseError(
+            "analysis agent returned an empty response without emitting plan_ready"
+        )
+    raise AnalysisAgentProtocolError(
+        "analysis agent finished without emitting plan_ready; final Stage 1 "
+        "output must use [/output_plan_ready]...[output_plan_ready/]"
     )
 
 

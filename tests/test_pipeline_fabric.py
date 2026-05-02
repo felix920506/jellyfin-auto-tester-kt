@@ -10,6 +10,7 @@ from unittest.mock import patch
 from main import (
     ANALYSIS_TRANSCRIPT_FILE,
     AnalysisAgentEmptyResponseError,
+    AnalysisAgentProtocolError,
     BlockedStage1ModelError,
     _build_parser,
     _build_stage_parser,
@@ -658,7 +659,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(stream.getvalue(), "")
 
-    async def test_run_analysis_stage_extracts_printed_plan_without_channel(self):
+    async def test_run_analysis_stage_rejects_printed_plan_without_channel(self):
         plan = _sample_plan()
         transcript = (
             "analysis started\n"
@@ -669,25 +670,29 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         )
         engine = FakeEngine([transcript])
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = await asyncio.wait_for(
-                run_analysis_stage(
-                    "https://github.com/jellyfin/jellyfin/issues/1",
-                    "10.9.7",
-                    temp_dir,
-                    timeout_s=60,
-                    stream=None,
-                    engine_factory=lambda stage: engine,
-                    issue_fetcher=_sample_issue_fetcher,
-                ),
-                timeout=1,
-            )
+            with self.assertRaisesRegex(
+                AnalysisAgentProtocolError,
+                "without emitting plan_ready",
+            ):
+                await asyncio.wait_for(
+                    run_analysis_stage(
+                        "https://github.com/jellyfin/jellyfin/issues/1",
+                        "10.9.7",
+                        temp_dir,
+                        timeout_s=60,
+                        stream=None,
+                        engine_factory=lambda stage: engine,
+                        issue_fetcher=_sample_issue_fetcher,
+                    ),
+                    timeout=1,
+                )
 
-            self.assertEqual(result.status, "plan_ready")
-            self.assertEqual(result.metadata["source"], "transcript")
-            self.assertEqual(result.metadata["transcript"], ANALYSIS_TRANSCRIPT_FILE)
-            self.assertEqual(json.loads((Path(temp_dir) / "plan.json").read_text()), plan)
+            transcript_payload = _read_stage_transcript(temp_dir)
+            self.assertIn("analysis started", transcript_payload["output"]["assistant"])
+            self.assertFalse((Path(temp_dir) / "plan.json").exists())
+            self.assertFalse((Path(temp_dir) / "stage_result.json").exists())
 
-    async def test_run_analysis_stage_captures_default_output_plan(self):
+    async def test_run_analysis_stage_rejects_default_output_plan(self):
         plan = _sample_legacy_printed_plan()
         transcript = (
             "Now I have enough context to write the reproduction plan.\n"
@@ -700,24 +705,25 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         engine = FakeEngine([], analysis_agent=analysis_agent)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = await asyncio.wait_for(
-                run_analysis_stage(
-                    "https://github.com/jellyfin/jellyfin/issues/14267",
-                    "10.11.8",
-                    temp_dir,
-                    timeout_s=60,
-                    stream=None,
-                    engine_factory=lambda stage: engine,
-                    issue_fetcher=_sample_issue_fetcher,
-                ),
-                timeout=1,
-            )
+            with self.assertRaisesRegex(
+                AnalysisAgentProtocolError,
+                "without emitting plan_ready",
+            ):
+                await asyncio.wait_for(
+                    run_analysis_stage(
+                        "https://github.com/jellyfin/jellyfin/issues/14267",
+                        "10.11.8",
+                        temp_dir,
+                        timeout_s=60,
+                        stream=None,
+                        engine_factory=lambda stage: engine,
+                        issue_fetcher=_sample_issue_fetcher,
+                    ),
+                    timeout=1,
+                )
 
-            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
             written_transcript = _read_stage_transcript(temp_dir)
 
-            self.assertEqual(result.status, "plan_ready")
-            self.assertEqual(result.metadata["source"], "transcript")
             self.assertIn("jellyfin_version", written_transcript["output"]["assistant"])
             self.assertEqual(written_transcript["messages"][0]["role"], "user")
             self.assertEqual(written_transcript["messages"][1]["role"], "assistant")
@@ -725,36 +731,9 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 written_transcript["messages"][1]["content"],
                 written_transcript["output"]["assistant"],
             )
-            self.assertEqual(written_plan["target_version"], "10.11.8")
-            self.assertEqual(written_plan["issue_title"], "Debug issue")
-            self.assertFalse(written_plan["is_verification"])
-            self.assertIsNone(written_plan["original_run_id"])
-            self.assertEqual(
-                written_plan["environment"]["ports"],
-                {"host": 8096, "container": 8096},
-            )
-            self.assertEqual(written_plan["environment"]["volumes"], [])
-            self.assertEqual(written_plan["reproduction_steps"][0]["step_id"], 1)
-            self.assertEqual(written_plan["reproduction_steps"][0]["role"], "setup")
-            self.assertEqual(
-                written_plan["reproduction_steps"][0]["input"]["path"],
-                "/Startup/User",
-            )
-            self.assertEqual(
-                written_plan["reproduction_steps"][0]["success_criteria"]["all_of"][0],
-                {"type": "status_code", "in": [200, 204]},
-            )
-            self.assertEqual(
-                written_plan["reproduction_steps"][0]["success_criteria"]["all_of"][1],
-                {"type": "body_matches", "pattern": r'"AccessToken"\s*:'},
-            )
-            self.assertEqual(written_plan["reproduction_steps"][2]["role"], "verify")
-            self.assertEqual(
-                written_plan["reproduction_steps"][2]["input"]["command"],
-                "sh -c 'grep -rl manifest /config/log/'",
-            )
+            self.assertFalse((Path(temp_dir) / "plan.json").exists())
 
-    async def test_run_analysis_stage_recovers_plan_from_conversation(self):
+    async def test_run_analysis_stage_rejects_conversation_plan_without_channel(self):
         plan = _sample_legacy_printed_plan()
         transcript = (
             "Now I have enough context to write the reproduction plan.\n"
@@ -768,29 +747,31 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         stream = io.StringIO()
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = await asyncio.wait_for(
-                run_analysis_stage(
-                    "https://github.com/jellyfin/jellyfin/issues/14267",
-                    "10.11.8",
-                    temp_dir,
-                    timeout_s=60,
-                    stream=stream,
-                    engine_factory=lambda stage: engine,
-                    issue_fetcher=_sample_issue_fetcher,
-                ),
-                timeout=1,
-            )
+            with self.assertRaisesRegex(
+                AnalysisAgentProtocolError,
+                "without emitting plan_ready",
+            ):
+                await asyncio.wait_for(
+                    run_analysis_stage(
+                        "https://github.com/jellyfin/jellyfin/issues/14267",
+                        "10.11.8",
+                        temp_dir,
+                        timeout_s=60,
+                        stream=stream,
+                        engine_factory=lambda stage: engine,
+                        issue_fetcher=_sample_issue_fetcher,
+                    ),
+                    timeout=1,
+                )
 
-            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
             written_transcript = _read_stage_transcript(temp_dir)
 
-            self.assertEqual(result.status, "plan_ready")
             self.assertEqual(stream.getvalue(), "")
             self.assertIn("jellyfin_version", written_transcript["output"]["assistant"])
             self.assertEqual(written_transcript["output"]["sources"][0]["source"], "conversation")
-            self.assertEqual(written_plan["target_version"], "10.11.8")
+            self.assertFalse((Path(temp_dir) / "plan.json").exists())
 
-    async def test_run_analysis_stage_recovers_gemini_same_turn_partial_plan(self):
+    async def test_run_analysis_stage_rejects_send_message_plan_without_output_block(self):
         partial_plan = _sample_gemini_partial_plan()
         transcript = (
             "[/web_search]\n"
@@ -809,63 +790,51 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         engine = FakeEngine([transcript])
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = await asyncio.wait_for(
-                run_analysis_stage(
-                    "https://github.com/jellyfin/jellyfin/issues/14267",
-                    "10.11.8",
-                    temp_dir,
-                    timeout_s=0.01,
-                    stream=None,
-                    engine_factory=lambda stage: engine,
-                    issue_fetcher=_sample_issue_fetcher,
-                ),
-                timeout=1,
-            )
+            with self.assertRaisesRegex(
+                AnalysisAgentProtocolError,
+                "without emitting plan_ready",
+            ):
+                await asyncio.wait_for(
+                    run_analysis_stage(
+                        "https://github.com/jellyfin/jellyfin/issues/14267",
+                        "10.11.8",
+                        temp_dir,
+                        timeout_s=0.01,
+                        stream=None,
+                        engine_factory=lambda stage: engine,
+                        issue_fetcher=_sample_issue_fetcher,
+                    ),
+                    timeout=1,
+                )
 
-            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+            transcript_payload = _read_stage_transcript(temp_dir)
+            self.assertIn("@@channel=plan_ready", transcript_payload["output"]["assistant"])
+            self.assertFalse((Path(temp_dir) / "plan.json").exists())
 
-        self.assertEqual(result.status, "plan_ready")
-        self.assertEqual(result.metadata["source"], "transcript")
-        self.assertEqual(
-            written_plan["issue_url"],
-            "https://github.com/jellyfin/jellyfin/issues/14267",
-        )
-        self.assertEqual(written_plan["docker_image"], "jellyfin/jellyfin:10.11.8")
-        self.assertEqual(written_plan["issue_title"], "Debug issue")
-        self.assertEqual(written_plan["reproduction_steps"][0]["role"], "setup")
-        self.assertEqual(
-            written_plan["reproduction_steps"][0]["success_criteria"],
-            {"all_of": [{"type": "status_code", "in": [200, 204]}]},
-        )
-        self.assertEqual(
-            written_plan["reproduction_steps"][1]["success_criteria"],
-            {"all_of": [{"type": "status_code", "equals": 204}]},
-        )
-        self.assertEqual(written_plan["reproduction_steps"][2]["role"], "verify")
-        self.assertEqual(
-            written_plan["reproduction_steps"][2]["success_criteria"],
-            {"all_of": [{"type": "body_contains", "value": "Invalid Bug Repo"}]},
-        )
-
-    async def test_run_analysis_stage_returns_no_plan_instead_of_hanging(self):
+    async def test_run_analysis_stage_raises_when_plan_ready_is_missing(self):
         engine = FakeEngine(["analysis started\nREPRODUCTION_PLAN_COMPLETE\n"])
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = await asyncio.wait_for(
-                run_analysis_stage(
-                    "https://github.com/jellyfin/jellyfin/issues/1",
-                    "10.9.7",
-                    temp_dir,
-                    timeout_s=0.01,
-                    stream=None,
-                    engine_factory=lambda stage: engine,
-                    issue_fetcher=_sample_issue_fetcher,
-                ),
-                timeout=1,
-            )
+            with self.assertRaisesRegex(
+                AnalysisAgentProtocolError,
+                "without emitting plan_ready",
+            ):
+                await asyncio.wait_for(
+                    run_analysis_stage(
+                        "https://github.com/jellyfin/jellyfin/issues/1",
+                        "10.9.7",
+                        temp_dir,
+                        timeout_s=0.01,
+                        stream=None,
+                        engine_factory=lambda stage: engine,
+                        issue_fetcher=_sample_issue_fetcher,
+                    ),
+                    timeout=1,
+                )
 
-            self.assertEqual(result.status, "no_plan")
-            self.assertEqual(result.output_file, ANALYSIS_TRANSCRIPT_FILE)
+            transcript_payload = _read_stage_transcript(temp_dir)
+            self.assertIn("analysis started", transcript_payload["output"]["assistant"])
             self.assertFalse((Path(temp_dir) / "plan.json").exists())
+            self.assertFalse((Path(temp_dir) / "stage_result.json").exists())
 
     async def test_run_analysis_stage_raises_on_empty_response(self):
         engine = FakeEngine([""])
