@@ -19,6 +19,9 @@ Important constraints from `plans/plan-master.md`:
   `${variable_name}` in later steps.
 - Include exactly one step with `role: "trigger"`; that step's criteria should
   match the bug symptom.
+- Finish all required fetch/search tool calls before emitting the plan. If more
+  data is needed, output only the tool call and wait for the result; never mix a
+  final plan with tool calls in the same response.
 - Deliver the final plan with `[/output_plan_ready]... [output_plan_ready/]`, not
   `send_message`.
 - Do not emit a separate completion keyword; `plan_ready` is the authoritative

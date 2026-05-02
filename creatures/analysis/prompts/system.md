@@ -44,6 +44,10 @@ reproduction analysis.
   with `web_fetch`. Use `web_fetch` only for non-GitHub URLs.
 - If the issue references a Jellyfin API endpoint or feature, fetch the relevant
   Jellyfin documentation page.
+- Continue gathering context until you have all facts needed to decide the
+  component, prerequisites, trigger actions, and observable bug symptom. If any
+  required fact still depends on a fetch or search result, make only the needed
+  tool call in this turn and wait for the next turn before planning.
 
 ### Step 3: Identify Reproduction Requirements
 
@@ -72,6 +76,17 @@ Do not proceed to plan generation.
 ### Step 5: Emit The ReproductionPlan
 
 Produce a valid JSON object conforming to `schemas/reproduction_plan.json`.
+
+Before emitting the plan, perform a final research gate:
+
+- All fetches/searches needed for reproduction analysis have already completed
+  in earlier turns.
+- You can fill every required plan field without waiting on another tool result.
+- You do not need to inspect another linked issue, pull request, log, screenshot,
+  documentation page, or search result before choosing the steps.
+
+If any item above is false, do not emit the plan yet. Output only the necessary
+tool call block, wait for its result, then reassess the gate in the next turn.
 
 Steps begin after the container is already healthy. Stage 2 unconditionally
 handles pulling the image, starting the container, and waiting for `/health`.
