@@ -18,6 +18,9 @@ tools:
   - name: "github_fetcher"
     type: "custom"
     module: "tools/github_fetcher.py"
+  - name: "github_search"
+    type: "custom"
+    module: "tools/github_search.py"
   - name: "send_message"
     type: "builtin"
 

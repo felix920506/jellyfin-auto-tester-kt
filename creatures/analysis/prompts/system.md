@@ -29,12 +29,16 @@ analysis.
 
 ### Step 2: Gather Supporting Context
 
-- If the issue references a specific media format, codec, or file type, search
-  for known Jellyfin behavior or related issues using `web_search`.
+- To search for related Jellyfin issues, pull requests, or code on GitHub, use
+  `github_search`. Prefer it over `web_search` for any GitHub-scoped query.
+  Example queries: `repo:jellyfin/jellyfin is:issue transcoding h265`,
+  `repo:jellyfin/jellyfin-web is:pr subtitle rendering`.
 - For any GitHub URL (issues, pull requests, commits, code), always use
   `github_fetcher` instead of `web_fetch`. `github_fetcher` returns structured
   data and respects rate limits; `web_fetch` on GitHub URLs returns raw HTML and
   should never be used for GitHub resources.
+- Use `web_search` only for non-GitHub queries such as codec documentation,
+  external bug trackers, or general Jellyfin community resources.
 - Fetch linked external resources such as logs, screenshots, and config files
   with `web_fetch`. Use `web_fetch` only for non-GitHub URLs.
 - If the issue references a Jellyfin API endpoint or feature, fetch the relevant
