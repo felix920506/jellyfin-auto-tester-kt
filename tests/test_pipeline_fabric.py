@@ -82,6 +82,20 @@ class DefaultOnlyAnalysisAgent:
             yield ""
 
 
+class DirectStdoutAnalysisAgent:
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.prompts = []
+        self.agent = FakeInnerAgent()
+
+    async def chat(self, prompt):
+        self.prompts.append(prompt)
+        for chunk in self.chunks:
+            print(chunk, end="", flush=True)
+        if False:
+            yield ""
+
+
 class FakeExecutionAgent:
     def __init__(self):
         self.max_iterations = 1
@@ -554,6 +568,43 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 written_plan["reproduction_steps"][2]["input"]["command"],
                 "sh -c 'grep -rl manifest /config/log/'",
             )
+
+    async def test_run_analysis_stage_captures_direct_stdout_plan(self):
+        plan = _sample_legacy_printed_plan()
+        transcript = (
+            "Now I have enough context to write the reproduction plan.\n"
+            "```json\n"
+            f"{json.dumps(plan)}\n"
+            "```\n"
+            "REPRODUCTION_PLAN_COMPLETE\n"
+        )
+        analysis_agent = DirectStdoutAnalysisAgent([transcript])
+        engine = FakeEngine([], analysis_agent=analysis_agent)
+        stream = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/14267",
+                    "10.11.8",
+                    temp_dir,
+                    timeout_s=60,
+                    stream=stream,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
+            )
+
+            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+            written_transcript = (Path(temp_dir) / "transcript.txt").read_text(
+                encoding="utf-8"
+            )
+
+            self.assertEqual(result.status, "plan_ready")
+            self.assertIn("jellyfin_version", stream.getvalue())
+            self.assertIn("jellyfin_version", written_transcript)
+            self.assertEqual(written_plan["target_version"], "10.11.8")
 
     async def test_run_analysis_stage_returns_no_plan_instead_of_hanging(self):
         engine = FakeEngine(["analysis started\nREPRODUCTION_PLAN_COMPLETE\n"])

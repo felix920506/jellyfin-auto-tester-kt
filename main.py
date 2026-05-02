@@ -183,6 +183,50 @@ class _TranscriptOutput:
             self._stream.flush()
 
 
+class _StdoutTee:
+    """Text stream that captures direct stdout writes while optionally mirroring."""
+
+    def __init__(self, mirror: TextIO | None) -> None:
+        self._mirror = mirror
+        self._parts: list[str] = []
+
+    @property
+    def text(self) -> str:
+        return "".join(self._parts)
+
+    @property
+    def encoding(self) -> str:
+        return str(getattr(self._mirror, "encoding", None) or "utf-8")
+
+    @property
+    def errors(self) -> str:
+        return str(getattr(self._mirror, "errors", None) or "replace")
+
+    def write(self, value: Any) -> int:
+        text = _chunk_text(value)
+        self._parts.append(text)
+        if self._mirror is not None:
+            self._mirror.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._mirror is not None:
+            self._mirror.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._mirror, "isatty", lambda: False)())
+
+    def fileno(self) -> int:
+        if self._mirror is None:
+            raise OSError("stdout capture has no file descriptor")
+        return int(self._mirror.fileno())
+
+    def __getattr__(self, name: str) -> Any:
+        if self._mirror is None:
+            raise AttributeError(name)
+        return getattr(self._mirror, name)
+
+
 def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
     """Load environment variables from ``.env`` if it exists.
 
@@ -441,6 +485,10 @@ async def run_analysis_stage(
     transcript_parts: list[str] = []
     try:
         analysis_agent = _get_agent(engine, "analysis_agent")
+        stdout_capture_state = _install_stdout_capture(stream)
+        stdout_capture = (
+            stdout_capture_state[0] if stdout_capture_state is not None else None
+        )
         transcript_capture_state = _install_transcript_output(analysis_agent, stream)
         transcript_capture = (
             transcript_capture_state[0] if transcript_capture_state is not None else None
@@ -459,9 +507,15 @@ async def run_analysis_stage(
                 await transcript_capture.flush()
         finally:
             _restore_transcript_output(transcript_capture_state)
+            _restore_stdout_capture(stdout_capture_state)
 
         captured_transcript = transcript_capture.text if transcript_capture is not None else ""
-        transcript = captured_transcript or "".join(transcript_parts)
+        stdout_transcript = stdout_capture.text if stdout_capture is not None else ""
+        transcript = _merge_transcript_sources(
+            stdout_transcript,
+            captured_transcript,
+            "".join(transcript_parts),
+        )
         (output_dir / "transcript.txt").write_text(transcript, encoding="utf-8")
 
         if _is_insufficient_information(transcript):
@@ -1292,6 +1346,26 @@ def _suppress_default_output(creature_or_agent: Any) -> None:
     setattr(output_router, "default_output", _NullOutput())
 
 
+def _install_stdout_capture(stream: TextIO | None) -> tuple[_StdoutTee, TextIO] | None:
+    """Capture direct sys.stdout writes from Kohaku output modules."""
+
+    original_stdout = sys.stdout
+    mirror = stream if stream is not original_stdout else original_stdout
+    capture = _StdoutTee(mirror)
+    sys.stdout = capture  # type: ignore[assignment]
+    return capture, original_stdout
+
+
+def _restore_stdout_capture(state: tuple[_StdoutTee, TextIO] | None) -> None:
+    if state is None:
+        return
+    capture, original_stdout = state
+    try:
+        capture.flush()
+    finally:
+        sys.stdout = original_stdout
+
+
 def _install_transcript_output(
     creature_or_agent: Any,
     stream: TextIO | None,
@@ -1316,6 +1390,18 @@ def _restore_transcript_output(
         return
     _, output_router, default_output = state
     setattr(output_router, "default_output", default_output)
+
+
+def _merge_transcript_sources(*sources: str) -> str:
+    merged: list[str] = []
+    for source in sources:
+        if not source:
+            continue
+        if any(source in existing for existing in merged):
+            continue
+        merged = [existing for existing in merged if existing not in source]
+        merged.append(source)
+    return "".join(merged)
 
 
 async def _chat(agent: Any, prompt: str):
