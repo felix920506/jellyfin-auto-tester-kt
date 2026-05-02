@@ -399,7 +399,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             stream.getvalue(),
         )
 
-    async def test_run_issue_silences_analysis_default_stdout_output(self):
+    async def test_run_issue_does_not_stream_analysis_output(self):
         payload = {"report_path": "/tmp/artifacts/run-1/report.md"}
         analysis_agent = DefaultWritingAnalysisAgent(
             ["analysis started\n", "REPRODUCTION_PLAN_COMPLETE\n"]
@@ -420,8 +420,9 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(analysis_agent.original_default_output.streamed, [])
-        self.assertEqual(stream.getvalue().count("analysis started"), 1)
-        self.assertEqual(stream.getvalue().count("REPRODUCTION_PLAN_COMPLETE"), 1)
+        self.assertNotIn("analysis started", stream.getvalue())
+        self.assertNotIn("REPRODUCTION_PLAN_COMPLETE", stream.getvalue())
+        self.assertIn("Final report: /tmp/artifacts/run-1/report.md", stream.getvalue())
 
     async def test_run_issue_prefetches_issue_before_loading_engine(self):
         events = []
@@ -484,12 +485,13 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             ["analysis started\n", "REPRODUCTION_PLAN_COMPLETE\n"],
             channels={"plan_ready": FakeChannel({"content": plan})},
         )
+        stream = io.StringIO()
         with tempfile.TemporaryDirectory() as temp_dir:
             result = await run_analysis_stage(
                 "https://github.com/jellyfin/jellyfin/issues/1",
                 "10.9.7",
                 temp_dir,
-                stream=None,
+                stream=stream,
                 engine_factory=lambda stage: engine,
                 issue_fetcher=_sample_issue_fetcher,
             )
@@ -514,6 +516,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 transcript_payload["input"]["prefetched_issue_thread"]["title"],
                 "Debug issue",
             )
+            self.assertEqual(stream.getvalue(), "")
 
     async def test_run_analysis_stage_extracts_printed_plan_without_channel(self):
         plan = _sample_plan()

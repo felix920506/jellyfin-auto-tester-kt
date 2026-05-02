@@ -33,8 +33,9 @@ supply provider auth instead of relying on KohakuTerrarium's saved login store.
 
 The entrypoint loads `terrarium.yaml`, starts the Stage 1 analysis agent, lets
 the channel topology drive execution and reporting, then prints either the final
-report path or the human-review queue result. Use `--json` for the structured
-terminal payload.
+report path or the human-review queue result. LLM transcripts are written to the
+stage log files instead of streamed to the terminal. Use `--json` for the
+structured terminal payload.
 
 KohakuTerrarium and pipeline logs are mirrored to stderr by default. Use
 `--log-level DEBUG` for more detail, `--log-stderr off` to keep logs file-only,

@@ -132,10 +132,9 @@ class _NullOutput:
 
 
 class _TranscriptOutput:
-    """Output sink that mirrors visible agent text into a transcript."""
+    """Output sink that captures visible agent text for transcript files."""
 
-    def __init__(self, stream: TextIO | None = None) -> None:
-        self._stream = stream
+    def __init__(self) -> None:
         self._parts: list[str] = []
 
     @property
@@ -159,8 +158,7 @@ class _TranscriptOutput:
         self._write(chunk)
 
     async def flush(self) -> None:
-        if self._stream is not None:
-            self._stream.flush()
+        pass
 
     async def on_processing_start(self) -> None:
         pass
@@ -179,9 +177,6 @@ class _TranscriptOutput:
         if not text:
             return
         self._parts.append(text)
-        if self._stream is not None:
-            self._stream.write(text)
-            self._stream.flush()
 
 
 def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
@@ -364,9 +359,6 @@ async def run_issue(
         async for chunk in _chat(analysis_agent, prompt):
             text = _chunk_text(chunk)
             analysis_output.append(text)
-            if stream is not None:
-                stream.write(text)
-                stream.flush()
 
         transcript = "".join(analysis_output)
         if _is_insufficient_information(transcript):
@@ -442,21 +434,18 @@ async def run_analysis_stage(
     transcript_parts: list[str] = []
     try:
         analysis_agent = _get_agent(engine, "analysis_agent")
-        transcript_capture_state = _install_transcript_output(analysis_agent, stream)
+        transcript_capture_state = _install_transcript_output(analysis_agent)
         transcript_capture = (
             transcript_capture_state[0] if transcript_capture_state is not None else None
         )
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
         system_prompt = _agent_system_prompt_text(analysis_agent)
-        logger.info("Streaming Stage 1 analysis transcript")
+        logger.info("Capturing Stage 1 analysis transcript")
         try:
             async for chunk in _chat(analysis_agent, prompt):
                 text = _chunk_text(chunk)
                 if transcript_capture is None or not transcript_capture.has_text:
                     transcript_parts.append(text)
-                    if stream is not None:
-                        stream.write(text)
-                        stream.flush()
             if transcript_capture is not None:
                 await transcript_capture.flush()
         finally:
@@ -1315,7 +1304,6 @@ def _suppress_default_output(creature_or_agent: Any) -> None:
 
 def _install_transcript_output(
     creature_or_agent: Any,
-    stream: TextIO | None,
 ) -> tuple[_TranscriptOutput, Any, Any] | None:
     """Route visible default output into a transcript for Stage 1 debug runs."""
 
@@ -1325,7 +1313,7 @@ def _install_transcript_output(
         return None
 
     default_output = getattr(output_router, "default_output")
-    capture = _TranscriptOutput(stream)
+    capture = _TranscriptOutput()
     setattr(output_router, "default_output", capture)
     return capture, output_router, default_output
 
@@ -1549,11 +1537,10 @@ def _pipeline_result(
 
 
 def _print_terminal_summary(result: PipelineResult, stream: TextIO) -> None:
-    prefix = "\n" if result.analysis_output and not result.analysis_output.endswith("\n") else ""
     if result.channel == "final_report":
-        stream.write(f"{prefix}Final report: {result.report_path or result.message}\n")
+        stream.write(f"Final report: {result.report_path or result.message}\n")
     else:
-        stream.write(f"{prefix}Queued for human review: {result.report_path or result.message}\n")
+        stream.write(f"Queued for human review: {result.report_path or result.message}\n")
     stream.flush()
 
 
