@@ -19,6 +19,18 @@ Repository scaffold for a three-stage Jellyfin issue reproduction pipeline.
 
 This project was developed with the assistance of AI tools, including Codex, Claude, and Gemini.
 
+## Authentication
+
+This project relies on [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium) for LLM orchestration. Authenticate your providers using the `kt login` flow:
+
+```bash
+.venv/bin/kt login openrouter
+```
+
+For more details on managing credentials, refer to the [KohakuTerrarium documentation](https://github.com/Kohaku-Lab/KohakuTerrarium/tree/main/docs).
+
+The CLI also loads `.env` automatically for project runtime settings. Provider API keys (e.g., `OPENROUTER_API_KEY`) should only be added to `.env` if you want to bypass the KohakuTerrarium saved login store for a specific environment.
+
 ## Running the Pipeline
 
 ```bash
@@ -27,13 +39,6 @@ python -m venv .venv
 .venv/bin/python -m playwright install chromium
 cp .env.example .env
 ```
-
-Authenticate LLM providers with KohakuTerrarium's normal login flow, for
-example `.venv/bin/kt login openrouter` for the OpenRouter presets. The CLI
-loads `.env` automatically when present for project runtime settings, without
-overriding variables already exported in the shell. Provider API keys should
-only be added to `.env` when you explicitly want this process environment to
-supply provider auth instead of relying on KohakuTerrarium's saved login store.
 
 ```bash
 .venv/bin/python main.py https://github.com/jellyfin/jellyfin/issues/XXXX 10.9.7
@@ -70,8 +75,8 @@ model blocklist needs to change.
 
 ## Running Stages Individually
 
-explicitly want this process environment to supply provider auth instead of
-relying on KohakuTerrarium's saved login store.
+The full pipeline remains channel-driven. For debugging, each stage can also be
+run with disk handoff folders:
 
 ### Key Environment Variables
 
