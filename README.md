@@ -7,9 +7,13 @@ Repository scaffold for a three-stage Jellyfin issue reproduction pipeline.
 - `creatures/analysis/` - Stage 1 analysis agent files.
 - `creatures/execution/` - Stage 2 execution agent files.
 - `creatures/report/` - Stage 3 report agent files.
+- `tools/` - Reusable Python utilities for Docker, GitHub, and Jellyfin API.
+- `transcript-viewer/` - Standalone web app for viewing execution transcripts.
 - `schemas/` - Shared JSON schemas for inter-stage messages.
-- `artifacts/` - Runtime output directory; per-run artifacts are ignored by Git.
+- `artifacts/` - Runtime output directory (ignored by Git).
+- `debug/` - Default output directory for manual stage execution.
 - `plans/` - Architecture and stage implementation plans.
+- `tests/` - Unit tests for tools and pipeline fabric.
 
 ## AI Use Disclosure
 
