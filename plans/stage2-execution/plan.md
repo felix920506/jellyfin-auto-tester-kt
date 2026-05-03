@@ -341,7 +341,7 @@ Turn 6-N: For each step: dispatch tool → evaluate criteria → log result
 Turn N+1: docker_manager.logs(); find trigger step in execution_log; assess overall_result
           from trigger step outcome (pass→reproduced, fail→not_reproduced, not reached→inconclusive)
 Turn N+2: docker_manager.stop()
-Turn N+3: Build ExecutionResult JSON; send_message(channel="execution_done", message=<execution_result_json>)
+Turn N+3: Build ExecutionResult JSON; [/send_message] @@channel=execution_done <execution_result_json> [send_message/]
 Turn N+4: Emit EXECUTION_COMPLETE
 ```
 

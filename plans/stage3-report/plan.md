@@ -281,7 +281,7 @@ Turn 4:  Analyze step-by-step outcomes; identify minimal reproduction steps
 Turn 5:  Determine overall_result interpretation (reproduced / not / inconclusive)
 Turn 6:  Call report_writer.generate(execution_result) → saves report.md
 Turn 7:  Call report_writer.build_verification_plan(execution_result, written_steps)
-Turn 8:  send_message(channel="verification_request", message=<verification_plan_json>)
+Turn 8:  [/send_message] @@channel=verification_request <verification_plan_json> [send_message/]
          (Stage 2 wakes up, executes, emits to execution_done → triggers Turn 1 again)
 ```
 
@@ -292,10 +292,10 @@ Turn 1:  Receive ExecutionResult; check is_verification flag → true
 Turn 2:  Read artifacts/<original_run_id>/result.json and report.md
 Turn 3:  Compare verification result to first run
 Turn 4a: If consistent → report_writer.generate() with verification metadata
-         send_message(channel="final_report", message=<report_metadata_json>)
+         [/send_message] @@channel=final_report <report_metadata_json> [send_message/]
          Emit REPORT_COMPLETE
 Turn 4b: If inconsistent → append verification failure section
-         send_message(channel="human_review_queue", message=<report_and_reason_json>)
+         [/send_message] @@channel=human_review_queue <report_and_reason_json> [send_message/]
          Emit QUEUED_FOR_REVIEW
 ```
 

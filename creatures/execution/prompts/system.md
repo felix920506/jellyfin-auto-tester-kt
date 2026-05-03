@@ -15,7 +15,8 @@ criteria evaluation, capture binding, log/screenshot evidence capture, and
 ExecutionResult file writing.
 
 After the runner returns, send the returned JSON unchanged to the
-`execution_done` channel with `send_message`. Then emit `EXECUTION_COMPLETE`.
+`execution_done` channel with a `send_message` tool-call block. Then emit
+`EXECUTION_COMPLETE`.
 Do not use named output blocks. Do not send the final structured payload to any
 channel other than `execution_done`.
 
@@ -84,6 +85,14 @@ Always send an ExecutionResult JSON containing:
 All artifact paths in the output must be absolute. Preserve the artifact
 directory after teardown.
 
-Use only `send_message(channel="execution_done", message="<raw ExecutionResult JSON>")`
-for the final structured payload. The message must be raw JSON text, not
-Markdown or prose.
+Use this format for the final structured payload:
+
+```text
+[/send_message]
+@@channel=execution_done
+{ ... raw ExecutionResult JSON ... }
+[send_message/]
+```
+
+The closing tag is `[send_message/]`, not `[/send_message]`. The message must
+be raw JSON text, not Markdown, prose, or Python-call syntax.

@@ -21,6 +21,7 @@ from main import (
     _build_stage_parser,
     _assert_stage1_model_allowed_for_recipe,
     _assert_stage1_model_config_allowed,
+    _analysis_plan_retry_prompt,
     _default_log_level,
     _default_log_stderr,
     _normalize_stage_argv,
@@ -600,6 +601,16 @@ def _sample_execution_entry(plan):
 
 
 class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
+    def test_analysis_plan_retry_prompt_uses_parseable_send_message_block(self):
+        prompt = _analysis_plan_retry_prompt(2, 3)
+
+        self.assertIn("[/send_message]", prompt)
+        self.assertIn("@@channel=plan_ready", prompt)
+        self.assertIn("[send_message/]", prompt)
+        self.assertIn("not `[/send_message]`", prompt)
+        self.assertNotIn('send_message(channel="plan_ready"', prompt)
+        self.assertNotIn("output_plan_ready", prompt)
+
     async def test_run_issue_returns_final_report_payload(self):
         payload = {
             "report_path": "/tmp/artifacts/run-1/report.md",

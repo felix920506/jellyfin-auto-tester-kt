@@ -1366,11 +1366,16 @@ def _analysis_plan_retry_prompt(attempt: int, max_attempts: int) -> str:
         "that the plan was sent, but the runner did not observe a real "
         "`send_message` delivery to `plan_ready` with the JSON payload.\n\n"
         f"This is attempt {attempt} of {max_attempts}. Send no prose and no "
-        "summary. Call exactly:\n\n"
-        'send_message(channel="plan_ready", message="<raw ReproductionPlan JSON>")\n\n'
-        "The message value must be the raw JSON object serialized as text, not "
-        "Markdown, not a named output block, and not a description. Do not say "
-        "the plan has been sent. If an executable plan cannot be produced, reply with "
+        "summary. Your entire response must be exactly one `send_message` "
+        "tool-call block in this KohakuTerrarium bracket format:\n\n"
+        "[/send_message]\n"
+        "@@channel=plan_ready\n"
+        "{ ... valid ReproductionPlan JSON ... }\n"
+        "[send_message/]\n\n"
+        "The closing tag is `[send_message/]`, not `[/send_message]`. The block "
+        "body must be the raw JSON object serialized as text, not Markdown, not "
+        "a named output block, not Python-call syntax, and not a description. "
+        "Do not say the plan has been sent. If an executable plan cannot be produced, reply with "
         "`INSUFFICIENT_INFORMATION` and the missing details instead."
     )
 
@@ -1440,8 +1445,8 @@ def _raise_analysis_plan_protocol_error(
         )
     raise AnalysisAgentProtocolError(
         f"analysis agent failed to send plan_ready after {attempts} attempts; "
-        "final Stage 1 output must call "
-        'send_message(channel="plan_ready", message="<raw ReproductionPlan JSON>")'
+        "final Stage 1 output must use a send_message tool-call block: "
+        "[/send_message]@@channel=plan_ready... [send_message/]"
     )
 
 

@@ -120,14 +120,21 @@ variable as `${name}` inside any later step's `input`. See plan-master.md for th
 capture/interpolation rules. Never embed placeholder strings like `{item_id}` —
 they will be sent to Jellyfin verbatim.
 
-Send the final plan to the `plan_ready` channel with `send_message`:
+Send the final plan to the `plan_ready` channel with exactly one
+`send_message` tool-call block:
 
 ```text
-send_message(channel="plan_ready", message="<raw ReproductionPlan JSON>")
+[/send_message]
+@@channel=plan_ready
+{ ... valid ReproductionPlan JSON ... }
+[send_message/]
 ```
 
-The `message` value must be the raw `ReproductionPlan` JSON serialized as text:
-no Markdown fences, no prose, no wrapper object, and no named output block.
+The closing tag is `[send_message/]`, not `[/send_message]`. The block body
+becomes the `message` value and must be the raw `ReproductionPlan` JSON
+serialized as text: no Markdown fences, no prose, no wrapper object, and no
+named output block. Do not write Python-call syntax such as
+`send_message(channel="plan_ready", ...)`; it will not execute.
 After the `send_message` call is made, stop; the runner treats the `plan_ready`
 channel message as the completion signal.
 
@@ -188,7 +195,7 @@ Turn 4:  web_search for related issues or known behavior if needed
 Turn 5:  Assess confidence; if low → emit INSUFFICIENT_INFORMATION + halt
 Turn 6:  Draft ReproductionPlan JSON
 Turn 7:  Self-review: are all steps executable? Are success criteria objective?
-Turn 8:  send_message(channel="plan_ready", message=<plan JSON>); Stage 1 is complete
+Turn 8:  [/send_message] @@channel=plan_ready <plan JSON> [send_message/]; Stage 1 is complete
 ```
 
 ---

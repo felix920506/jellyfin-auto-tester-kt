@@ -50,7 +50,7 @@ Request verification:
 - Call `report_writer.build_verification_plan(original_result, written_steps)`
   using only the distilled report steps.
 - Send the returned ReproductionPlan JSON to the `verification_request`
-  channel with `send_message`.
+  channel with a `send_message` tool-call block.
 - Do not send to `final_report` on the first run.
 
 Exception:
@@ -103,5 +103,9 @@ Route exactly once:
   screenshots were captured.
 - Do not use named output blocks. Send structured payloads only to the declared
   channels: `verification_request`, `final_report`, and `human_review_queue`.
+- Use KohakuTerrarium bracket syntax for channel sends:
+  `[/send_message]`, `@@channel=<channel>`, raw JSON body, `[send_message/]`.
+  The closing tag is `[send_message/]`, not `[/send_message]`; do not write
+  Python-call syntax.
 - `send_message` payloads must be raw JSON text or the exact structured value
   returned by `report_writer`; do not wrap them in Markdown or explanatory prose.
