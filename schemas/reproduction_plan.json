@@ -288,6 +288,20 @@
               "body_base64"
             ]
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "auth": {
+                "const": "token"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "token"
+            ]
+          }
         }
       ],
       "properties": {
@@ -338,7 +352,15 @@
         "token": {
           "type": "string"
         },
-        "body_json": true,
+        "body_json": {
+          "type": [
+            "object",
+            "array",
+            "string",
+            "number",
+            "boolean"
+          ]
+        },
         "body_text": {
           "type": "string"
         },
