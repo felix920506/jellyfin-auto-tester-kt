@@ -85,6 +85,52 @@ class FakeScreenshotter:
         return {"path": str(path), "url": url, "label": label}
 
 
+class FakeBrowserDriver:
+    def __init__(self, artifacts_root, results=None):
+        self.artifacts_root = Path(artifacts_root)
+        self.results = list(results or [])
+        self.configures = []
+        self.runs = []
+        self.closed = False
+
+    def configure(self, base_url=None, run_id=None):
+        self.configures.append({"base_url": base_url, "run_id": run_id})
+
+    def run(self, browser_input, run_id, step_id=None):
+        self.runs.append(
+            {"browser_input": browser_input, "run_id": run_id, "step_id": step_id}
+        )
+        if self.results:
+            return self.results.pop(0)
+        label = str(browser_input.get("label") or f"step_{step_id}")
+        path = self.artifacts_root / run_id / "screenshots" / f"{label}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"png")
+        return {
+            "status": "pass",
+            "actions": [
+                {
+                    "type": "screenshot",
+                    "status": "pass",
+                    "label": label,
+                    "screenshot_path": str(path),
+                }
+            ],
+            "screenshot_paths": [str(path)],
+            "final_url": "http://localhost:8097/web",
+            "title": "Jellyfin",
+            "console": [],
+            "failed_network": [],
+            "dom_summary": "title='Jellyfin'",
+            "dom_path": None,
+            "media_state": {"state": "none", "elements": []},
+            "error": None,
+        }
+
+    def close(self):
+        self.closed = True
+
+
 def base_plan(steps):
     return {
         "issue_url": "https://github.com/jellyfin/jellyfin/issues/1",
@@ -356,6 +402,169 @@ class ExecutionRunnerTests(unittest.TestCase):
             self.assertEqual(result["overall_result"], "inconclusive")
             self.assertEqual(result["execution_log"][0]["outcome"], "skip")
             self.assertIn("forbidden_docker_step_skipped", docker_log)
+
+    def test_browser_step_runs_driver_and_binds_screenshot_criteria(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = ExecutionRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            plan = base_plan(
+                [
+                    {
+                        "step_id": 1,
+                        "role": "trigger",
+                        "action": "Use Jellyfin Web",
+                        "tool": "browser",
+                        "input": {
+                            "path": "/web",
+                            "label": "web_home",
+                            "actions": [{"type": "screenshot", "label": "web_home"}],
+                        },
+                        "expected_outcome": "Web UI is visible",
+                        "success_criteria": {
+                            "all_of": [
+                                {"type": "screenshot_present", "label": "web_home"}
+                            ]
+                        },
+                    }
+                ]
+            )
+
+            result = runner.execute_plan(plan, run_id="run-browser")
+
+            entry = result["execution_log"][0]
+            self.assertEqual(result["overall_result"], "reproduced")
+            self.assertEqual(entry["outcome"], "pass")
+            self.assertEqual(entry["browser"]["status"], "pass")
+            self.assertTrue(Path(entry["screenshot_path"]).exists())
+            self.assertEqual(browser_driver.runs[0]["step_id"], 1)
+            self.assertEqual(
+                browser_driver.configures,
+                [{"base_url": "http://localhost:8097", "run_id": "run-browser"}],
+            )
+            self.assertTrue(browser_driver.closed)
+
+    def test_browser_session_is_reused_across_browser_steps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = ExecutionRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            plan = base_plan(
+                [
+                    {
+                        "step_id": 1,
+                        "role": "setup",
+                        "action": "Open dashboard",
+                        "tool": "browser",
+                        "input": {
+                            "label": "dashboard",
+                            "actions": [{"type": "screenshot", "label": "dashboard"}],
+                        },
+                        "expected_outcome": "Dashboard appears",
+                        "success_criteria": {
+                            "all_of": [
+                                {"type": "screenshot_present", "label": "dashboard"}
+                            ]
+                        },
+                    },
+                    {
+                        "step_id": 2,
+                        "role": "trigger",
+                        "action": "Open playback",
+                        "tool": "browser",
+                        "input": {
+                            "label": "playback",
+                            "actions": [{"type": "screenshot", "label": "playback"}],
+                        },
+                        "expected_outcome": "Playback bug appears",
+                        "success_criteria": {
+                            "all_of": [
+                                {"type": "screenshot_present", "label": "playback"}
+                            ]
+                        },
+                    },
+                ]
+            )
+
+            result = runner.execute_plan(plan, run_id="run-browser-reuse")
+
+            self.assertEqual([entry["outcome"] for entry in result["execution_log"]], ["pass", "pass"])
+            self.assertEqual([call["step_id"] for call in browser_driver.runs], [1, 2])
+            self.assertTrue(browser_driver.closed)
+
+    def test_browser_failure_records_failure_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    {
+                        "status": "fail",
+                        "actions": [
+                            {
+                                "type": "click",
+                                "status": "fail",
+                                "selector": "#missing",
+                                "error": "selector not found",
+                            }
+                        ],
+                        "screenshot_paths": [],
+                        "final_url": "http://localhost:8097/web",
+                        "title": "Jellyfin",
+                        "console": [],
+                        "failed_network": [],
+                        "dom_summary": "missing button",
+                        "dom_path": None,
+                        "media_state": {"state": "none", "elements": []},
+                        "error": "selector not found",
+                    }
+                ],
+            )
+            runner = ExecutionRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            plan = base_plan(
+                [
+                    {
+                        "step_id": 1,
+                        "role": "trigger",
+                        "action": "Click missing control",
+                        "tool": "browser",
+                        "input": {
+                            "path": "/web",
+                            "label": "missing",
+                            "actions": [{"type": "click", "selector": "#missing"}],
+                        },
+                        "expected_outcome": "Browser action succeeds",
+                        "success_criteria": {
+                            "all_of": [
+                                {"type": "screenshot_present", "label": "missing"}
+                            ]
+                        },
+                    }
+                ]
+            )
+
+            result = runner.execute_plan(plan, run_id="run-browser-fail")
+            entry = result["execution_log"][0]
+
+            self.assertEqual(entry["outcome"], "fail")
+            self.assertEqual(entry["browser"]["status"], "fail")
+            self.assertTrue(Path(entry["failure_logs_path"]).exists())
+            self.assertTrue(Path(entry["failure_screenshot_path"]).exists())
 
 
 if __name__ == "__main__":

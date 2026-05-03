@@ -22,6 +22,7 @@ from tools.criteria import (
     extract_captures,
     resolve_references,
 )
+from tools.browser import BrowserDriver
 from tools.docker_manager import DockerManager
 from tools.jellyfin_http import JellyfinHTTP
 from tools.screenshot import Screenshotter
@@ -44,6 +45,7 @@ class ExecutionRunner:
         docker: Any | None = None,
         api: Any | None = None,
         screenshotter: Any | None = None,
+        browser_driver: Any | None = None,
         command_runner: Any | None = None,
         uuid_factory: Any = uuid.uuid4,
     ) -> None:
@@ -51,6 +53,9 @@ class ExecutionRunner:
         self.docker = docker or DockerManager(artifacts_root=self.artifacts_root)
         self.api = api or JellyfinHTTP(artifacts_root=self.artifacts_root)
         self.screenshotter = screenshotter or Screenshotter(
+            artifacts_root=self.artifacts_root
+        )
+        self.browser_driver = browser_driver or BrowserDriver(
             artifacts_root=self.artifacts_root
         )
         self.command_runner = command_runner or self._run_bash
@@ -88,6 +93,11 @@ class ExecutionRunner:
             container_id = start_result.get("container_id")
             if hasattr(self.api, "configure"):
                 self.api.configure(base_url=start_result.get("base_url"), run_id=run_id)
+            if hasattr(self.browser_driver, "configure"):
+                self.browser_driver.configure(
+                    base_url=start_result.get("base_url"),
+                    run_id=run_id,
+                )
 
             health = self.api.wait_healthy(timeout_s=60)
             if not health.get("healthy"):
@@ -141,6 +151,10 @@ class ExecutionRunner:
             if not execution_log:
                 execution_log = self._skip_all_steps(plan, reason=error_summary)
         finally:
+            try:
+                self.browser_driver.close()
+            except Exception as exc:
+                error_summary = error_summary or f"failed to close browser: {exc}"
             if container_id:
                 try:
                     self.docker.stop(container_id, run_id=run_id)
@@ -288,6 +302,8 @@ class ExecutionRunner:
             context.update(dispatch_result["context"])
             if context.get("screenshot_label"):
                 screenshots[str(context["screenshot_label"])] = context.get("screenshot_path")
+            if isinstance(context.get("browser_screenshots"), dict):
+                screenshots.update(context["browser_screenshots"])
 
             if _criteria_needs_logs(criteria) and container_id:
                 context["logs_since_step_start"] = self.docker.logs(
@@ -416,6 +432,30 @@ class ExecutionRunner:
                     "screenshot_label": label,
                 },
             }
+        if tool == "browser":
+            browser = self.browser_driver.run(
+                step_input,
+                run_id=run_id,
+                step_id=step.get("step_id"),
+            )
+            screenshot_paths = [
+                str(path)
+                for path in browser.get("screenshot_paths", [])
+                if path
+            ]
+            browser_screenshots = _browser_screenshot_map(step_input, browser)
+            screenshot_path = screenshot_paths[0] if screenshot_paths else None
+            return {
+                "entry": {
+                    "browser": browser,
+                    "screenshot_path": screenshot_path,
+                },
+                "context": {
+                    "browser": browser,
+                    "screenshot_path": screenshot_path,
+                    "browser_screenshots": browser_screenshots,
+                },
+            }
         raise ValueError(f"unsupported step.tool: {tool}")
 
     def _capture_failure_artifacts(
@@ -458,6 +498,7 @@ class ExecutionRunner:
             "stderr": "",
             "exit_code": None,
             "http": None,
+            "browser": None,
             "screenshot_path": None,
             "outcome": "fail",
             "reason": None,
@@ -585,7 +626,10 @@ class ExecutionRunner:
 
     def _is_ui_step(self, step: dict[str, Any]) -> bool:
         step_input = step.get("input", {})
-        return step.get("tool") == "screenshot" or bool(step_input.get("url"))
+        return (
+            step.get("tool") in {"screenshot", "browser"}
+            or bool(step_input.get("url"))
+        )
 
     def _screenshot_url(self, step_input: dict[str, Any]) -> str:
         if step_input.get("url"):
@@ -627,6 +671,19 @@ def _criteria_failure_reason(criteria_result: dict[str, Any]) -> str:
         if not assertion.get("passed"):
             return str(assertion.get("message") or "success criteria failed")
     return "success criteria failed"
+
+
+def _browser_screenshot_map(
+    step_input: dict[str, Any],
+    browser: dict[str, Any],
+) -> dict[str, str]:
+    screenshots = {}
+    for action in browser.get("actions", []):
+        if not isinstance(action, dict) or not action.get("screenshot_path"):
+            continue
+        label = str(action.get("label") or step_input.get("label") or "browser")
+        screenshots[label] = str(action["screenshot_path"])
+    return screenshots
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
