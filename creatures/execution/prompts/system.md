@@ -45,6 +45,8 @@ Supported tools:
 - `http_request`: raw Jellyfin HTTP request through `jellyfin_http`.
 - `screenshot`: browser screenshot through `screenshot`.
 - `docker_exec`: command inside the already-running Jellyfin container.
+- `browser`: Playwright browser flow through `execution_runner` for Jellyfin Web
+  UI interactions, media playback evidence, and client/server behavior.
 
 Supported criteria are the DSL from `plans/plan-master.md`: `status_code`,
 `body_contains`, `body_matches`, `body_json_path`, `exit_code`,

@@ -79,6 +79,7 @@
         "stderr",
         "exit_code",
         "http",
+        "browser",
         "screenshot_path",
         "outcome",
         "reason",
@@ -112,6 +113,7 @@
             "http_request",
             "screenshot",
             "docker_exec",
+            "browser",
             null
           ]
         },
@@ -131,6 +133,16 @@
           "oneOf": [
             {
               "$ref": "#/$defs/http_result"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "browser": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/browser_result"
             },
             {
               "type": "null"
@@ -169,6 +181,77 @@
         "duration_ms": {
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "browser_result": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "status",
+        "actions"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "final_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "screenshot_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "console": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "failed_network": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "dom_summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dom_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "media_state": {
+          "type": "object",
+          "additionalProperties": true
         }
       }
     },

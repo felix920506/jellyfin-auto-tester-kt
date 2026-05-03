@@ -199,6 +199,22 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "browser"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "input": {
+                "$ref": "#/$defs/browser_input"
+              }
+            }
+          }
         }
       ],
       "required": [
@@ -231,7 +247,8 @@
             "bash",
             "http_request",
             "screenshot",
-            "docker_exec"
+            "docker_exec",
+            "browser"
           ]
         },
         "input": {
@@ -376,6 +393,153 @@
           "type": "boolean"
         },
         "allow_absolute_url": {
+          "type": "boolean"
+        }
+      }
+    },
+    "browser_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actions"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "auth": {
+          "enum": [
+            "auto",
+            "none"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_s": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "viewport": {
+          "$ref": "#/$defs/browser_viewport"
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/browser_action"
+          }
+        }
+      }
+    },
+    "browser_viewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height"
+      ],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "browser_action": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "goto",
+            "refresh",
+            "click",
+            "fill",
+            "press",
+            "select_option",
+            "check",
+            "uncheck",
+            "wait_for",
+            "wait_for_text",
+            "wait_for_url",
+            "wait_for_media",
+            "evaluate",
+            "screenshot"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": true,
+        "text": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "visible",
+            "hidden",
+            "attached",
+            "detached"
+          ]
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string"
+        },
+        "expression": {
+          "type": "string"
+        },
+        "args": true,
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_s": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "wait_until": {
+          "enum": [
+            "load",
+            "domcontentloaded",
+            "networkidle",
+            "commit"
+          ]
+        },
+        "full_page": {
           "type": "boolean"
         }
       }

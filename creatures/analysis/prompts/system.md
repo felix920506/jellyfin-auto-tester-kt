@@ -101,6 +101,14 @@ Each step must have a `tool` field specifying how Stage 2 should execute it:
   non-spec-compliant calls when they can be represented with structured fields.
 - `screenshot`: capture browser state at this step.
 - `docker_exec`: command inside the already-running container.
+- `browser`: Playwright browser flow for Jellyfin Web UI interactions.
+
+Prefer `browser` when the issue depends on Jellyfin Web behavior, React-style UI
+state, media playback controls/state, or client/server interaction that cannot
+be represented as a raw API call. A browser step input must contain ordered
+`actions`; supported action types are `goto`, `refresh`, `click`, `fill`,
+`press`, `select_option`, `check`, `uncheck`, `wait_for`, `wait_for_text`,
+`wait_for_url`, `wait_for_media`, `evaluate`, and `screenshot`.
 
 When a step needs a value produced by an earlier step, declare a `capture` block
 on the producing step and reference the variable as `${name}` inside later
@@ -138,6 +146,9 @@ channel message as the completion signal.
   `method`, `path`, and `auth`. Use `auth: "auto"` for the Stage 2 admin token,
   `auth: "none"` for anonymous or deliberately unauthenticated requests, and
   `auth: "token"` with `token` for a specific token.
+- Prefer `browser` over `screenshot` for multi-action Jellyfin Web flows where
+  selectors, waits, playback state, or a UI trigger must be driven before
+  evidence is captured.
 - For request bodies, use at most one of `body_json`, `body_text`, or
   `body_base64`; never use a generic `body` field. Use `body_text` with an
   explicit `Content-Type` header for malformed JSON or other non-standard text.

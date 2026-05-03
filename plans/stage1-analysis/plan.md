@@ -114,6 +114,9 @@ Each step must have a `tool` field specifying how Stage 2 should execute it:
   non-spec-compliant calls when they can be represented with structured fields
 - `"screenshot"` — capture browser state at this step
 - `"docker_exec"` — command inside the already-running container
+- `"browser"` — Playwright browser flow for Jellyfin Web UI interactions,
+  React-style UI state, media playback, or client/server bugs that require a
+  real web client
 
 When a step needs a value produced by an earlier step (e.g. an item ID returned by a
 library scan), declare a `capture` block on the producing step and reference the
