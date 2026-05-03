@@ -334,10 +334,18 @@ def _step_invocation_lines(step: dict[str, Any]) -> list[str]:
         method = _text(step_input.get("method"), "GET")
         path = _text(step_input.get("path"), "/")
         lines = [f"   - Send HTTP request: `{method.upper()} {path}`"]
+        if step_input.get("auth"):
+            lines.append(f"   - Auth mode: `{_inline_code(str(step_input['auth']))}`")
+        if step_input.get("params"):
+            lines.append(f"   - Params: `{_inline_code(json.dumps(step_input['params'], sort_keys=True, default=str))}`")
         if step_input.get("headers"):
-            lines.append(f"   - Headers: `{_inline_code(json.dumps(step_input['headers'], sort_keys=True))}`")
-        if "body" in step_input:
-            lines.extend(["   - Body:", "", _indent_code(_json_or_text(step_input.get("body")), "json", spaces=5)])
+            lines.append(f"   - Headers: `{_inline_code(json.dumps(step_input['headers'], sort_keys=True, default=str))}`")
+        if "body_json" in step_input:
+            lines.extend(["   - JSON body:", "", _indent_code(_json_or_text(step_input.get("body_json")), "json", spaces=5)])
+        if "body_text" in step_input:
+            lines.extend(["   - Text body:", "", _indent_code(str(step_input.get("body_text") or ""), "text", spaces=5)])
+        if "body_base64" in step_input:
+            lines.extend(["   - Base64 body:", "", _indent_code(str(step_input.get("body_base64") or ""), "text", spaces=5)])
         return lines
     if tool == "screenshot":
         target = step_input.get("url") or step_input.get("path") or "/web"

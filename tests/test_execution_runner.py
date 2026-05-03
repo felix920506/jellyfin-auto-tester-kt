@@ -67,10 +67,8 @@ class FakeAPI:
     def authenticate(self):
         return {"success": self.auth_success, "token": "token"}
 
-    def request(self, method, path, body=None, headers=None):
-        self.requests.append(
-            {"method": method, "path": path, "body": body, "headers": headers}
-        )
+    def request(self, method, path, **kwargs):
+        self.requests.append({"method": method, "path": path, **kwargs})
         return self.responses.pop(0)
 
 
@@ -203,6 +201,96 @@ class ExecutionRunnerTests(unittest.TestCase):
 
             self.assertEqual(result["overall_result"], "not_reproduced")
             self.assertEqual(result["execution_log"][0]["outcome"], "fail")
+
+    def test_http_request_forwards_raw_transport_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api = FakeAPI(
+                responses=[
+                    {"status_code": 400, "body": "bad json", "headers": {}},
+                ]
+            )
+            runner = ExecutionRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=api,
+                screenshotter=FakeScreenshotter(temp_dir),
+            )
+            plan = base_plan(
+                [
+                    {
+                        "step_id": 1,
+                        "role": "trigger",
+                        "action": "Send malformed JSON",
+                        "tool": "http_request",
+                        "input": {
+                            "method": "POST",
+                            "path": "/Users",
+                            "params": {"bad": "true"},
+                            "headers": {"Content-Type": "application/json"},
+                            "auth": "none",
+                            "body_text": '{"Name":',
+                            "timeout_s": 5,
+                            "follow_redirects": True,
+                        },
+                        "expected_outcome": "HTTP 400",
+                        "success_criteria": {
+                            "all_of": [{"type": "status_code", "equals": 400}]
+                        },
+                    }
+                ]
+            )
+
+            result = runner.execute_plan(plan, run_id="run-raw")
+
+            self.assertEqual(result["overall_result"], "reproduced")
+            self.assertEqual(
+                api.requests[0],
+                {
+                    "method": "POST",
+                    "path": "/Users",
+                    "params": {"bad": "true"},
+                    "headers": {"Content-Type": "application/json"},
+                    "auth": "none",
+                    "token": None,
+                    "body_json": None,
+                    "body_text": '{"Name":',
+                    "body_base64": None,
+                    "timeout_s": 5,
+                    "follow_redirects": True,
+                    "allow_absolute_url": False,
+                },
+            )
+
+    def test_http_request_rejects_legacy_body_field(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api = FakeAPI(responses=[])
+            runner = ExecutionRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=api,
+                screenshotter=FakeScreenshotter(temp_dir),
+            )
+            plan = base_plan(
+                [
+                    {
+                        "step_id": 1,
+                        "role": "trigger",
+                        "action": "Use unsupported body field",
+                        "tool": "http_request",
+                        "input": {"method": "POST", "path": "/Users", "body": {}},
+                        "expected_outcome": "Rejected",
+                        "success_criteria": {
+                            "all_of": [{"type": "status_code", "equals": 400}]
+                        },
+                    }
+                ]
+            )
+
+            result = runner.execute_plan(plan, run_id="run-legacy-body")
+
+            self.assertEqual(api.requests, [])
+            self.assertEqual(result["execution_log"][0]["outcome"], "fail")
+            self.assertIn("body_json", result["execution_log"][0]["reason"])
 
     def test_auth_failure_skips_steps_and_marks_inconclusive(self):
         with tempfile.TemporaryDirectory() as temp_dir:

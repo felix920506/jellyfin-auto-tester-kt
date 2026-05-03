@@ -14,7 +14,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, TextIO
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 from stage1_model_blacklist import is_stage1_model_blacklisted
 
@@ -1751,12 +1751,15 @@ def _normalize_step_input(value: Any, tool: Any) -> dict[str, Any]:
         if parsed.query:
             path = f"{path}?{parsed.query}"
         step_input["path"] = path
+        step_input.pop("url", None)
     if tool == "http_request" and isinstance(step_input.get("query"), dict):
-        query = urlencode(_normalize_query_params(step_input["query"]), doseq=True)
-        if query:
-            path = str(step_input.get("path") or "/")
-            separator = "&" if "?" in path else "?"
-            step_input["path"] = f"{path}{separator}{query}"
+        if "params" not in step_input:
+            step_input["params"] = _normalize_query_params(step_input["query"])
+        step_input.pop("query", None)
+    if tool == "http_request":
+        step_input.pop("url", None)
+        step_input.setdefault("method", "GET")
+        step_input.setdefault("auth", "auto")
     if tool in {"bash", "docker_exec"} and isinstance(step_input.get("command"), list):
         step_input["command"] = shlex.join(str(part) for part in step_input["command"])
     return step_input

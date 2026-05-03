@@ -23,7 +23,7 @@ from tools.criteria import (
     resolve_references,
 )
 from tools.docker_manager import DockerManager
-from tools.jellyfin_api import JellyfinAPI
+from tools.jellyfin_http import JellyfinHTTP
 from tools.screenshot import Screenshotter
 
 
@@ -49,7 +49,7 @@ class ExecutionRunner:
     ) -> None:
         self.artifacts_root = Path(artifacts_root or DEFAULT_ARTIFACTS_ROOT).resolve()
         self.docker = docker or DockerManager(artifacts_root=self.artifacts_root)
-        self.api = api or JellyfinAPI(artifacts_root=self.artifacts_root)
+        self.api = api or JellyfinHTTP(artifacts_root=self.artifacts_root)
         self.screenshotter = screenshotter or Screenshotter(
             artifacts_root=self.artifacts_root
         )
@@ -375,11 +375,23 @@ class ExecutionRunner:
                 },
             }
         if tool == "http_request":
+            if "body" in step_input:
+                raise ValueError(
+                    "http_request input uses body; use body_json, body_text, or body_base64"
+                )
             response = self.api.request(
                 method=str(step_input.get("method", "GET")),
                 path=str(step_input.get("path", "/")),
-                body=step_input.get("body"),
+                params=step_input.get("params"),
                 headers=step_input.get("headers"),
+                auth=str(step_input.get("auth", "auto")),
+                token=step_input.get("token"),
+                body_json=step_input.get("body_json"),
+                body_text=step_input.get("body_text"),
+                body_base64=step_input.get("body_base64"),
+                timeout_s=step_input.get("timeout_s"),
+                follow_redirects=bool(step_input.get("follow_redirects", False)),
+                allow_absolute_url=bool(step_input.get("allow_absolute_url", False)),
             )
             http = {
                 "status_code": response.get("status_code"),

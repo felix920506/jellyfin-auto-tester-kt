@@ -43,7 +43,8 @@ def sample_plan():
                 "input": {
                     "method": "POST",
                     "path": "/Items/item-abc/PlaybackInfo",
-                    "body": {"StartTimeTicks": 0},
+                    "auth": "auto",
+                    "body_json": {"StartTimeTicks": 0},
                 },
                 "expected_outcome": "Jellyfin returns HTTP 500 with Transcoding failed.",
                 "success_criteria": {

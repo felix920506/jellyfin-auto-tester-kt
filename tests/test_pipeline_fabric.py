@@ -380,7 +380,7 @@ def _sample_plan():
                 "role": "trigger",
                 "action": "Call health endpoint",
                 "tool": "http_request",
-                "input": {"method": "GET", "path": "/health"},
+                "input": {"method": "GET", "path": "/health", "auth": "none"},
                 "expected_outcome": "The endpoint returns Healthy.",
                 "success_criteria": {"all_of": [{"type": "status_code", "equals": 200}]},
             }
@@ -414,7 +414,8 @@ def _sample_legacy_printed_plan():
                 "input": {
                     "method": "POST",
                     "url": "http://localhost:8096/Startup/User",
-                    "body": {"Name": "testadmin", "Password": "TestPassword1!"},
+                    "auth": "none",
+                    "body_json": {"Name": "testadmin", "Password": "TestPassword1!"},
                 },
                 "success_criteria": {
                     "all_of": [
@@ -431,6 +432,7 @@ def _sample_legacy_printed_plan():
                 "input": {
                     "method": "POST",
                     "url": "http://localhost:8096/Repositories",
+                    "auth": "auto",
                 },
                 "success_criteria": {
                     "all_of": [
@@ -465,6 +467,7 @@ def _sample_gemini_partial_plan():
                 "input": {
                     "method": "POST",
                     "url": "http://localhost:8096/Startup/User",
+                    "auth": "none",
                 },
             },
             {
@@ -475,6 +478,7 @@ def _sample_gemini_partial_plan():
                 "input": {
                     "method": "POST",
                     "url": "http://localhost:8096/Repositories",
+                    "auth": "auto",
                 },
                 "success_criteria": {
                     "all_of": [
@@ -490,6 +494,7 @@ def _sample_gemini_partial_plan():
                 "input": {
                     "method": "GET",
                     "url": "http://localhost:8096/Repositories",
+                    "auth": "auto",
                 },
                 "success_criteria": {
                     "all_of": [
@@ -521,6 +526,7 @@ def _sample_provider_plan_without_target_version():
                 "input": {
                     "method": "GET",
                     "url": "http://localhost:8096/Items",
+                    "auth": "auto",
                     "query": {"Recursive": True},
                 },
                 "capture": {"item_id": "Items[0].Id"},
@@ -1057,7 +1063,11 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             written_plan["reproduction_steps"][1]["input"]["path"],
-            "/Items?Recursive=true",
+            "/Items",
+        )
+        self.assertEqual(
+            written_plan["reproduction_steps"][1]["input"]["params"],
+            {"Recursive": "true"},
         )
         self.assertEqual(
             written_plan["reproduction_steps"][1]["capture"]["item_id"],
