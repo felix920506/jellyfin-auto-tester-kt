@@ -190,6 +190,13 @@ class GitHubSearchTests(unittest.TestCase):
             )
 
         self.assertEqual(
+            result["query"],
+            'filename:"LG Smart TV.xml" repo:jellyfin/jellyfin',
+        )
+        self.assertEqual(result["requested_kind"], "auto")
+        self.assertEqual(result["kind"], "code")
+        self.assertEqual(result["effective_queries"], [result["query"]])
+        self.assertEqual(
             client.code_queries,
             ['filename:"LG Smart TV.xml" repo:jellyfin/jellyfin'],
         )
@@ -205,6 +212,16 @@ class GitHubSearchTests(unittest.TestCase):
         with patch.object(search, "_client", return_value=client):
             result = search.github_search("repo:jellyfin/jellyfin playback")
 
+        self.assertEqual(result["query"], "repo:jellyfin/jellyfin playback")
+        self.assertEqual(result["requested_kind"], "auto")
+        self.assertEqual(result["kind"], "issues")
+        self.assertEqual(
+            result["effective_queries"],
+            [
+                "repo:jellyfin/jellyfin playback is:issue",
+                "repo:jellyfin/jellyfin playback is:pull-request",
+            ],
+        )
         self.assertEqual(
             client.issue_queries,
             [

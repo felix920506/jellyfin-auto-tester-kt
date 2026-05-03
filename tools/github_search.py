@@ -58,28 +58,40 @@ def github_search(
         max_results: Maximum number of results to return (1–30, default 10).
 
     Returns:
-        A dictionary with a ``total_count`` key and an ``items`` list. Each
-        item contains the fields most relevant for reproduction analysis.
+        A dictionary with query metadata, a ``total_count`` key, and an
+        ``items`` list. Each item contains the fields most relevant for
+        reproduction analysis.
     """
-    kind = _resolve_kind(query, kind)
-    if kind not in ("issues", "code"):
+    requested_kind = str(kind or "auto").lower()
+    resolved_kind = _resolve_kind(query, requested_kind)
+    if resolved_kind not in ("issues", "code"):
         raise ValueError("kind must be 'auto', 'issues', or 'code'")
 
     max_results = max(1, min(30, max_results))
 
     client = _client()
-    if kind == "issues":
+    if resolved_kind == "issues":
+        effective_queries = _issue_search_queries(query)
         total_count, items = _search_issues_and_pull_requests(
             client,
-            query,
+            effective_queries,
             max_results,
         )
     else:
+        effective_queries = [query]
         results = client.search_code(query=query)
         total_count = results.totalCount
         items = [_format_code_item(item) for item in _take(results, max_results)]
 
-    return {"total_count": total_count, "items": items}
+    return {
+        "query": query,
+        "requested_kind": requested_kind,
+        "kind": resolved_kind,
+        "max_results": max_results,
+        "effective_queries": effective_queries,
+        "total_count": total_count,
+        "items": items,
+    }
 
 
 def _resolve_kind(query: str, kind: str) -> str:
@@ -104,14 +116,14 @@ def _looks_like_code_search(query: str) -> bool:
 
 def _search_issues_and_pull_requests(
     client: Github,
-    query: str,
+    effective_queries: list[str],
     max_results: int,
 ) -> tuple[int, list[dict[str, Any]]]:
     result_groups: list[list[dict[str, Any]]] = []
     seen_urls: set[str] = set()
     total_count = 0
 
-    for effective_query in _issue_search_queries(query):
+    for effective_query in effective_queries:
         results = client.search_issues(query=effective_query)
         total_count += results.totalCount
         group: list[dict[str, Any]] = []
