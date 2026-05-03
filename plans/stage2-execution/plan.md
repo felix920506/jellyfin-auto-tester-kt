@@ -39,14 +39,14 @@ tools:
   - name: "write"
     type: "builtin"
   - name: "docker_manager"
-    type: "custom"
-    module: "tools/docker_manager.py"
-  - name: "jellyfin_api"
-    type: "custom"
-    module: "tools/jellyfin_api.py"
+    type: "package"
+    module: "tools.docker_manager"
+  - name: "jellyfin_http"
+    type: "package"
+    module: "tools.jellyfin_http"
   - name: "screenshot"
-    type: "custom"
-    module: "tools/screenshot.py"
+    type: "package"
+    module: "tools.screenshot"
   - name: "send_message"
     type: "builtin"
 
@@ -105,7 +105,7 @@ A `run_id` (UUID) for artifact namespacing.
    - Mount `prereq_dir` into the container at the path the steps expect
      (default `/media`).
 4. Start the Jellyfin container using `docker_manager.start()`
-5. Wait for Jellyfin to become healthy via `jellyfin_api.wait_healthy()` (60s).
+5. Wait for Jellyfin to become healthy via `jellyfin_http.wait_healthy()` (60s).
    The probe tries `GET /health` first (modern builds, ≥10.8) and falls back
    to `GET /System/Info/Public` (older builds and forks that don't expose
    `/health`). Either a 200 from `/health` with body containing `"Healthy"`
@@ -116,10 +116,10 @@ A `run_id` (UUID) for artifact namespacing.
    - `POST /Startup/RemoteAccess` with `{ "EnableRemoteAccess": true, "EnableAutomaticPortMapping": false }`
    - `POST /Startup/Complete` (no body)
    This sequence is unconditional. If the wizard endpoints return 403/404 the server has already been provisioned (e.g. mounted config volume), so skip silently and proceed.
-7. Authenticate as the admin user with `jellyfin_api.authenticate()`. This is
+7. Authenticate as the admin user with `jellyfin_http.authenticate()`. This is
    unconditional after startup provisioning because most Jellyfin API endpoints
-   require a token and `ReproductionPlan` steps do not carry separate auth
-   metadata. If authentication fails, mark setup failed and emit
+   require a token. Individual `http_request` steps still choose whether to use
+   that token through their `auth` field. If authentication fails, mark setup failed and emit
    `overall_result: "inconclusive"` because subsequent API steps cannot be
    evaluated reliably.
 
@@ -132,7 +132,7 @@ For each step in `reproduction_steps`, in order:
    short-circuit the step to `fail` with reason `"unbound variable: <name>"`.
 3. Dispatch to the appropriate tool based on `step.tool`:
    - `bash` → run command on host or via `docker exec`
-   - `http_request` → call `jellyfin_api.request()`
+   - `http_request` → call `jellyfin_http.request()`
    - `screenshot` → call `screenshot.capture()`
    - `docker_exec` → run command inside container via `docker_manager.exec()`
 4. Capture stdout, stderr, exit code, and HTTP response body/status
@@ -264,33 +264,38 @@ Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 
 ---
 
-### `jellyfin_api.py`
+### `jellyfin_http.py`
 
-**File:** `creatures/execution/tools/jellyfin_api.py`
+**File:** `tools/jellyfin_http.py`
 
-**Purpose:** Typed HTTP client for the Jellyfin REST API with session management.
+**Purpose:** Raw Jellyfin HTTP transport with session token persistence.
 
 **Interface:**
 
 ```python
-# jellyfin_api.request(method: str, path: str, body: dict = None,
-#                      headers: dict = None) -> dict
-#   Makes HTTP request to http://localhost:8096{path}
+# jellyfin_http.request(method: str, path: str, params=None, headers=None,
+#                       auth: str = "auto", token: str | None = None,
+#                       body_json=None, body_text: str | None = None,
+#                       body_base64: str | None = None,
+#                       timeout_s: float | None = None,
+#                       follow_redirects: bool = False,
+#                       allow_absolute_url: bool = False) -> dict
+#   Makes a raw HTTP request to http://localhost:8096{path}
 #   Returns {status_code, body, headers, duration_ms}
 #   Status-code expectations belong in step.success_criteria
 #   (status_code assertion), evaluated by the criteria DSL — not here.
 
-# jellyfin_api.wait_healthy(timeout_s: int = 60) -> dict
+# jellyfin_http.wait_healthy(timeout_s: int = 60) -> dict
 #   Polls /health (preferred); on 404 falls back to /System/Info/Public.
 #   Returns {healthy: bool, elapsed_s: float, endpoint_used: str}
 
-# jellyfin_api.authenticate(username: str = "admin", password: str = "admin") -> dict
+# jellyfin_http.authenticate(username: str = "admin", password: str = "admin") -> dict
 #   Posts to /Users/AuthenticateByName
 #   Returns {token, user_id, success: bool}
 #   Stores token for subsequent requests
 
-# jellyfin_api.complete_startup_wizard(admin_user: str = "admin",
-#                                      admin_password: str = "admin") -> dict
+# jellyfin_http.complete_startup_wizard(admin_user: str = "admin",
+#                                       admin_password: str = "admin") -> dict
 #   Drives /Startup/Configuration, /Startup/User, /Startup/RemoteAccess, /Startup/Complete.
 #   Idempotent: returns {already_provisioned: True} if endpoints reject as already-completed.
 #   Returns {provisioned: bool, already_provisioned: bool, elapsed_s: float}
@@ -298,7 +303,13 @@ Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 
 **Implementation Notes:**
 - Uses `httpx` with a 30s connect timeout, 120s read timeout
-- Auto-injects `X-Emby-Token` header if authenticated
+- Auto-injects `X-Emby-Token` only for `auth: "auto"` requests after authentication
+- Supports `auth: "none"` for anonymous or deliberately unauthenticated requests
+  and `auth: "token"` for a supplied token
+- Supports `body_json`, exact `body_text`, raw bytes via `body_base64`, `params`,
+  per-request timeout, redirect control, and optional absolute URLs
+- Leaves malformed HTTP framing, such as intentionally wrong `Content-Length`, to
+  `bash`/`curl`
 - Retries on `ConnectionRefusedError` up to 5× with 2s backoff (server startup)
 - Logs all requests/responses to `artifacts/<run_id>/http_log.jsonl`
 
@@ -334,8 +345,8 @@ Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
 Turn 1:  Receive ReproductionPlan from channel; parse JSON; generate run_id (uuid4)
 Turn 2:  Create artifacts dir; docker_manager.pull(plan.docker_image)
 Turn 3:  Prepare prerequisites (generate media files via bash/ffmpeg if needed)
-Turn 4:  docker_manager.start(...); jellyfin_api.wait_healthy()
-Turn 5:  jellyfin_api.complete_startup_wizard(); jellyfin_api.authenticate()
+Turn 4:  docker_manager.start(...); jellyfin_http.wait_healthy()
+Turn 5:  jellyfin_http.complete_startup_wizard(); jellyfin_http.authenticate()
 Turn 6-N: For each step: dispatch tool → evaluate criteria → log result
          (screenshot on fail steps if UI-related)
 Turn N+1: docker_manager.logs(); find trigger step in execution_log; assess overall_result
@@ -385,7 +396,7 @@ artifacts/<run_id>/
 | Docker pull fails (image not found) | Emit `ExecutionResult` with `overall_result: "inconclusive"`, error: "image not found" |
 | Container exits before all steps | Mark remaining steps `skip`; collect available logs; set `inconclusive` |
 | Step timeout | Mark step `fail` with `"timeout"` reason; continue |
-| Port 8096 already in use | `docker_manager.start()` tries ports 8097, 8098; updates `jellyfin_api` base URL |
+| Port 8096 already in use | `docker_manager.start()` tries ports 8097, 8098; updates `jellyfin_http` base URL |
 | Container name collision (concurrent runs) | Names are derived from `run_id` (`jf-test-<run_id[:8]>`), so collisions are statistically excluded; if a stale container with the same name exists, `start()` removes it first |
 | No Playwright available | Steps with `tool: "screenshot"` log warning, save `null` path, continue |
 | Media generation fails (no ffmpeg) | Mark prerequisite as failed in result; continue if step is still attempted |

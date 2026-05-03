@@ -42,7 +42,7 @@ and records the full criteria result in `execution_log[].criteria_evaluation`.
 Supported tools:
 
 - `bash`: host shell command.
-- `http_request`: Jellyfin HTTP request through `jellyfin_api`.
+- `http_request`: raw Jellyfin HTTP request through `jellyfin_http`.
 - `screenshot`: browser screenshot through `screenshot`.
 - `docker_exec`: command inside the already-running Jellyfin container.
 

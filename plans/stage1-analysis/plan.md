@@ -110,7 +110,8 @@ duplicate containers.
 
 Each step must have a `tool` field specifying how Stage 2 should execute it:
 - `"bash"` — shell command on the host (e.g. file preparation, ffmpeg)
-- `"http_request"` — HTTP call to the Jellyfin API or web UI
+- `"http_request"` — raw Jellyfin HTTP request, including intentionally
+  non-spec-compliant calls when they can be represented with structured fields
 - `"screenshot"` — capture browser state at this step
 - `"docker_exec"` — command inside the already-running container
 
@@ -147,7 +148,10 @@ result, output only the tool call block and wait for the next turn.
   the assertion DSL defined in plan-master.md. Never emit free-text criteria —
   Stage 2 evaluates them programmatically, not by LLM judgment, so unstructured
   criteria are unrunnable.
-- Prefer `http_request` over browser automation for API-level bugs.
+- Prefer `http_request` over browser automation for API-level bugs. It is a
+  raw HTTP transport, not a Jellyfin SDK. Use `body_json`, `body_text`, or
+  `body_base64`; never use a generic `body` field. Set `auth` explicitly to
+  `auto`, `none`, or `token`.
 - Docker image must be `jellyfin/jellyfin:<version>` using the maintainer-specified version.
 ```
 
@@ -228,7 +232,8 @@ The agent sends a `ReproductionPlan` JSON to the `plan_ready` channel. See the m
       "input": {
         "method": "POST",
         "path": "/Library/Media/VirtualFolders",
-        "body": { "Name": "TestLib", "CollectionType": "movies", "Paths": ["/media"] }
+        "auth": "auto",
+        "body_json": { "Name": "TestLib", "CollectionType": "movies", "Paths": ["/media"] }
       },
       "expected_outcome": "HTTP 204; library scan triggered",
       "success_criteria": { "all_of": [ { "type": "status_code", "equals": 204 } ] }
@@ -240,7 +245,9 @@ The agent sends a `ReproductionPlan` JSON to the `plan_ready` channel. See the m
       "tool": "http_request",
       "input": {
         "method": "GET",
-        "path": "/Items?Recursive=true&IncludeItemTypes=Movie"
+        "path": "/Items",
+        "params": { "Recursive": "true", "IncludeItemTypes": "Movie" },
+        "auth": "auto"
       },
       "expected_outcome": "HTTP 200 with the generated test media listed",
       "success_criteria": {
@@ -261,7 +268,8 @@ The agent sends a `ReproductionPlan` JSON to the `plan_ready` channel. See the m
       "input": {
         "method": "POST",
         "path": "/Items/${item_id}/PlaybackInfo",
-        "body": { "DeviceProfile": { "MaxStreamingBitrate": 2000000 } }
+        "auth": "auto",
+        "body_json": { "DeviceProfile": { "MaxStreamingBitrate": 2000000 } }
       },
       "expected_outcome": "HTTP 500 or TranscodingInfo.IsVideoDirect=false with error in logs",
       "success_criteria": {

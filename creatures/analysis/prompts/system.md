@@ -97,7 +97,8 @@ cause port conflicts or duplicate containers.
 Each step must have a `tool` field specifying how Stage 2 should execute it:
 
 - `bash`: shell command on the host, such as file preparation or ffmpeg.
-- `http_request`: HTTP call to the Jellyfin API or web UI.
+- `http_request`: raw Jellyfin HTTP request, including intentionally
+  non-spec-compliant calls when they can be represented with structured fields.
 - `screenshot`: capture browser state at this step.
 - `docker_exec`: command inside the already-running container.
 
@@ -132,7 +133,14 @@ channel message as the completion signal.
   `{ "any_of": [...] }` object using the assertion DSL defined in
   `plans/plan-master.md`. Never emit free-text criteria; Stage 2 evaluates them
   programmatically.
-- Prefer `http_request` over browser automation for API-level bugs.
+- Prefer `http_request` over browser automation for API-level bugs. It is a raw
+  HTTP transport, not a Jellyfin SDK. Every `http_request` input must include
+  `method`, `path`, and `auth`. Use `auth: "auto"` for the Stage 2 admin token,
+  `auth: "none"` for anonymous or deliberately unauthenticated requests, and
+  `auth: "token"` with `token` for a specific token.
+- For request bodies, use at most one of `body_json`, `body_text`, or
+  `body_base64`; never use a generic `body` field. Use `body_text` with an
+  explicit `Content-Type` header for malformed JSON or other non-standard text.
 - Docker image must be `jellyfin/jellyfin:<version>` using the
   maintainer-specified version.
 - Exactly one reproduction step must have `role: "trigger"`.

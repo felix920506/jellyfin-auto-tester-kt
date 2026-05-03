@@ -163,6 +163,26 @@ Exactly one step must have `role: "trigger"`. Stage 2 uses this to determine `ov
 
 For `trigger` steps, `success_criteria` deliberately describes observing the bug symptom (e.g. "response contains 'Transcoding failed'"). A `pass` on a trigger step means the defect manifested as expected; a `fail` means it did not appear. Stage 2 applies the same pass/fail evaluation uniformly to all steps—no special-casing.
 
+**`http_request` input contract:**
+
+`http_request` is a raw Jellyfin HTTP transport, not a spec-compliant Jellyfin SDK. Use it for normal API calls and for intentionally non-standard requests that can still be represented through structured HTTP fields. Use `bash`/`curl` only for malformed HTTP framing that the transport cannot express, such as deliberately wrong `Content-Length`.
+
+```json
+{
+  "method": "POST",
+  "path": "/Items/${item_id}/PlaybackInfo",
+  "params": { "Recursive": "true" },
+  "headers": { "Content-Type": "application/json" },
+  "auth": "auto",
+  "body_json": { "DeviceProfile": { "MaxStreamingBitrate": 2000000 } },
+  "timeout_s": 30,
+  "follow_redirects": false,
+  "allow_absolute_url": false
+}
+```
+
+Required fields are `method`, `path`, and `auth`. `auth` is one of `auto` (use the Stage 2 admin token), `none` (send no token), or `token` (send the supplied `token`). Use at most one body field: `body_json`, `body_text`, or `body_base64`. Do not use a generic `body` field. Set `Content-Type` explicitly when it matters, including for malformed JSON sent with `body_text`, e.g. `"body_text": "{\"invalid\":"`; use `body_base64` for raw bytes, e.g. `"body_base64": "AAEC"`.
+
 **`success_criteria` evaluation (deterministic, no LLM):**
 
 Per-step `success_criteria` is a structured object — never free text — so Stage 2 can evaluate it programmatically and produce reproducible outcomes. The shape is `{ "all_of": [<assertion>, ...] }` or `{ "any_of": [<assertion>, ...] }` (mutually exclusive at the top level; nested combinators are not supported in v1).
@@ -280,7 +300,7 @@ jellyfin-auto-tester-kt/
 │   │   │   └── system.md
 │   │   └── tools/
 │   │       ├── docker_manager.py
-│   │       ├── jellyfin_api.py
+│   │       ├── jellyfin_http.py
 │   │       └── screenshot.py
 │   └── report/
 │       ├── config.yaml
