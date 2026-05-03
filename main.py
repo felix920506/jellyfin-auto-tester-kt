@@ -221,6 +221,7 @@ class _AnalysisPlanGuard:
         self._response_index = 0
         self._current_response_index = 0
         self._tool_call_response_indexes: set[int] = set()
+        self._plan_output_response_indexes: set[int] = set()
 
     @property
     def processing(self) -> bool:
@@ -244,11 +245,17 @@ class _AnalysisPlanGuard:
     def record_tool_call(self) -> None:
         self._tool_call_response_indexes.add(self._current_response_index)
 
+    def record_plan_output(self) -> None:
+        self._plan_output_response_indexes.add(self._current_response_index)
+
     def response_has_tool_calls(self, response_index: int) -> bool:
         return response_index in self._tool_call_response_indexes
 
     def current_response_has_tool_calls(self) -> bool:
         return self.response_has_tool_calls(self._current_response_index)
+
+    def current_response_has_plan_output(self) -> bool:
+        return self._current_response_index in self._plan_output_response_indexes
 
 
 class _AnalysisTranscriptWriter:
@@ -2002,6 +2009,7 @@ class _DeferredPlanReadyOutput(_ChannelOutput):
         if not self._guard.processing:
             await self._send(content)
             return
+        self._guard.record_plan_output()
         self._pending_content = content
         self._pending_response_index = self._guard.current_response_index
 
@@ -2040,6 +2048,17 @@ class _DeferredPlanReadyOutput(_ChannelOutput):
             ):
                 completed.pop(index)
                 return
+
+
+def _remove_completed_named_outputs(router: Any, output_name: str) -> None:
+    completed = getattr(router, "_completed_outputs", None)
+    if not isinstance(completed, list):
+        return
+    completed[:] = [
+        item
+        for item in completed
+        if getattr(item, "target", None) != output_name
+    ]
 
 
 def _bind_channel_named_outputs(engine: Any) -> None:
@@ -2417,7 +2436,7 @@ def _install_analysis_plan_guard_hooks(
         setattr(
             agent,
             "_check_termination",
-            _analysis_guard_termination_hook(check_termination, guard),
+            _analysis_guard_termination_hook(check_termination, guard, output_router),
         )
         states.append((agent, "_check_termination", check_termination))
 
@@ -2459,13 +2478,22 @@ def _analysis_guard_chat_hook(
 def _analysis_guard_termination_hook(
     original_check_termination: Callable[..., Any],
     guard: _AnalysisPlanGuard,
+    output_router: Any,
 ) -> Callable[..., Any]:
     def wrapper(round_text: list[str]) -> bool:
         if guard.current_response_has_tool_calls():
+            if guard.current_response_has_plan_output():
+                _remove_completed_named_outputs(output_router, "plan_ready")
+                _logger().info(
+                    "Discarding Stage 1 plan_ready output from tool-calling response"
+                )
             _logger().info(
                 "Deferring Stage 1 termination for provider response with tool calls"
             )
             return False
+        if guard.current_response_has_plan_output():
+            _logger().info("Observed Stage 1 plan_ready output; ending analysis turn")
+            return True
         return original_check_termination(round_text)
 
     return wrapper
