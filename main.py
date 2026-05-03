@@ -1807,6 +1807,8 @@ def _default_success_criteria(tool: Any) -> dict[str, Any]:
         return {"all_of": [{"type": "status_code", "in": [200, 204]}]}
     if tool == "screenshot":
         return {"all_of": [{"type": "screenshot_present", "label": "screenshot"}]}
+    if tool == "browser":
+        return {"all_of": [{"type": "browser_action_run"}]}
     return {"all_of": [{"type": "exit_code", "equals": 0}]}
 
 

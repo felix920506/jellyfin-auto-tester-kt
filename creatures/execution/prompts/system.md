@@ -51,6 +51,9 @@ Supported tools:
 Supported criteria are the DSL from `plans/plan-master.md`: `status_code`,
 `body_contains`, `body_matches`, `body_json_path`, `exit_code`,
 `stdout_contains`, `stderr_contains`, `log_matches`, `screenshot_present`, and
+browser criteria (`browser_action_run`, `browser_element`,
+`browser_text_contains`, `browser_url_matches`, `browser_media_state`,
+`browser_console_matches`), with
 top-level `all_of` / `any_of`.
 
 Do not recompute or reinterpret criteria in model reasoning. The runner's

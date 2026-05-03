@@ -406,7 +406,7 @@ class BrowserDriver:
     ) -> dict[str, Any]:
         final_url = _safe_call(lambda: page.url)
         title = _safe_call(page.title)
-        dom_path, dom_summary = self._capture_dom(page, browser_input, step_id)
+        dom_path, dom_summary, page_text = self._capture_dom(page, browser_input, step_id)
         media_state = self._inspect_media(page)
         return {
             "status": "fail" if error else "pass",
@@ -418,6 +418,7 @@ class BrowserDriver:
             "failed_network": self._failed_network[network_start:],
             "dom_summary": dom_summary,
             "dom_path": dom_path,
+            "page_text": page_text,
             "media_state": media_state,
             "error": error,
             "auth": {
@@ -425,16 +426,59 @@ class BrowserDriver:
             },
         }
 
+    def inspect_selectors(self, selectors: list[str]) -> dict[str, dict[str, Any]]:
+        """Return deterministic state snapshots for browser_element criteria."""
+
+        if self._page is None:
+            return {}
+        states = {}
+        for selector in selectors:
+            locator = self._page.locator(selector)
+            attached = _locator_count(locator) > 0
+            visible = _locator_visible(locator, attached)
+            states[selector] = {"attached": attached, "visible": visible}
+        return states
+
+    def capture_values(
+        self,
+        capture_map: Mapping[str, Mapping[str, Any]] | None,
+    ) -> dict[str, Any]:
+        """Evaluate browser-only capture sources against the current page."""
+
+        if self._page is None:
+            return {}
+        values = {}
+        for variable, expression in (capture_map or {}).items():
+            if not isinstance(expression, Mapping):
+                continue
+            source = expression.get("from")
+            if source == "browser_attribute":
+                selector = str(expression.get("selector") or "")
+                name = str(expression.get("name") or "")
+                value = self._page.locator(selector).get_attribute(name)
+                if value is None:
+                    raise ValueError(f"missing browser attribute for {variable}: {selector} {name}")
+                values[variable] = value
+            elif source == "browser_eval":
+                script = expression.get("script") or expression.get("expression")
+                if not script:
+                    raise ValueError(f"browser_eval capture {variable} requires script")
+                if "args" in expression:
+                    values[variable] = self._page.evaluate(str(script), expression.get("args"))
+                else:
+                    values[variable] = self._page.evaluate(str(script))
+        return values
+
     def _capture_dom(
         self,
         page: Any,
         browser_input: Mapping[str, Any],
         step_id: int | str | None,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None]:
         try:
             content = page.content()
         except Exception as exc:
-            return None, f"DOM unavailable: {exc}"
+            return None, f"DOM unavailable: {exc}", None
 
         label = str(browser_input.get("label") or f"step_{step_id or 'unknown'}")
         path = self._dom_path(self.run_id or "run", label)
@@ -444,9 +488,11 @@ class BrowserDriver:
         summary_payload = _safe_call(lambda: page.evaluate(DOM_SUMMARY_SCRIPT))
         if isinstance(summary_payload, Mapping):
             summary = _format_dom_summary(summary_payload)
+            page_text = str(summary_payload.get("text") or "")
         else:
             summary = _summarize_html(str(content))
-        return str(path), summary
+            page_text = _html_text(str(content))
+        return str(path), summary, page_text
 
     def _inspect_media(self, page: Any) -> dict[str, Any]:
         payload = _safe_call(lambda: page.evaluate(MEDIA_STATE_SCRIPT))
@@ -639,9 +685,13 @@ def _format_dom_summary(payload: Mapping[str, Any]) -> str:
 def _summarize_html(content: str) -> str:
     title_match = re.search(r"<title[^>]*>(.*?)</title>", content, flags=re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else ""
-    text = re.sub(r"<[^>]+>", " ", content)
-    text = re.sub(r"\s+", " ", text).strip()[:2000]
+    text = _html_text(content)
     return f"title={title!r}; text={text!r}"
+
+
+def _html_text(content: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", content)
+    return re.sub(r"\s+", " ", text).strip()[:2000]
 
 
 def _aggregate_media_state(elements: list[Any]) -> str:
@@ -661,6 +711,26 @@ def _safe_on(page: Any, event: str, handler: Any) -> None:
         page.on(event, handler)
     except Exception:
         pass
+
+
+def _locator_count(locator: Any) -> int:
+    try:
+        if hasattr(locator, "count"):
+            return int(locator.count())
+    except Exception:
+        return 0
+    return 1
+
+
+def _locator_visible(locator: Any, attached: bool) -> bool:
+    if not attached:
+        return False
+    try:
+        if hasattr(locator, "is_visible"):
+            return bool(locator.is_visible())
+    except Exception:
+        return False
+    return attached
 
 
 def _safe_call(callback: Any) -> Any:

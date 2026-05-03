@@ -4,6 +4,8 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
+from main import _normalize_reproduction_plan
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -116,6 +118,17 @@ class BrowserContractTests(unittest.TestCase):
 
         self.assertIn("`browser`", analysis_prompt)
         self.assertIn("`browser`", execution_prompt)
+
+    def test_plan_normalization_defaults_browser_criteria_to_action_run(self):
+        plan = minimal_plan()
+        plan["reproduction_steps"][0].pop("success_criteria")
+
+        normalized = _normalize_reproduction_plan(plan)
+
+        self.assertEqual(
+            normalized["reproduction_steps"][0]["success_criteria"],
+            {"all_of": [{"type": "browser_action_run"}]},
+        )
 
 
 if __name__ == "__main__":

@@ -71,6 +71,12 @@ class FakeLocator:
     def count(self):
         return self.page.locator_counts.get(self.selector, 0)
 
+    def is_visible(self):
+        return self.page.locator_visible.get(self.selector, False)
+
+    def get_attribute(self, name):
+        return self.page.locator_attributes.get((self.selector, name))
+
 
 class FakePage:
     def __init__(self):
@@ -81,6 +87,8 @@ class FakePage:
         self.keyboard = FakeKeyboard(self)
         self.locator_text = {}
         self.locator_counts = {}
+        self.locator_visible = {}
+        self.locator_attributes = {}
         self.failed_request_on_wait = None
         self.media = [
             {
@@ -305,6 +313,32 @@ class BrowserDriverTests(unittest.TestCase):
             self.assertIn("buttons", result["dom_summary"])
             self.assertTrue(Path(result["dom_path"]).exists())
             self.assertEqual(result["media_state"]["state"], "playing")
+            self.assertEqual(result["page_text"], "Home Latest Media")
+
+    def test_selector_and_capture_snapshots_use_current_page(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            page.locator_counts[".poster"] = 1
+            page.locator_visible[".poster"] = True
+            page.locator_attributes[(".poster", "data-id")] = "movie-1"
+            driver, _ = self.make_driver(temp_dir, page)
+            driver.run({"actions": [{"type": "wait_for", "selector": "body"}]})
+
+            states = driver.inspect_selectors([".poster"])
+            values = driver.capture_values(
+                {
+                    "item_id": {
+                        "from": "browser_attribute",
+                        "selector": ".poster",
+                        "name": "data-id",
+                    },
+                    "eval_result": {"from": "browser_eval", "script": "() => 1"},
+                }
+            )
+
+            self.assertEqual(states[".poster"], {"attached": True, "visible": True})
+            self.assertEqual(values["item_id"], "movie-1")
+            self.assertEqual(values["eval_result"], {"ok": True, "args": None})
 
     def test_failed_request_event_is_captured(self):
         with tempfile.TemporaryDirectory() as temp_dir:

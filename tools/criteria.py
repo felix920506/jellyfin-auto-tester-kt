@@ -103,6 +103,10 @@ def extract_captures(
     values: dict[str, Any] = {}
     for variable, expression in (capture_map or {}).items():
         try:
+            browser_values = context.get("browser_capture_values")
+            if isinstance(browser_values, Mapping) and variable in browser_values:
+                values[variable] = browser_values[variable]
+                continue
             values[variable] = _extract_capture_value(expression, context)
         except CaptureError as exc:
             raise CaptureError(variable, exc.reason) from exc
@@ -179,6 +183,18 @@ def _evaluate_assertion(assertion: Any, context: Mapping[str, Any]) -> dict[str,
             return _evaluate_log_matches(assertion, context)
         if assertion_type == "screenshot_present":
             return _evaluate_screenshot_present(assertion, context)
+        if assertion_type == "browser_action_run":
+            return _evaluate_browser_action_run(assertion, context)
+        if assertion_type == "browser_element":
+            return _evaluate_browser_element(assertion, context)
+        if assertion_type == "browser_text_contains":
+            return _evaluate_browser_text_contains(assertion, context)
+        if assertion_type == "browser_url_matches":
+            return _evaluate_browser_url_matches(assertion, context)
+        if assertion_type == "browser_media_state":
+            return _evaluate_browser_media_state(assertion, context)
+        if assertion_type == "browser_console_matches":
+            return _evaluate_browser_console_matches(assertion, context)
         return _assertion_result(
             assertion_type=assertion_type,
             passed=False,
@@ -351,6 +367,149 @@ def _evaluate_screenshot_present(
     )
 
 
+def _evaluate_browser_action_run(
+    assertion: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    browser = _browser(context)
+    if not browser:
+        return _not_applicable("browser_action_run", assertion, context)
+    actions = browser.get("actions") if isinstance(browser.get("actions"), list) else []
+    failed = [
+        action
+        for action in actions
+        if isinstance(action, Mapping) and action.get("status") != "pass"
+    ]
+    passed = browser.get("status") == "pass" and not failed
+    return _assertion_result(
+        assertion_type="browser_action_run",
+        passed=passed,
+        actual={
+            "status": browser.get("status"),
+            "failed_actions": len(failed),
+        },
+        expected="all browser actions pass",
+        message="browser actions succeeded" if passed else "browser action failed",
+    )
+
+
+def _evaluate_browser_element(
+    assertion: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    selector = str(assertion.get("selector") or "")
+    state = str(assertion.get("state") or "visible")
+    elements = context.get("browser_elements")
+    if not selector or not isinstance(elements, Mapping):
+        return _not_applicable("browser_element", assertion, context)
+    actual = elements.get(selector)
+    if not isinstance(actual, Mapping):
+        actual = {"attached": False, "visible": False}
+    attached = bool(actual.get("attached"))
+    visible = bool(actual.get("visible"))
+    if state in {"exists", "attached"}:
+        passed = attached
+    elif state == "detached":
+        passed = not attached
+    elif state == "visible":
+        passed = visible
+    elif state == "hidden":
+        passed = attached and not visible
+    else:
+        return _assertion_result(
+            assertion_type="browser_element",
+            passed=False,
+            actual=state,
+            expected="exists, visible, hidden, attached, or detached",
+            message=f"unsupported browser element state: {state}",
+        )
+    return _assertion_result(
+        assertion_type="browser_element",
+        passed=passed,
+        actual={"selector": selector, **dict(actual)},
+        expected=state,
+        message="browser element matched state" if passed else "browser element did not match state",
+    )
+
+
+def _evaluate_browser_text_contains(
+    assertion: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    text = _browser_text(context)
+    if text is None:
+        return _not_applicable("browser_text_contains", assertion, context)
+    expected = str(assertion.get("value") or "")
+    passed = expected in text
+    return _assertion_result(
+        assertion_type="browser_text_contains",
+        passed=passed,
+        actual=text,
+        expected=expected,
+        message="browser text contained expected value" if passed else "browser text did not contain expected value",
+    )
+
+
+def _evaluate_browser_url_matches(
+    assertion: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    url = _browser(context).get("final_url")
+    if url is None:
+        return _not_applicable("browser_url_matches", assertion, context)
+    pattern = str(assertion.get("pattern") or "")
+    match = re.search(pattern, str(url))
+    return _assertion_result(
+        assertion_type="browser_url_matches",
+        passed=match is not None,
+        actual=str(url),
+        expected=pattern,
+        message="browser URL matched pattern" if match else "browser URL did not match pattern",
+    )
+
+
+def _evaluate_browser_media_state(
+    assertion: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    media = _browser(context).get("media_state")
+    if not isinstance(media, Mapping):
+        return _not_applicable("browser_media_state", assertion, context)
+    actual = media.get("state")
+    expected = str(assertion.get("state") or "")
+    passed = actual == expected
+    return _assertion_result(
+        assertion_type="browser_media_state",
+        passed=passed,
+        actual=actual,
+        expected=expected,
+        message="browser media state matched" if passed else "browser media state did not match",
+    )
+
+
+def _evaluate_browser_console_matches(
+    assertion: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    console = _browser(context).get("console")
+    if not isinstance(console, list):
+        return _not_applicable("browser_console_matches", assertion, context)
+    text = "\n".join(
+        str(item.get("text") or item)
+        for item in console
+        if isinstance(item, Mapping)
+    )
+    pattern = str(assertion.get("pattern") or "")
+    match = re.search(pattern, text, flags=re.MULTILINE)
+    return _assertion_result(
+        assertion_type="browser_console_matches",
+        passed=match is not None,
+        actual=text,
+        expected=pattern,
+        message="browser console matched pattern" if match else "browser console did not match pattern",
+    )
+
+
 def _compare_numeric(
     assertion_type: str,
     actual: Any,
@@ -405,6 +564,27 @@ def _extract_capture_value(
         if context.get("exit_code") is None:
             raise CaptureError("", "exit_code is unavailable")
         return context.get("exit_code")
+    if source == "browser_text":
+        text = _browser_text(context)
+        if text is None:
+            raise CaptureError("", "browser text is unavailable")
+        return text
+    if source == "browser_url":
+        url = _browser(context).get("final_url")
+        if url is None:
+            raise CaptureError("", "browser URL is unavailable")
+        return url
+    if source == "browser_attribute":
+        selector = str(expression.get("selector") or "")
+        name = str(expression.get("name") or "")
+        attributes = context.get("browser_attributes")
+        if isinstance(attributes, Mapping):
+            element = attributes.get(selector)
+            if isinstance(element, Mapping) and name in element:
+                return element[name]
+        raise CaptureError("", f"browser attribute is unavailable: {selector} {name}")
+    if source == "browser_eval":
+        raise CaptureError("", "browser_eval requires a precomputed browser capture value")
     raise CaptureError("", f"unsupported capture source: {source}")
 
 
@@ -439,6 +619,22 @@ def _http_body(context: Mapping[str, Any]) -> str | None:
     return body if isinstance(body, str) else json.dumps(body, sort_keys=True)
 
 
+def _browser(context: Mapping[str, Any]) -> Mapping[str, Any]:
+    browser = context.get("browser") or {}
+    return browser if isinstance(browser, Mapping) else {}
+
+
+def _browser_text(context: Mapping[str, Any]) -> str | None:
+    text = context.get("browser_text")
+    if text is None:
+        text = _browser(context).get("page_text")
+    if text is None:
+        text = _browser(context).get("dom_summary")
+    if text is None:
+        return None
+    return str(text)
+
+
 def _not_applicable(
     assertion_type: str,
     assertion: Mapping[str, Any],
@@ -464,6 +660,10 @@ def _expected_value(assertion: Mapping[str, Any]) -> Any:
         return assertion["pattern"]
     if "label" in assertion:
         return assertion["label"]
+    if "state" in assertion:
+        return assertion["state"]
+    if "selector" in assertion:
+        return assertion["selector"]
     return None
 
 

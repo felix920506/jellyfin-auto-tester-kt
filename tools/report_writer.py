@@ -351,6 +351,18 @@ def _step_invocation_lines(step: dict[str, Any]) -> list[str]:
         target = step_input.get("url") or step_input.get("path") or "/web"
         label = step_input.get("label") or f"step_{step.get('step_id', 'unknown')}"
         return [f"   - Capture screenshot `{_inline_code(label)}` at `{_inline_code(target)}`."]
+    if tool == "browser":
+        target = step_input.get("url") or step_input.get("path") or "current browser page"
+        actions = step_input.get("actions") if isinstance(step_input.get("actions"), list) else []
+        summary = ", ".join(
+            str(action.get("type"))
+            for action in actions
+            if isinstance(action, dict) and action.get("type")
+        )
+        lines = [f"   - Run browser flow at `{_inline_code(target)}`."]
+        if summary:
+            lines.append(f"   - Browser actions: `{_inline_code(summary)}`")
+        return lines
     return [f"   - Tool input: `{_inline_code(json.dumps(step_input, sort_keys=True, default=str))}`"]
 
 
@@ -380,6 +392,10 @@ def _evidence(
         "",
         _http_responses(execution_result),
     ]
+
+    browser = _browser_evidence(execution_result)
+    if browser:
+        parts.extend(["", "### Browser Evidence", "", browser])
 
     screenshots = _screenshots(execution_result, output_dir, artifacts_root)
     if screenshots:
@@ -479,6 +495,66 @@ def _http_responses(execution_result: dict[str, Any]) -> str:
     return "\n".join(blocks)
 
 
+def _browser_evidence(execution_result: dict[str, Any]) -> str:
+    entries = [
+        entry
+        for entry in execution_result.get("execution_log", [])
+        if isinstance(entry, dict) and isinstance(entry.get("browser"), dict)
+    ]
+    if not entries:
+        return ""
+
+    blocks = []
+    for entry in entries:
+        browser = entry["browser"]
+        actions = browser.get("actions") if isinstance(browser.get("actions"), list) else []
+        action_summary = _browser_action_summary(actions)
+        blocks.append(
+            f"- Step {entry.get('step_id')} browser `{browser.get('status', 'unknown')}`"
+            + (f": {action_summary}" if action_summary else "")
+        )
+        if browser.get("final_url"):
+            blocks.append(f"  Final URL: `{_inline_code(browser['final_url'])}`")
+        if browser.get("media_state"):
+            state = browser.get("media_state", {}).get("state")
+            blocks.append(f"  Media state: `{_inline_code(state or 'unknown')}`")
+        console = browser.get("console") if isinstance(browser.get("console"), list) else []
+        if console:
+            blocks.append("  Console warnings/errors:")
+            for item in console[:5]:
+                if isinstance(item, dict):
+                    blocks.append(
+                        f"  - `{_inline_code(item.get('type', 'console'))}` "
+                        f"{_text(item.get('text'), '')}"
+                    )
+        failed_network = browser.get("failed_network") if isinstance(browser.get("failed_network"), list) else []
+        if failed_network:
+            blocks.append("  Failed network responses:")
+            for item in failed_network[:5]:
+                if isinstance(item, dict):
+                    status = item.get("status") or item.get("error") or "failed"
+                    blocks.append(f"  - `{_inline_code(status)}` {_text(item.get('url'), '')}")
+        if browser.get("dom_summary"):
+            blocks.append(f"  DOM summary: {_truncate(str(browser['dom_summary']), 500)}")
+    return "\n".join(blocks)
+
+
+def _browser_action_summary(actions: list[Any]) -> str:
+    parts = []
+    for action in actions[:12]:
+        if not isinstance(action, dict):
+            continue
+        label = str(action.get("type") or "action")
+        if action.get("selector"):
+            label += f" {action['selector']}"
+        if action.get("status") == "fail" and action.get("error"):
+            label += f" failed ({action['error']})"
+        parts.append(label)
+    if len(actions) > 12:
+        parts.append("...")
+    return ", ".join(parts)
+
+
 def _screenshots(
     execution_result: dict[str, Any],
     output_dir: Path,
@@ -491,6 +567,10 @@ def _screenshots(
         for key in ("screenshot_path", "failure_screenshot_path"):
             if entry.get(key):
                 paths.append((entry, str(entry[key])))
+        browser = entry.get("browser") if isinstance(entry.get("browser"), dict) else {}
+        for path in browser.get("screenshot_paths", []) if isinstance(browser.get("screenshot_paths"), list) else []:
+            if path:
+                paths.append((entry, str(path)))
 
     lines = []
     seen = set()

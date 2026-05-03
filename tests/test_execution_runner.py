@@ -91,6 +91,8 @@ class FakeBrowserDriver:
         self.results = list(results or [])
         self.configures = []
         self.runs = []
+        self.inspected_selectors = []
+        self.capture_maps = []
         self.closed = False
 
     def configure(self, base_url=None, run_id=None):
@@ -123,9 +125,27 @@ class FakeBrowserDriver:
             "failed_network": [],
             "dom_summary": "title='Jellyfin'",
             "dom_path": None,
+            "page_text": "Jellyfin Home",
             "media_state": {"state": "none", "elements": []},
             "error": None,
         }
+
+    def inspect_selectors(self, selectors):
+        self.inspected_selectors.append(list(selectors))
+        return {
+            selector: {"attached": True, "visible": selector != ".hidden"}
+            for selector in selectors
+        }
+
+    def capture_values(self, capture_map):
+        self.capture_maps.append(capture_map)
+        values = {}
+        for variable, expression in (capture_map or {}).items():
+            if expression.get("from") == "browser_eval":
+                values[variable] = "eval-value"
+            elif expression.get("from") == "browser_attribute":
+                values[variable] = "attr-value"
+        return values
 
     def close(self):
         self.closed = True
@@ -565,6 +585,74 @@ class ExecutionRunnerTests(unittest.TestCase):
             self.assertEqual(entry["browser"]["status"], "fail")
             self.assertTrue(Path(entry["failure_logs_path"]).exists())
             self.assertTrue(Path(entry["failure_screenshot_path"]).exists())
+
+    def test_browser_criteria_and_captures_feed_later_steps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            commands = []
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = ExecutionRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                command_runner=lambda command, cwd=None, timeout_s=120: commands.append(command)
+                or {"stdout": "ok", "stderr": "", "exit_code": 0},
+            )
+            plan = base_plan(
+                [
+                    {
+                        "step_id": 1,
+                        "role": "setup",
+                        "action": "Read UI state",
+                        "tool": "browser",
+                        "input": {
+                            "label": "ui",
+                            "actions": [{"type": "wait_for", "selector": ".poster"}],
+                        },
+                        "capture": {
+                            "item_id": {
+                                "from": "browser_attribute",
+                                "selector": ".poster",
+                                "name": "data-id",
+                            },
+                            "eval_id": {"from": "browser_eval", "script": "() => 1"},
+                        },
+                        "expected_outcome": "UI state is available",
+                        "success_criteria": {
+                            "all_of": [
+                                {
+                                    "type": "browser_element",
+                                    "selector": ".poster",
+                                    "state": "visible",
+                                },
+                                {
+                                    "type": "browser_text_contains",
+                                    "value": "Jellyfin",
+                                },
+                            ]
+                        },
+                    },
+                    {
+                        "step_id": 2,
+                        "role": "trigger",
+                        "action": "Use captured UI values",
+                        "tool": "bash",
+                        "input": {"command": "echo ${item_id}:${eval_id}"},
+                        "expected_outcome": "Values are resolved",
+                        "success_criteria": {
+                            "all_of": [{"type": "exit_code", "equals": 0}]
+                        },
+                    },
+                ]
+            )
+
+            result = runner.execute_plan(plan, run_id="run-browser-captures")
+
+            self.assertEqual([entry["outcome"] for entry in result["execution_log"]], ["pass", "pass"])
+            self.assertEqual(commands[-1], "echo attr-value:eval-value")
+            self.assertEqual(browser_driver.inspected_selectors, [[".poster"]])
+            self.assertEqual(list(browser_driver.capture_maps[0]), ["item_id", "eval_id"])
 
 
 if __name__ == "__main__":

@@ -304,6 +304,12 @@ class ExecutionRunner:
                 screenshots[str(context["screenshot_label"])] = context.get("screenshot_path")
             if isinstance(context.get("browser_screenshots"), dict):
                 screenshots.update(context["browser_screenshots"])
+            if context.get("browser") and hasattr(self.browser_driver, "inspect_selectors"):
+                selectors = _browser_element_selectors(criteria)
+                if selectors:
+                    context["browser_elements"] = self.browser_driver.inspect_selectors(selectors)
+            if context.get("browser"):
+                context["browser_text"] = context["browser"].get("page_text")
 
             if _criteria_needs_logs(criteria) and container_id:
                 context["logs_since_step_start"] = self.docker.logs(
@@ -319,10 +325,17 @@ class ExecutionRunner:
                 entry["outcome"] = "pass"
                 if step.get("capture"):
                     try:
+                        if context.get("browser") and hasattr(self.browser_driver, "capture_values"):
+                            context["browser_capture_values"] = self.browser_driver.capture_values(
+                                step.get("capture")
+                            )
                         variables.update(extract_captures(step.get("capture"), context))
                     except CaptureError as exc:
                         entry["outcome"] = "fail"
                         entry["reason"] = f"capture failed: {exc.variable}"
+                    except Exception as exc:
+                        entry["outcome"] = "fail"
+                        entry["reason"] = f"capture failed: {exc}"
             else:
                 entry["outcome"] = "fail"
                 entry["reason"] = _criteria_failure_reason(criteria_result)
@@ -684,6 +697,21 @@ def _browser_screenshot_map(
         label = str(action.get("label") or step_input.get("label") or "browser")
         screenshots[label] = str(action["screenshot_path"])
     return screenshots
+
+
+def _browser_element_selectors(criteria: Any) -> list[str]:
+    if not isinstance(criteria, dict):
+        return []
+    assertions = criteria.get("all_of") or criteria.get("any_of") or []
+    selectors = []
+    for assertion in assertions:
+        if (
+            isinstance(assertion, dict)
+            and assertion.get("type") == "browser_element"
+            and assertion.get("selector")
+        ):
+            selectors.append(str(assertion["selector"]))
+    return selectors
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

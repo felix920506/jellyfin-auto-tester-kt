@@ -127,6 +127,107 @@ class ExecutionCriteriaTests(unittest.TestCase):
             },
         )
 
+    def test_evaluate_browser_criteria(self):
+        context = {
+            "tool": "browser",
+            "browser": {
+                "status": "pass",
+                "actions": [{"type": "click", "status": "pass"}],
+                "final_url": "http://localhost:8096/web/index.html#!/details",
+                "page_text": "Playback failed unexpectedly",
+                "media_state": {"state": "errored"},
+                "console": [{"type": "error", "text": "React playback exception"}],
+            },
+            "browser_elements": {
+                ".toast": {"attached": True, "visible": True},
+                ".spinner": {"attached": False, "visible": False},
+            },
+        }
+
+        result = evaluate_criteria(
+            {
+                "all_of": [
+                    {"type": "browser_action_run"},
+                    {
+                        "type": "browser_element",
+                        "selector": ".toast",
+                        "state": "visible",
+                    },
+                    {
+                        "type": "browser_element",
+                        "selector": ".spinner",
+                        "state": "detached",
+                    },
+                    {
+                        "type": "browser_text_contains",
+                        "value": "Playback failed",
+                    },
+                    {
+                        "type": "browser_url_matches",
+                        "pattern": r"/web/index\.html",
+                    },
+                    {"type": "browser_media_state", "state": "errored"},
+                    {
+                        "type": "browser_console_matches",
+                        "pattern": "playback exception",
+                    },
+                ]
+            },
+            context,
+        )
+
+        self.assertTrue(result["passed"])
+
+    def test_browser_action_run_fails_when_an_action_failed(self):
+        result = evaluate_criteria(
+            {"all_of": [{"type": "browser_action_run"}]},
+            {
+                "tool": "browser",
+                "browser": {
+                    "status": "fail",
+                    "actions": [{"type": "click", "status": "fail"}],
+                },
+            },
+        )
+
+        self.assertFalse(result["passed"])
+
+    def test_extract_captures_from_browser_context(self):
+        captures = extract_captures(
+            {
+                "text": {"from": "browser_text"},
+                "url": {"from": "browser_url"},
+                "attribute": {
+                    "from": "browser_attribute",
+                    "selector": ".poster",
+                    "name": "data-id",
+                },
+                "evaluated": {"from": "browser_eval", "script": "() => 1"},
+            },
+            {
+                "browser": {
+                    "page_text": "Home screen",
+                    "final_url": "http://localhost:8096/web",
+                },
+                "browser_attributes": {
+                    ".poster": {"data-id": "movie-1"},
+                },
+                "browser_capture_values": {
+                    "evaluated": 1,
+                },
+            },
+        )
+
+        self.assertEqual(
+            captures,
+            {
+                "text": "Home screen",
+                "url": "http://localhost:8096/web",
+                "attribute": "movie-1",
+                "evaluated": 1,
+            },
+        )
+
     def test_extract_captures_reports_variable_name_on_failure(self):
         with self.assertRaises(CaptureError) as raised:
             extract_captures(

@@ -178,6 +178,89 @@ class ReportWriterTests(unittest.TestCase):
             self.assertNotIn("DEBUG noisy line", report)
             self.assertIn("![Step 3 screenshot](screenshots/playback_error.png)", report)
 
+    def test_generate_includes_browser_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sample_result(temp_dir)
+            browser_path = Path(temp_dir) / "run-1" / "screenshots" / "web_flow.png"
+            browser_path.write_bytes(b"png")
+            result["plan"]["reproduction_steps"].append(
+                {
+                    "step_id": 4,
+                    "role": "verify",
+                    "action": "Drive the Web playback screen",
+                    "tool": "browser",
+                    "input": {
+                        "path": "/web/index.html",
+                        "label": "web_flow",
+                        "actions": [
+                            {"type": "goto"},
+                            {"type": "click", "selector": ".play-button"},
+                            {"type": "screenshot", "label": "web_flow"},
+                        ],
+                    },
+                    "expected_outcome": "The playback screen shows the failure.",
+                    "success_criteria": {
+                        "all_of": [{"type": "browser_media_state", "state": "errored"}]
+                    },
+                }
+            )
+            result["execution_log"].append(
+                {
+                    "step_id": 4,
+                    "role": "verify",
+                    "action": "Drive the Web playback screen",
+                    "tool": "browser",
+                    "stdout": "",
+                    "stderr": "",
+                    "exit_code": None,
+                    "http": None,
+                    "browser": {
+                        "status": "pass",
+                        "actions": [
+                            {"type": "goto", "status": "pass"},
+                            {
+                                "type": "click",
+                                "status": "pass",
+                                "selector": ".play-button",
+                            },
+                            {
+                                "type": "screenshot",
+                                "status": "pass",
+                                "label": "web_flow",
+                                "screenshot_path": str(browser_path),
+                            },
+                        ],
+                        "screenshot_paths": [str(browser_path)],
+                        "final_url": "http://localhost:8096/web/index.html",
+                        "console": [{"type": "error", "text": "Playback exploded"}],
+                        "failed_network": [
+                            {
+                                "url": "http://localhost:8096/Videos/1/stream",
+                                "status": 500,
+                            }
+                        ],
+                        "media_state": {"state": "errored"},
+                        "dom_summary": "text='Playback error'",
+                    },
+                    "screenshot_path": str(browser_path),
+                    "outcome": "pass",
+                    "reason": None,
+                    "criteria_evaluation": {"passed": True, "assertions": []},
+                    "duration_ms": 40,
+                }
+            )
+
+            metadata = report_writer.generate(result, artifacts_base=temp_dir)
+
+            report = Path(metadata["path"]).read_text(encoding="utf-8")
+            self.assertIn("Run browser flow at `/web/index.html`", report)
+            self.assertIn("### Browser Evidence", report)
+            self.assertIn("click .play-button", report)
+            self.assertIn("Media state: `errored`", report)
+            self.assertIn("Playback exploded", report)
+            self.assertIn("stream", report)
+            self.assertIn("![Step 4 screenshot](screenshots/web_flow.png)", report)
+
     def test_generate_adds_successful_verification_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original = sample_result(temp_dir, run_id="run-1")

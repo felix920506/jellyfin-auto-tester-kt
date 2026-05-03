@@ -629,6 +629,24 @@
         },
         {
           "$ref": "#/$defs/screenshot_present_assertion"
+        },
+        {
+          "$ref": "#/$defs/browser_action_run_assertion"
+        },
+        {
+          "$ref": "#/$defs/browser_element_assertion"
+        },
+        {
+          "$ref": "#/$defs/browser_text_contains_assertion"
+        },
+        {
+          "$ref": "#/$defs/browser_url_matches_assertion"
+        },
+        {
+          "$ref": "#/$defs/browser_media_state_assertion"
+        },
+        {
+          "$ref": "#/$defs/browser_console_matches_assertion"
         }
       ]
     },
@@ -812,6 +830,115 @@
         }
       }
     },
+    "browser_action_run_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "browser_action_run"
+        }
+      }
+    },
+    "browser_element_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "selector",
+        "state"
+      ],
+      "properties": {
+        "type": {
+          "const": "browser_element"
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "exists",
+            "visible",
+            "hidden",
+            "attached",
+            "detached"
+          ]
+        }
+      }
+    },
+    "browser_text_contains_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "browser_text_contains"
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "browser_url_matches_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "pattern"
+      ],
+      "properties": {
+        "type": {
+          "const": "browser_url_matches"
+        },
+        "pattern": {
+          "type": "string"
+        }
+      }
+    },
+    "browser_media_state_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "state"
+      ],
+      "properties": {
+        "type": {
+          "const": "browser_media_state"
+        },
+        "state": {
+          "enum": [
+            "playing",
+            "paused",
+            "ended",
+            "errored",
+            "none"
+          ]
+        }
+      }
+    },
+    "browser_console_matches_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "pattern"
+      ],
+      "properties": {
+        "type": {
+          "const": "browser_console_matches"
+        },
+        "pattern": {
+          "type": "string"
+        }
+      }
+    },
     "capture_expression": {
       "type": "object",
       "oneOf": [
@@ -832,6 +959,18 @@
         },
         {
           "$ref": "#/$defs/exit_code_capture"
+        },
+        {
+          "$ref": "#/$defs/browser_text_capture"
+        },
+        {
+          "$ref": "#/$defs/browser_url_capture"
+        },
+        {
+          "$ref": "#/$defs/browser_attribute_capture"
+        },
+        {
+          "$ref": "#/$defs/browser_eval_capture"
         }
       ]
     },
@@ -935,6 +1074,85 @@
         "from": {
           "const": "exit_code"
         }
+      }
+    },
+    "browser_text_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from"
+      ],
+      "properties": {
+        "from": {
+          "const": "browser_text"
+        }
+      }
+    },
+    "browser_url_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from"
+      ],
+      "properties": {
+        "from": {
+          "const": "browser_url"
+        }
+      }
+    },
+    "browser_attribute_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "selector",
+        "name"
+      ],
+      "properties": {
+        "from": {
+          "const": "browser_attribute"
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "browser_eval_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "script"
+          ]
+        },
+        {
+          "required": [
+            "expression"
+          ]
+        }
+      ],
+      "properties": {
+        "from": {
+          "const": "browser_eval"
+        },
+        "script": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expression": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": true
       }
     },
     "integer_list": {

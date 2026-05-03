@@ -148,7 +148,9 @@ channel message as the completion signal.
   `auth: "token"` with `token` for a specific token.
 - Prefer `browser` over `screenshot` for multi-action Jellyfin Web flows where
   selectors, waits, playback state, or a UI trigger must be driven before
-  evidence is captured.
+  evidence is captured. Use browser criteria such as `browser_element`,
+  `browser_text_contains`, `browser_url_matches`, `browser_media_state`, and
+  `browser_console_matches` when they describe the observable symptom directly.
 - For request bodies, use at most one of `body_json`, `body_text`, or
   `body_base64`; never use a generic `body` field. Use `body_text` with an
   explicit `Content-Type` header for malformed JSON or other non-standard text.
