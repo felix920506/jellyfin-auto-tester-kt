@@ -256,6 +256,37 @@ class ProviderConversationAnalysisAgent:
         self.plan_channel.send(self.plan)
 
 
+class MixedPlanToolOutputAnalysisAgent:
+    def __init__(self, stale_plan, final_plan):
+        self.prompts = []
+        self.stale_plan = stale_plan
+        self.final_plan = final_plan
+        named_outputs = {
+            "plan_ready": FakeOutputConfigItem(
+                "channel",
+                {"channel": "plan_ready"},
+            )
+        }
+        self.agent = FakeNamedOutputAgent("analysis_agent", named_outputs)
+
+    async def chat(self, prompt):
+        self.prompts.append(prompt)
+        guard = self.agent._analysis_plan_guard
+        output = self.agent.output_router.named_outputs["plan_ready"]
+
+        guard.begin_provider_response()
+        await output.on_processing_start()
+        await output.write(json.dumps(self.stale_plan))
+        guard.record_tool_call()
+        await output.on_processing_end()
+        yield "tool call completed\n"
+
+        guard.begin_provider_response()
+        await output.on_processing_start()
+        await output.write(json.dumps(self.final_plan))
+        await output.on_processing_end()
+
+
 class FakeExecutionAgent:
     def __init__(self):
         self.max_iterations = 1
@@ -372,8 +403,12 @@ class FakeOnSendChannel:
         self.callbacks.remove(callback)
 
     def send(self, message):
+        if hasattr(message, "content"):
+            payload = message
+        else:
+            payload = {"content": message}
         for callback in list(self.callbacks):
-            callback(self.channel_name, {"content": message})
+            callback(self.channel_name, payload)
 
 
 class FakeStage2Runner:
@@ -1019,6 +1054,40 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             transcript_payload["provider_requests"][1]["message_count"],
             3,
+        )
+
+    async def test_run_analysis_stage_ignores_plan_from_tool_calling_response(self):
+        stale_plan = _sample_plan()
+        stale_plan["reproduction_goal"] = "Stale plan before tool results."
+        final_plan = _sample_plan()
+        final_plan["reproduction_goal"] = "Final plan after tool results."
+        plan_channel = FakeOnSendChannel("plan_ready")
+        analysis_agent = MixedPlanToolOutputAnalysisAgent(stale_plan, final_plan)
+        engine = FakeEngine(
+            [],
+            channels={"plan_ready": plan_channel},
+            analysis_agent=analysis_agent,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/1",
+                    "10.9.7",
+                    temp_dir,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
+            )
+
+            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+
+        self.assertEqual(result.status, "plan_ready")
+        self.assertEqual(
+            written_plan["reproduction_goal"],
+            "Final plan after tool results.",
         )
 
     async def test_run_analysis_stage_accepts_context_filled_provider_plan(self):
