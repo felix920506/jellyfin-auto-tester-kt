@@ -654,6 +654,182 @@ class ExecutionRunnerTests(unittest.TestCase):
             self.assertEqual(browser_driver.inspected_selectors, [[".poster"]])
             self.assertEqual(list(browser_driver.capture_maps[0]), ["item_id", "eval_id"])
 
+    def test_browser_repair_request_retry_and_final_result_include_attempts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repaired_path = Path(temp_dir) / "repair-shot.png"
+            repaired_path.write_bytes(b"png")
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    {
+                        "status": "fail",
+                        "actions": [
+                            {
+                                "type": "click",
+                                "status": "fail",
+                                "selector": "#old",
+                                "error": "strict mode violation",
+                            }
+                        ],
+                        "screenshot_paths": [],
+                        "final_url": "http://localhost:8097/web",
+                        "title": "Jellyfin",
+                        "console": [{"type": "error", "text": "old selector failed"}],
+                        "failed_network": [{"url": "http://localhost:8097/api", "status": 500}],
+                        "dom_summary": "button changed",
+                        "dom_path": None,
+                        "page_text": "button changed",
+                        "media_state": {"state": "none", "elements": []},
+                        "error": "strict mode violation",
+                    },
+                    {
+                        "status": "pass",
+                        "actions": [
+                            {
+                                "type": "screenshot",
+                                "status": "pass",
+                                "label": "fixed",
+                                "screenshot_path": str(repaired_path),
+                            }
+                        ],
+                        "screenshot_paths": [str(repaired_path)],
+                        "final_url": "http://localhost:8097/web",
+                        "title": "Jellyfin",
+                        "console": [],
+                        "failed_network": [],
+                        "dom_summary": "fixed",
+                        "dom_path": None,
+                        "page_text": "fixed",
+                        "media_state": {"state": "none", "elements": []},
+                        "error": None,
+                    },
+                ],
+            )
+            runner = ExecutionRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            plan = base_plan(
+                [
+                    {
+                        "step_id": 1,
+                        "role": "trigger",
+                        "action": "Click old selector",
+                        "tool": "browser",
+                        "input": {
+                            "path": "/web",
+                            "label": "old",
+                            "actions": [{"type": "click", "selector": "#old"}],
+                        },
+                        "expected_outcome": "Browser action succeeds",
+                        "success_criteria": {"all_of": [{"type": "browser_action_run"}]},
+                    }
+                ]
+            )
+
+            repair = runner.start_plan(plan, run_id="run-repair")
+
+            self.assertEqual(repair["status"], "needs_browser_repair")
+            self.assertEqual(repair["step_id"], 1)
+            self.assertEqual(
+                repair["repair_context"]["failed_action"]["selector"],
+                "#old",
+            )
+            self.assertEqual(
+                repair["repair_context"]["playwright_error"],
+                "strict mode violation",
+            )
+            self.assertIn("refresh", repair["repair_context"]["note"])
+
+            result = runner.retry_browser_step(
+                1,
+                {
+                    "label": "fixed",
+                    "actions": [
+                        {"type": "refresh"},
+                        {"type": "click", "selector": "#new"},
+                        {"type": "screenshot", "label": "fixed"},
+                    ],
+                },
+            )
+
+            self.assertEqual(result["overall_result"], "reproduced")
+            self.assertEqual(
+                [entry["attempt"] for entry in result["execution_log"]],
+                [1, 2],
+            )
+            self.assertEqual(
+                [entry["browser"]["status"] for entry in result["execution_log"]],
+                ["fail", "pass"],
+            )
+            self.assertEqual(browser_driver.runs[1]["browser_input"]["label"], "fixed")
+
+            rejected = runner.retry_browser_step(1, {"actions": []})
+            self.assertEqual(rejected["status"], "repair_rejected")
+
+    def test_browser_repair_rejects_forbidden_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    {
+                        "status": "fail",
+                        "actions": [{"type": "click", "status": "fail", "error": "bad"}],
+                        "screenshot_paths": [],
+                        "final_url": "http://localhost:8097/web",
+                        "title": "Jellyfin",
+                        "console": [],
+                        "failed_network": [],
+                        "dom_summary": "bad",
+                        "dom_path": None,
+                        "page_text": "bad",
+                        "media_state": {"state": "none", "elements": []},
+                        "error": "bad",
+                    }
+                ],
+            )
+            runner = ExecutionRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            plan = base_plan(
+                [
+                    {
+                        "step_id": 1,
+                        "role": "trigger",
+                        "action": "Click old selector",
+                        "tool": "browser",
+                        "input": {
+                            "path": "/web",
+                            "actions": [{"type": "click", "selector": "#old"}],
+                        },
+                        "expected_outcome": "Browser action succeeds",
+                        "success_criteria": {"all_of": [{"type": "browser_action_run"}]},
+                    }
+                ]
+            )
+
+            repair = runner.start_plan(plan, run_id="run-repair-reject")
+            rejected = runner.retry_browser_step(
+                repair["step_id"],
+                {
+                    "actions": [{"type": "click", "selector": "#new"}],
+                    "success_criteria": {"all_of": [{"type": "browser_action_run"}]},
+                },
+            )
+            result = runner.finalize_plan()
+
+            self.assertEqual(rejected["status"], "repair_rejected")
+            self.assertIn("forbidden", rejected["reason"])
+            self.assertEqual(result["overall_result"], "not_reproduced")
+            self.assertEqual(len(result["execution_log"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

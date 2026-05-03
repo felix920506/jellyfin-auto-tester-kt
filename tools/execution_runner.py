@@ -60,6 +60,8 @@ class ExecutionRunner:
         )
         self.command_runner = command_runner or self._run_bash
         self.uuid_factory = uuid_factory
+        self._active_run: dict[str, Any] | None = None
+        self._last_result: dict[str, Any] | None = None
 
     def execute_plan(
         self,
@@ -187,6 +189,198 @@ class ExecutionRunner:
         _write_json(artifacts_dir / "result.json", result)
         return result
 
+    def start_plan(
+        self,
+        plan: dict[str, Any],
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Start a plan with the optional one-shot browser repair protocol."""
+
+        if self._active_run is not None:
+            raise RuntimeError("a plan is already active")
+
+        run_id = run_id or str(self.uuid_factory())
+        artifacts_dir = self.artifacts_root / run_id
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(artifacts_dir / "plan.json", plan)
+
+        self._active_run = {
+            "plan": plan,
+            "run_id": run_id,
+            "artifacts_dir": artifacts_dir,
+            "execution_log": [],
+            "variables": {},
+            "screenshots": {},
+            "container_id": None,
+            "jellyfin_logs": "",
+            "error_summary": None,
+            "setup_failed": False,
+            "container_crashed": False,
+            "current_index": 0,
+            "pending_repair": None,
+            "repair_attempted": set(),
+            "finalized": False,
+        }
+
+        try:
+            prepared = self._prepare_environment(plan, run_id)
+            self.docker.pull(plan["docker_image"], run_id=run_id)
+            start_result = self.docker.start(
+                image=plan["docker_image"],
+                ports=prepared["environment"].get("ports"),
+                volumes=prepared["environment"].get("volumes"),
+                env_vars=prepared["environment"].get("env_vars"),
+                run_id=run_id,
+            )
+            self._active_run["container_id"] = start_result.get("container_id")
+            if hasattr(self.api, "configure"):
+                self.api.configure(base_url=start_result.get("base_url"), run_id=run_id)
+            if hasattr(self.browser_driver, "configure"):
+                self.browser_driver.configure(
+                    base_url=start_result.get("base_url"),
+                    run_id=run_id,
+                )
+
+            health = self.api.wait_healthy(timeout_s=60)
+            if not health.get("healthy"):
+                self._active_run["setup_failed"] = True
+                self._active_run["error_summary"] = (
+                    f"Jellyfin did not become healthy: {health.get('error')}"
+                )
+            else:
+                self.api.complete_startup_wizard()
+                auth = self.api.authenticate()
+                if not auth.get("success"):
+                    self._active_run["setup_failed"] = True
+                    self._active_run["error_summary"] = "authentication failed"
+
+            if self._active_run["setup_failed"]:
+                self._active_run["execution_log"] = self._skip_all_steps(
+                    plan,
+                    reason=self._active_run["error_summary"] or "setup failed",
+                )
+                return self.finalize_plan()
+
+            return self._continue_active_plan(repair_enabled=True)
+        except Exception as exc:
+            if self._active_run is None:
+                raise
+            self._active_run["setup_failed"] = True
+            self._active_run["error_summary"] = str(exc)
+            if not self._active_run["execution_log"]:
+                self._active_run["execution_log"] = self._skip_all_steps(
+                    plan,
+                    reason=str(exc),
+                )
+            return self.finalize_plan()
+
+    def retry_browser_step(
+        self,
+        step_id: int | str,
+        browser_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Retry the single failed browser step with sanitized browser input."""
+
+        if self._active_run is None:
+            return {"status": "repair_rejected", "reason": "no active plan"}
+        pending = self._active_run.get("pending_repair")
+        if not pending:
+            return {"status": "repair_rejected", "reason": "no browser repair pending"}
+        if str(pending.get("step_id")) != str(step_id):
+            return {
+                "status": "repair_rejected",
+                "reason": f"repair pending for step {pending.get('step_id')}",
+            }
+        step_key = str(step_id)
+        if step_key in self._active_run["repair_attempted"]:
+            return {"status": "repair_rejected", "reason": "browser step already repaired"}
+
+        original_step = pending["step"]
+        try:
+            repaired_input = _sanitize_browser_repair_input(
+                original_step.get("input", {}),
+                browser_input,
+            )
+        except ValueError as exc:
+            return {"status": "repair_rejected", "reason": str(exc)}
+
+        self._active_run["repair_attempted"].add(step_key)
+        self._active_run["pending_repair"] = None
+        repaired_step = deepcopy(original_step)
+        repaired_step["input"] = repaired_input
+        entry = self._execute_step(
+            step=repaired_step,
+            run_id=self._active_run["run_id"],
+            container_id=self._active_run["container_id"],
+            variables=self._active_run["variables"],
+            screenshots=self._active_run["screenshots"],
+        )
+        entry["attempt"] = 2
+        entry["repaired"] = True
+        self._active_run["execution_log"].append(entry)
+        return self._continue_active_plan(repair_enabled=True)
+
+    def finalize_plan(self) -> dict[str, Any]:
+        """Finalize an active repair-loop plan or return the last finalized result."""
+
+        if self._active_run is None:
+            if self._last_result is None:
+                raise RuntimeError("no active or finalized plan")
+            return self._last_result
+        state = self._active_run
+        if state.get("finalized"):
+            return self._last_result or {}
+
+        container_id = state.get("container_id")
+        if container_id:
+            try:
+                state["jellyfin_logs"] = self.docker.logs(
+                    container_id,
+                    tail="all",
+                    run_id=state["run_id"],
+                ).get("logs", "")
+            except Exception as exc:
+                state["error_summary"] = state.get("error_summary") or f"failed to collect logs: {exc}"
+
+        try:
+            self.browser_driver.close()
+        except Exception as exc:
+            state["error_summary"] = state.get("error_summary") or f"failed to close browser: {exc}"
+
+        if container_id:
+            try:
+                self.docker.stop(container_id, run_id=state["run_id"])
+            except Exception as exc:
+                state["error_summary"] = state.get("error_summary") or f"failed to stop container: {exc}"
+
+        if state.get("jellyfin_logs"):
+            (state["artifacts_dir"] / "jellyfin_server.log").write_text(
+                state["jellyfin_logs"],
+                encoding="utf-8",
+            )
+
+        result = {
+            "plan": state["plan"],
+            "run_id": state["run_id"],
+            "is_verification": bool(state["plan"].get("is_verification", False)),
+            "original_run_id": state["plan"].get("original_run_id"),
+            "container_id": container_id,
+            "execution_log": state["execution_log"],
+            "overall_result": self._overall_result(
+                state["execution_log"],
+                setup_failed=bool(state.get("setup_failed")),
+                container_crashed=bool(state.get("container_crashed")),
+            ),
+            "artifacts_dir": str(state["artifacts_dir"]),
+            "jellyfin_logs": state.get("jellyfin_logs", ""),
+            "error_summary": state.get("error_summary"),
+        }
+        _write_json(state["artifacts_dir"] / "result.json", result)
+        state["finalized"] = True
+        self._last_result = result
+        self._active_run = None
+        return result
+
     def _prepare_environment(self, plan: dict[str, Any], run_id: str) -> dict[str, Any]:
         original_or_current = plan.get("original_run_id") or run_id
         prereq_dir = self.artifacts_root / original_or_current / "media"
@@ -210,6 +404,56 @@ class ExecutionRunner:
             )
 
         return {"environment": environment, "prereq_dir": str(prereq_dir)}
+
+    def _continue_active_plan(self, repair_enabled: bool) -> dict[str, Any]:
+        if self._active_run is None:
+            raise RuntimeError("no active plan")
+        state = self._active_run
+        plan = state["plan"]
+        steps = plan.get("reproduction_steps", [])
+
+        while state["current_index"] < len(steps):
+            index = state["current_index"]
+            step = steps[index]
+            container_id = state.get("container_id")
+            if container_id and not self._container_running(container_id):
+                state["container_crashed"] = True
+                state["execution_log"].extend(
+                    self._skip_steps(
+                        steps[index:],
+                        reason="container exited unexpectedly",
+                    )
+                )
+                state["current_index"] = len(steps)
+                break
+
+            entry = self._execute_step(
+                step=step,
+                run_id=state["run_id"],
+                container_id=container_id,
+                variables=state["variables"],
+                screenshots=state["screenshots"],
+            )
+            entry.setdefault("attempt", 1)
+            state["execution_log"].append(entry)
+            state["current_index"] = index + 1
+
+            if repair_enabled and self._needs_browser_repair(step, entry):
+                step_id = step.get("step_id")
+                if str(step_id) not in state["repair_attempted"]:
+                    state["pending_repair"] = {
+                        "step": step,
+                        "step_id": step_id,
+                        "entry": entry,
+                    }
+                    return {
+                        "status": "needs_browser_repair",
+                        "run_id": state["run_id"],
+                        "step_id": step_id,
+                        "repair_context": _browser_repair_context(entry),
+                    }
+
+        return self.finalize_plan()
 
     def _prepare_prerequisites(
         self,
@@ -545,7 +789,14 @@ class ExecutionRunner:
     ) -> str:
         if setup_failed or container_crashed:
             return "inconclusive"
-        trigger = next((entry for entry in execution_log if entry.get("role") == "trigger"), None)
+        trigger = next(
+            (
+                entry
+                for entry in reversed(execution_log)
+                if entry.get("role") == "trigger"
+            ),
+            None,
+        )
         if not trigger or trigger.get("outcome") == "skip":
             return "inconclusive"
         if trigger.get("reason") == "timeout":
@@ -555,6 +806,13 @@ class ExecutionRunner:
         if trigger.get("outcome") == "fail":
             return "not_reproduced"
         return "inconclusive"
+
+    def _needs_browser_repair(self, step: dict[str, Any], entry: dict[str, Any]) -> bool:
+        return (
+            step.get("tool") == "browser"
+            and entry.get("outcome") == "fail"
+            and isinstance(entry.get("browser"), dict)
+        )
 
     def _container_running(self, container_id: str) -> bool:
         try:
@@ -712,6 +970,81 @@ def _browser_element_selectors(criteria: Any) -> list[str]:
         ):
             selectors.append(str(assertion["selector"]))
     return selectors
+
+
+def _browser_repair_context(entry: dict[str, Any]) -> dict[str, Any]:
+    browser = entry.get("browser") if isinstance(entry.get("browser"), dict) else {}
+    actions = browser.get("actions") if isinstance(browser.get("actions"), list) else []
+    failed_action = next(
+        (
+            action
+            for action in actions
+            if isinstance(action, dict) and action.get("status") == "fail"
+        ),
+        None,
+    )
+    return {
+        "failed_action": failed_action,
+        "playwright_error": (
+            (failed_action or {}).get("error")
+            if isinstance(failed_action, dict)
+            else None
+        )
+        or browser.get("error")
+        or entry.get("reason"),
+        "current_screenshot": (
+            entry.get("screenshot_path")
+            or entry.get("failure_screenshot_path")
+            or _first_browser_screenshot(browser)
+        ),
+        "dom_summary": browser.get("dom_summary"),
+        "console_errors": [
+            item
+            for item in browser.get("console", [])
+            if isinstance(item, dict) and item.get("type") in {"warning", "error"}
+        ],
+        "failed_network": browser.get("failed_network", []),
+        "media_state": browser.get("media_state"),
+        "note": "You may add an explicit refresh action before retrying stale UI state.",
+    }
+
+
+def _first_browser_screenshot(browser: dict[str, Any]) -> str | None:
+    paths = browser.get("screenshot_paths")
+    if isinstance(paths, list) and paths:
+        return str(paths[0])
+    return None
+
+
+ALLOWED_BROWSER_REPAIR_FIELDS = {
+    "actions",
+    "path",
+    "url",
+    "label",
+    "timeout_s",
+    "viewport",
+}
+
+
+def _sanitize_browser_repair_input(
+    original_input: Any,
+    proposed_input: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(proposed_input, dict):
+        raise ValueError("repair input must be a browser input object")
+    forbidden = sorted(set(proposed_input) - ALLOWED_BROWSER_REPAIR_FIELDS)
+    if forbidden:
+        raise ValueError(f"forbidden browser repair fields: {', '.join(forbidden)}")
+    repaired = dict(original_input) if isinstance(original_input, dict) else {}
+    for key in ALLOWED_BROWSER_REPAIR_FIELDS:
+        if key in proposed_input:
+            repaired[key] = deepcopy(proposed_input[key])
+    if "actions" in repaired and not isinstance(repaired["actions"], list):
+        raise ValueError("browser repair actions must be a list")
+    for index, action in enumerate(repaired.get("actions", []), start=1):
+        if not isinstance(action, dict):
+            raise ValueError(f"browser repair action {index} must be an object")
+    return repaired
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

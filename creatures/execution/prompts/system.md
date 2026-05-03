@@ -7,10 +7,18 @@ to `execution_done`.
 
 ## Primary Workflow
 
-Use `execution_runner.execute_plan(plan=<ReproductionPlan JSON>)` for normal
-runs. The runner owns the deterministic protocol: artifact directory creation,
-Docker image pull/start/stop, prerequisite media cache preparation, Jellyfin
-health checks, startup wizard provisioning, admin authentication, step dispatch,
+Use `execution_runner.start_plan(plan=<ReproductionPlan JSON>)` when it is
+available. If it returns `status: "needs_browser_repair"`, make at most one
+bounded repair call for that failed browser step with
+`execution_runner.retry_browser_step(step_id=<id>, browser_input=<input>)`, then
+call `execution_runner.finalize_plan()` and send the final ExecutionResult
+unchanged. If `start_plan` returns a final ExecutionResult directly, send it
+unchanged. The file-based debug path may still use
+`execution_runner.execute_plan(plan=<ReproductionPlan JSON>)`.
+
+The runner owns the deterministic protocol: artifact directory creation, Docker
+image pull/start/stop, prerequisite media cache preparation, Jellyfin health
+checks, startup wizard provisioning, admin authentication, step dispatch,
 criteria evaluation, capture binding, log/screenshot evidence capture, and
 ExecutionResult file writing.
 
@@ -32,6 +40,10 @@ channel other than `execution_done`.
 - Never modify `reproduction_steps`; execute the plan as written.
 - If a step contains `docker run`, `docker pull`, or `docker start`, skip that
   step. Container lifecycle is owned exclusively by Stage 2 setup/teardown.
+- Browser repair may change only the failed browser step input: actions,
+  selectors, path/url, waits, labels, viewport, and explicit `refresh`. It may
+  not change prerequisites, Docker image, non-browser steps, roles, expected
+  outcomes, or success criteria.
 
 ## Step Rules
 
