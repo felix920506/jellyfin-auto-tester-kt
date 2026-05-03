@@ -133,13 +133,17 @@ For each step in `reproduction_steps`, in order:
 3. Dispatch to the appropriate tool based on `step.tool`:
    - `bash` → run command on host or via `docker exec`
    - `http_request` → call `jellyfin_http.request()`
-   - `screenshot` → call `screenshot.capture()`
-   - `docker_exec` → run command inside container via `docker_manager.exec()`
+- `screenshot` → call `screenshot.capture()`
+- `browser` → call the persistent `BrowserDriver` for a Jellyfin Web action
+  sequence
+- `docker_exec` → run command inside container via `docker_manager.exec()`
 4. Capture stdout, stderr, exit code, and HTTP response body/status
 5. Evaluate `step.success_criteria` deterministically using the structured
    assertion DSL defined in plan-master.md (status_code, body_contains,
    body_matches, body_json_path, exit_code, stdout_contains, stderr_contains,
-   log_matches, screenshot_present, combined via `all_of`/`any_of`).
+   log_matches, screenshot_present, browser_action_run, browser_element,
+   browser_text_contains, browser_url_matches, browser_media_state,
+   browser_console_matches, combined via `all_of`/`any_of`).
    This evaluation is performed by a pure function (`evaluate_criteria(criteria, context)`),
    never by the agent's reasoning loop:
    - If criteria evaluate to true → mark step `pass`
@@ -205,6 +209,12 @@ Send to the `execution_done` channel. Emit EXECUTION_COMPLETE.
   `overall_result: "inconclusive"`.
 - All file paths in the output must be absolute.
 - Do not interpret results—report facts only. Interpretation is Stage 3's job.
+- Browser `refresh` is an explicit action that reloads the current page and
+  waits for app idle. Browser screenshots are bound into the same screenshot map
+  as standalone screenshot steps.
+- The repair-loop API may retry a failed browser step once. The retry may alter
+  only the browser input for that failed step; `execute_plan()` remains the
+  single-attempt compatibility path for file-based debug runs.
 ```
 
 ---

@@ -830,6 +830,89 @@ class ExecutionRunnerTests(unittest.TestCase):
             self.assertEqual(result["overall_result"], "not_reproduced")
             self.assertEqual(len(result["execution_log"]), 1)
 
+    def test_synthetic_browser_reproduction_records_media_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            shot = Path(temp_dir) / "media-playing.png"
+            shot.write_bytes(b"png")
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    {
+                        "status": "pass",
+                        "actions": [
+                            {"type": "goto", "status": "pass"},
+                            {"type": "wait_for_media", "status": "pass", "state": "playing"},
+                            {
+                                "type": "screenshot",
+                                "status": "pass",
+                                "label": "media_playing",
+                                "screenshot_path": str(shot),
+                            },
+                        ],
+                        "screenshot_paths": [str(shot)],
+                        "final_url": "http://localhost:8097/web/index.html#!/video",
+                        "title": "Jellyfin",
+                        "console": [{"type": "warning", "text": "media warning"}],
+                        "failed_network": [],
+                        "dom_summary": "video player",
+                        "dom_path": None,
+                        "page_text": "Now Playing",
+                        "media_state": {
+                            "state": "playing",
+                            "elements": [{"tag": "video", "paused": False}],
+                        },
+                        "error": None,
+                    }
+                ],
+            )
+            runner = ExecutionRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            plan = base_plan(
+                [
+                    {
+                        "step_id": 1,
+                        "role": "trigger",
+                        "action": "Play media in Jellyfin Web",
+                        "tool": "browser",
+                        "input": {
+                            "path": "/web/index.html",
+                            "auth": "auto",
+                            "label": "media_playing",
+                            "actions": [
+                                {"type": "goto"},
+                                {"type": "wait_for_media", "state": "playing"},
+                                {"type": "screenshot", "label": "media_playing"},
+                            ],
+                        },
+                        "expected_outcome": "Media is playing in the web client.",
+                        "success_criteria": {
+                            "all_of": [
+                                {"type": "browser_action_run"},
+                                {"type": "browser_media_state", "state": "playing"},
+                                {
+                                    "type": "browser_console_matches",
+                                    "pattern": "media warning",
+                                },
+                            ]
+                        },
+                    }
+                ]
+            )
+
+            result = runner.execute_plan(plan, run_id="run-synthetic-browser")
+
+            self.assertEqual(result["overall_result"], "reproduced")
+            self.assertEqual(
+                result["execution_log"][0]["browser"]["media_state"]["state"],
+                "playing",
+            )
+            self.assertEqual(browser_driver.runs[0]["browser_input"]["auth"], "auto")
+
 
 if __name__ == "__main__":
     unittest.main()

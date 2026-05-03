@@ -86,6 +86,30 @@ handoff folders:
 - `JF_AUTO_TESTER_LOG_STDERR`: Controls whether logs are mirrored to stderr (`on`, `off`, `auto`).
 - `JF_AUTO_TESTER_BROWSER_HEADLESS`: Controls browser visibility in Stage 2 (`true`, `false`, `auto`).
 
+### Browser Steps
+
+Stage 2 supports `tool: "browser"` for Jellyfin Web flows that need a real
+Chromium client. Browser input supports top-level `path` or `url`, `auth`,
+`label`, `timeout_s`, `viewport`, and ordered `actions`.
+
+Supported action types are `goto`, `refresh`, `click`, `fill`, `press`,
+`select_option`, `check`, `uncheck`, `wait_for`, `wait_for_text`,
+`wait_for_url`, `wait_for_media`, `evaluate`, and `screenshot`. `refresh` is an
+explicit action that reloads the current page and then waits for app idle.
+Screenshots from browser steps are written under the run's `screenshots/`
+artifact directory and can satisfy `screenshot_present`.
+
+Browser-specific criteria include `browser_action_run`, `browser_element`,
+`browser_text_contains`, `browser_url_matches`, `browser_media_state`, and
+`browser_console_matches`. Browser capture sources include `browser_text`,
+`browser_url`, `browser_attribute`, and `browser_eval`.
+
+When the repair-loop API is used, Stage 2 may retry a failed browser step once.
+The repair can only change that browser step's input fields (`actions`, selectors
+inside actions, path/url, waits, labels, viewport, and explicit `refresh`). It
+cannot change prerequisites, Docker image, non-browser steps, roles, expected
+outcomes, or success criteria.
+
 ```bash
 .venv/bin/python main.py --stage analysis \
   https://github.com/jellyfin/jellyfin/issues/XXXX 10.9.7 \

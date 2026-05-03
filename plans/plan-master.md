@@ -129,7 +129,7 @@ async def run_issue(issue_url: str, container_version: str):
       "step_id": 1,
       "role": "setup | trigger | verify",
       "action": "string",
-      "tool": "bash | http_request | screenshot | docker_exec",
+      "tool": "bash | http_request | screenshot | docker_exec | browser",
       "input": {},
       "capture": {
         "item_id": { "from": "body_json_path", "path": "$.Items[0].Id" }
@@ -183,6 +183,32 @@ For `trigger` steps, `success_criteria` deliberately describes observing the bug
 
 Required fields are `method`, `path`, and `auth`. `auth` is one of `auto` (use the Stage 2 admin token), `none` (send no token), or `token` (send the supplied `token`). Use at most one body field: `body_json`, `body_text`, or `body_base64`. Do not use a generic `body` field. Set `Content-Type` explicitly when it matters, including for malformed JSON sent with `body_text`, e.g. `"body_text": "{\"invalid\":"`; use `body_base64` for raw bytes, e.g. `"body_base64": "AAEC"`.
 
+**`browser` input contract:**
+
+Use `browser` for Jellyfin Web UI, React state, media playback, and client/server
+interaction bugs that require a real Chromium client.
+
+```json
+{
+  "path": "/web/index.html",
+  "auth": "auto",
+  "label": "playback_flow",
+  "timeout_s": 30,
+  "viewport": { "width": 1280, "height": 720 },
+  "actions": [
+    { "type": "goto" },
+    { "type": "click", "selector": ".play-button" },
+    { "type": "wait_for_media", "state": "playing" },
+    { "type": "screenshot", "label": "playback_flow" }
+  ]
+}
+```
+
+Supported browser actions are `goto`, `refresh`, `click`, `fill`, `press`,
+`select_option`, `check`, `uncheck`, `wait_for`, `wait_for_text`,
+`wait_for_url`, `wait_for_media`, `evaluate`, and `screenshot`. `refresh`
+reloads the current page and waits for app idle.
+
 **`success_criteria` evaluation (deterministic, no LLM):**
 
 Per-step `success_criteria` is a structured object — never free text — so Stage 2 can evaluate it programmatically and produce reproducible outcomes. The shape is `{ "all_of": [<assertion>, ...] }` or `{ "any_of": [<assertion>, ...] }` (mutually exclusive at the top level; nested combinators are not supported in v1).
@@ -200,6 +226,12 @@ Supported assertion types:
 | `stderr_contains`| `value: string`                 | Substring in stderr |
 | `log_matches`    | `pattern: string`, `since_step_start: bool = true` | Regex against `docker logs` since step began |
 | `screenshot_present` | `label: string`             | A screenshot was captured under this label |
+| `browser_action_run` | none                       | Browser step completed all actions successfully |
+| `browser_element` | `selector: string`, `state: exists\|visible\|hidden\|attached\|detached` | Browser selector state |
+| `browser_text_contains` | `value: string`        | Browser page text contains a string |
+| `browser_url_matches` | `pattern: string`        | Regex against final browser URL |
+| `browser_media_state` | `state: playing\|paused\|ended\|errored\|none` | Aggregated media state |
+| `browser_console_matches` | `pattern: string`    | Regex against captured console warnings/errors |
 
 A step passes iff its `success_criteria` evaluates to true under this DSL. There is no LLM-based judgment in the loop; the agent's job is to dispatch the tool call, not to interpret the result. The top-level `reproduction_goal` is human-readable context only and must not be used by Stage 2 for pass/fail decisions.
 
@@ -217,6 +249,10 @@ Supported `from` sources mirror the assertion DSL:
 | `stdout_regex`      | `pattern: string`, `group: int = 1` | Capture group from stdout |
 | `stdout_trimmed`    | (none)                  | Whole stdout, stripped |
 | `exit_code`         | (none)                  | Integer exit code |
+| `browser_text`      | (none)                  | Browser page text |
+| `browser_url`       | (none)                  | Final browser URL |
+| `browser_attribute` | `selector: string`, `name: string` | Attribute value from a browser element |
+| `browser_eval`      | `script: string` or `expression: string`, `args: any` | Result of a browser JavaScript evaluation |
 
 Resolution rules: variables are scoped to the run; later steps overwrite earlier captures with the same name; referencing an undefined variable marks the step `fail` with reason `"unbound variable: <name>"`. Capture failures (e.g. JSONPath misses) mark the step `fail` with reason `"capture failed: <var>"` and do not bind the variable.
 
@@ -234,7 +270,7 @@ Resolution rules: variables are scoped to the run; later steps overwrite earlier
       "step_id": 1,
       "role": "setup | trigger | verify",
       "action": "string",
-      "tool": "bash | http_request | screenshot | docker_exec",
+      "tool": "bash | http_request | screenshot | docker_exec | browser",
       "stdout": "string",
       "stderr": "string",
       "exit_code": 0,
@@ -277,6 +313,16 @@ Resolution rules: variables are scoped to the run; later steps overwrite earlier
 - `reproduced`: the `trigger` step's outcome is `pass` — its `success_criteria` (the bug symptom) was observed
 - `not_reproduced`: the `trigger` step's outcome is `fail` — the bug symptom was not observed
 - `inconclusive`: the `trigger` step could not be reached (container crash, prerequisite failure, timeout) OR no step has `role: "trigger"`
+
+**Browser repair loop:**
+
+`execute_plan(plan)` remains the deterministic one-attempt path. The optional
+repair API uses `start_plan(plan)`, `retry_browser_step(step_id, browser_input)`,
+and `finalize_plan()`. A failed browser step may be retried exactly once. Repair
+can change only that failed browser step's input (`actions`, selectors, path/url,
+waits, labels, viewport, and explicit `refresh`) and cannot change
+prerequisites, Docker image, non-browser steps, roles, expected outcomes, or
+success criteria.
 
 ---
 
