@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from main import (
     ANALYSIS_TRANSCRIPT_FILE,
+    INSUFFICIENT_INFORMATION_SUMMARY_FILE,
     AnalysisAgentEmptyResponseError,
     AnalysisAgentProtocolError,
     BlockedStage1ModelError,
@@ -1039,6 +1040,50 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 "Debug issue",
             )
             self.assertEqual(stream.getvalue(), "")
+
+    async def test_run_analysis_stage_writes_insufficient_information_summary(self):
+        engine = FakeEngine(
+            [
+                "[/info]\ntool docs\n[info/]\n\n",
+                "INSUFFICIENT_INFORMATION: Missing seed data.\n\n",
+                "Missing details:\n- A backup from the upgraded server\n",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await run_analysis_stage(
+                "https://github.com/jellyfin/jellyfin/issues/1",
+                "10.9.7",
+                temp_dir,
+                stream=None,
+                engine_factory=lambda stage: engine,
+                issue_fetcher=_sample_issue_fetcher,
+            )
+
+            summary_path = Path(temp_dir) / INSUFFICIENT_INFORMATION_SUMMARY_FILE
+            summary = summary_path.read_text(encoding="utf-8")
+            stage_result = json.loads(
+                (Path(temp_dir) / "stage_result.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result.status, "insufficient_information")
+        self.assertEqual(result.output_file, INSUFFICIENT_INFORMATION_SUMMARY_FILE)
+        self.assertIn("# Insufficient Information", summary)
+        self.assertIn("Issue title: Debug issue", summary)
+        self.assertIn("INSUFFICIENT_INFORMATION: Missing seed data.", summary)
+        self.assertIn("- A backup from the upgraded server", summary)
+        self.assertIn("Full Stage 1 transcript: `transcript.json`", summary)
+        self.assertNotIn("tool docs", summary)
+        self.assertEqual(
+            stage_result["output_file"],
+            INSUFFICIENT_INFORMATION_SUMMARY_FILE,
+        )
+        self.assertEqual(
+            stage_result["metadata"]["summary"],
+            INSUFFICIENT_INFORMATION_SUMMARY_FILE,
+        )
+        self.assertEqual(stage_result["metadata"]["transcript"], "transcript.json")
+        self.assertNotIn("tool docs", stage_result["metadata"]["message"])
 
     async def test_run_analysis_stage_flushes_transcript_while_streaming(self):
         analysis_agent = CrashingAnalysisAgent(["\n", "\n", "partial response\n"])

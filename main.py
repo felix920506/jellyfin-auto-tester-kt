@@ -29,6 +29,7 @@ TERMINAL_CHANNELS = ("final_report", "human_review_queue")
 STAGE_CHOICES = ("analysis", "execution", "report")
 STAGE_CHANNEL_GRACE_S = 2.0
 ANALYSIS_TRANSCRIPT_FILE = "transcript.json"
+INSUFFICIENT_INFORMATION_SUMMARY_FILE = "insufficient_information.md"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR")
 LOG_STDERR_CHOICES = ("auto", "on", "off")
 DEFAULT_LOG_LEVEL = "INFO"
@@ -810,6 +811,8 @@ async def run_analysis_stage(
     - ``input.json``: issue URL and target version used for the run.
     - ``transcript.json``: machine-readable prompt and assistant response.
     - ``plan.json``: ReproductionPlan payload for Stage 2 when available.
+    - ``insufficient_information.md``: readable early-stop summary when no
+      executable plan can be produced.
     - ``stage_result.json``: machine-readable metadata for the debug run.
     """
 
@@ -929,6 +932,14 @@ async def run_analysis_stage(
 
                 if _is_insufficient_information(transcript):
                     logger.info("Stage 1 debug run stopped with insufficient information")
+                    summary_text = _extract_insufficient_information_summary(transcript)
+                    summary_file = _write_insufficient_information_summary(
+                        output_dir,
+                        summary_text=summary_text,
+                        issue_url=issue_url,
+                        container_version=container_version,
+                        issue_thread=issue_thread,
+                    )
                     transcript_writer.write_snapshot(
                         assistant_output=transcript,
                         output_sources=transcript_sources,
@@ -941,8 +952,12 @@ async def run_analysis_stage(
                             stage="analysis",
                             status="insufficient_information",
                             output_dir=str(output_dir),
-                            output_file=ANALYSIS_TRANSCRIPT_FILE,
-                            metadata={"message": transcript.strip()},
+                            output_file=summary_file.name,
+                            metadata={
+                                "message": summary_text,
+                                "summary": summary_file.name,
+                                "transcript": ANALYSIS_TRANSCRIPT_FILE,
+                            },
                         )
                     )
 
@@ -2947,6 +2962,64 @@ def _print_terminal_summary(result: PipelineResult, stream: TextIO) -> None:
 
 def _is_insufficient_information(transcript: str) -> bool:
     return "INSUFFICIENT_INFORMATION" in transcript and "REPRODUCTION_PLAN_COMPLETE" not in transcript
+
+
+def _extract_insufficient_information_summary(transcript: str) -> str:
+    text = transcript.replace("\r\n", "\n").strip()
+    marker_index = text.rfind("INSUFFICIENT_INFORMATION")
+    if marker_index < 0:
+        return text
+    return text[marker_index:].strip()
+
+
+def _write_insufficient_information_summary(
+    output_dir: Path,
+    *,
+    summary_text: str,
+    issue_url: str,
+    container_version: str,
+    issue_thread: dict[str, Any] | None,
+) -> Path:
+    path = output_dir / INSUFFICIENT_INFORMATION_SUMMARY_FILE
+    path.write_text(
+        _render_insufficient_information_summary(
+            summary_text,
+            issue_url=issue_url,
+            container_version=container_version,
+            issue_thread=issue_thread,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _render_insufficient_information_summary(
+    summary_text: str,
+    *,
+    issue_url: str,
+    container_version: str,
+    issue_thread: dict[str, Any] | None,
+) -> str:
+    lines = [
+        "# Insufficient Information",
+        "",
+        f"- Issue: {issue_url}",
+        f"- Target Jellyfin version: {container_version}",
+    ]
+    if isinstance(issue_thread, dict) and issue_thread.get("title"):
+        lines.append(f"- Issue title: {issue_thread['title']}")
+    lines.extend(
+        [
+            "",
+            "## Summary",
+            "",
+            summary_text.strip() or "Stage 1 stopped before producing a reproduction plan.",
+            "",
+            "Full Stage 1 transcript: `transcript.json`",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _chunk_text(chunk: Any) -> str:
