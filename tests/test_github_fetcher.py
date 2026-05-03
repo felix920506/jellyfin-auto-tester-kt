@@ -359,6 +359,12 @@ class GitHubFetcherTests(unittest.TestCase):
                 "https://github.com/jellyfin/jellyfin/issues/10"
             )
 
+        self.assertEqual(
+            result["requested_url"],
+            "https://github.com/jellyfin/jellyfin/issues/10",
+        )
+        self.assertNotIn("url", result)
+        self.assertNotIn("number", result)
         self.assertEqual(result["title"], "Playback regression")
         self.assertEqual(result["labels"], ["bug", "playback"])
         self.assertEqual(result["author"], "reporter")
@@ -394,7 +400,7 @@ class GitHubFetcherTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(result["linked_discussions"], [])
+        self.assertNotIn("linked_discussions", result)
 
     def test_github_fetcher_fetches_discussion_url(self):
         created = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
@@ -421,6 +427,10 @@ class GitHubFetcherTests(unittest.TestCase):
                 "https://github.com/jellyfin/jellyfin/discussions/7328"
             )
 
+        self.assertEqual(
+            result["requested_url"],
+            "https://github.com/jellyfin/jellyfin/discussions/7328",
+        )
         self.assertEqual(result["kind"], "discussion")
         self.assertEqual(result["title"], "LG Smart TV profile")
         self.assertEqual(result["category"], "Troubleshooting")
@@ -453,6 +463,14 @@ class GitHubFetcherTests(unittest.TestCase):
                 "https://github.com/jellyfin/jellyfin/issues/7328"
             )
 
+        self.assertEqual(
+            result["requested_url"],
+            "https://github.com/jellyfin/jellyfin/issues/7328",
+        )
+        self.assertEqual(
+            result["resolved_url"],
+            "https://github.com/jellyfin/jellyfin/discussions/7328",
+        )
         self.assertEqual(result["kind"], "discussion")
         self.assertEqual(result["title"], "LG Smart TV profile")
 
@@ -469,6 +487,14 @@ class GitHubFetcherTests(unittest.TestCase):
                 "https://github.com/jellyfin/jellyfin/discussions/10"
             )
 
+        self.assertEqual(
+            result["requested_url"],
+            "https://github.com/jellyfin/jellyfin/discussions/10",
+        )
+        self.assertEqual(
+            result["resolved_url"],
+            "https://github.com/jellyfin/jellyfin/issues/10",
+        )
         self.assertEqual(result["kind"], "issue")
         self.assertEqual(result["title"], "Playback regression")
 
@@ -488,8 +514,18 @@ class GitHubFetcherTests(unittest.TestCase):
                 "https://github.com/jellyfin/jellyfin/blob/main/README.md#L2"
             )
 
+        self.assertEqual(
+            result["requested_url"],
+            "https://github.com/jellyfin/jellyfin/blob/main/README.md#L2",
+        )
+        self.assertEqual(
+            result["resolved_url"],
+            "https://github.com/jellyfin/jellyfin/blob/main/README.md",
+        )
         self.assertEqual(result["kind"], "file")
         self.assertEqual(result["path"], "README.md")
+        self.assertNotIn("size", result)
+        self.assertNotIn("encoding", result)
         self.assertEqual(result["content"], "first\nsecond\nthird\n")
         self.assertEqual(result["line_start"], 2)
         self.assertEqual(result["selected_content"], "second")
@@ -523,6 +559,11 @@ class GitHubFetcherTests(unittest.TestCase):
                 include_linked=False,
             )
 
+        self.assertEqual(
+            result["requested_url"],
+            "https://github.com/jellyfin/jellyfin/commit/abc123",
+        )
+        self.assertNotIn("sha", result)
         self.assertEqual(result["kind"], "commit")
         self.assertEqual(result["title"], "Fix playback regression")
         self.assertEqual(result["author"], "maintainer")
@@ -553,15 +594,14 @@ class GitHubFetcherTests(unittest.TestCase):
                 "https://github.com/jellyfin/jellyfin/issues/10"
             )
 
-        self.assertEqual(result["linked_issues"], [])
-        self.assertEqual(result["linked_prs"], [])
+        self.assertNotIn("linked_issues", result)
+        self.assertNotIn("linked_prs", result)
         self.assertEqual(
             result["linked_discussions"],
             [
                 {
                     "url": "https://github.com/jellyfin/jellyfin/discussions/7328",
                     "title": "LG Smart TV profile",
-                    "state": "",
                     "category": "Troubleshooting",
                 }
             ],
@@ -596,7 +636,6 @@ class GitHubFetcherTests(unittest.TestCase):
                 {
                     "url": "https://github.com/jellyfin/jellyfin/discussions/7328",
                     "title": "LG Smart TV profile",
-                    "state": "",
                     "category": "Troubleshooting",
                 }
             ],

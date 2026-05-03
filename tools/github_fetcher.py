@@ -112,8 +112,8 @@ def github_fetcher(
         issue_url: Backward-compatible alias for ``url``.
 
     Returns:
-        A dictionary with fields normalized for the inferred GitHub resource
-        kind.
+        A compact dictionary for the inferred GitHub resource kind. The output
+        always includes ``requested_url`` with the original input URL.
     """
 
     github_url = _resolve_github_url(url=url, issue_url=issue_url)
@@ -145,29 +145,33 @@ def _fetch_parsed_github_url(
 ) -> dict[str, Any]:
     path_parts = parsed_url.path_parts
     if not path_parts:
-        return _format_repository_payload(repo)
+        payload = _format_repository_payload(repo)
+        return _format_requested_payload(parsed_url, payload)
 
     path_kind = path_parts[0]
     if _is_numbered_resource(path_parts):
-        return _fetch_numbered_resource(
+        payload = _fetch_numbered_resource(
             client=client,
             repo=repo,
             parsed_url=parsed_url,
             include_comments=include_comments,
             include_linked=include_linked,
         )
+        return _format_requested_payload(parsed_url, payload)
 
     if path_kind in ("commit", "commits"):
-        return _fetch_commit_payload(
+        payload = _fetch_commit_payload(
             client=client,
             repo=repo,
             parsed_url=parsed_url,
             include_comments=include_comments,
             include_linked=include_linked,
         )
+        return _format_requested_payload(parsed_url, payload)
 
     if path_kind in ("blob", "raw", "tree"):
-        return _fetch_content_payload(repo=repo, parsed_url=parsed_url)
+        payload = _fetch_content_payload(repo=repo, parsed_url=parsed_url)
+        return _format_requested_payload(parsed_url, payload)
 
     raise ValueError(
         "url must be a supported GitHub resource URL: repository root, "
@@ -552,6 +556,71 @@ def _format_repository_payload(repo: Any) -> dict[str, Any]:
         "linked_prs": [],
         "linked_discussions": [],
     }
+
+
+_TOP_LEVEL_NOISE_FIELDS = {
+    "url",
+    "number",
+    "sha",
+    "download_url",
+    "size",
+    "encoding",
+    "name",
+    "full_name",
+    "open_issues_count",
+}
+
+_NESTED_NOISE_FIELDS = {"download_url", "encoding", "size"}
+_FALSE_IS_NOISE_FIELDS = {"binary", "truncated", "patch_truncated"}
+
+
+def _format_requested_payload(
+    parsed_url: GitHubUrl,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    requested_url = parsed_url.original_url
+    result: dict[str, Any] = {"requested_url": requested_url}
+    resolved_url = payload.get("url")
+    if isinstance(resolved_url, str) and resolved_url and resolved_url != requested_url:
+        result["resolved_url"] = resolved_url
+
+    for key, value in payload.items():
+        if key in _TOP_LEVEL_NOISE_FIELDS:
+            continue
+        compacted = _compact_output_value(value)
+        if _omit_output_field(key, compacted):
+            continue
+        result[key] = compacted
+    return result
+
+
+def _compact_output_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        compacted: dict[str, Any] = {}
+        for key, nested_value in value.items():
+            if key in _NESTED_NOISE_FIELDS:
+                continue
+            nested_compacted = _compact_output_value(nested_value)
+            if _omit_output_field(key, nested_compacted):
+                continue
+            compacted[key] = nested_compacted
+        return compacted
+
+    if isinstance(value, list):
+        compacted_items = [_compact_output_value(item) for item in value]
+        return [item for item in compacted_items if not _is_empty_output_value(item)]
+
+    return value
+
+
+def _omit_output_field(key: str, value: Any) -> bool:
+    if key in _FALSE_IS_NOISE_FIELDS and value is False:
+        return True
+    return _is_empty_output_value(value)
+
+
+def _is_empty_output_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
 
 
 def _line_selection(fragment: str) -> tuple[int, int] | None:
@@ -962,7 +1031,9 @@ class GitHubFetcherTool(BaseTool):
         return (
             "For GitHub resources, call `github_fetcher` with only `url` plus "
             "optional `include_comments`/`include_linked`; never specify a "
-            "separate issue/PR/discussion/code type."
+            "separate issue/PR/discussion/code type. The output includes "
+            "`requested_url`, plus `resolved_url` only if GitHub resolves a "
+            "different resource."
         )
 
     async def _execute(self, args: dict[str, Any], **kwargs: Any) -> ToolResult:
