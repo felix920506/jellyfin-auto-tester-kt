@@ -50,7 +50,7 @@ memory:
   provider: "model2vec"
 
 compact:
-  threshold_tokens: 100000
+  threshold_tokens: 250000
   strategy: "summarize"
   pin:
     - "jellyfin_logs"
