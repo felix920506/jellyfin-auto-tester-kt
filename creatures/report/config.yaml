@@ -28,18 +28,6 @@ triggers:
     channel: "execution_done"
     task: "analyze_and_report"
 
-output:
-  named_outputs:
-    final_report:
-      type: "channel"
-      channel: "final_report"
-    human_review_queue:
-      type: "channel"
-      channel: "human_review_queue"
-    verification_request:
-      type: "channel"
-      channel: "verification_request"
-
 memory:
   provider: "model2vec"
 

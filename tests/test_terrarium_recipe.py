@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 
 class TerrariumRecipeTests(unittest.TestCase):
     def test_terrarium_yaml_loads_with_installed_kohaku_schema(self):
@@ -65,6 +67,26 @@ class TerrariumRecipeTests(unittest.TestCase):
                     self.assertIsNotNone(profile, creature_path.name)
                     self.assertEqual(profile.provider, "openrouter")
                     self.assertEqual(profile.api_key_env, "OPENROUTER_API_KEY")
+
+    def test_creature_configs_use_send_message_not_channel_named_outputs(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for config_path in [
+            repo_root / "creatures" / "analysis" / "config.yaml",
+            repo_root / "creatures" / "execution" / "config.yaml",
+            repo_root / "creatures" / "report" / "config.yaml",
+        ]:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            tools = {tool["name"] for tool in config.get("tools", [])}
+            self.assertIn("send_message", tools, config_path)
+
+            output = config.get("output") or {}
+            named_outputs = output.get("named_outputs") or {}
+            channel_outputs = [
+                name
+                for name, item in named_outputs.items()
+                if isinstance(item, dict) and item.get("type") == "channel"
+            ]
+            self.assertEqual(channel_outputs, [], config_path)
 
 
 if __name__ == "__main__":

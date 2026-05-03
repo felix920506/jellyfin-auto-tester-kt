@@ -26,12 +26,6 @@ tools:
   - name: "send_message"
     type: "builtin"
 
-output:
-  named_outputs:
-    plan_ready:
-      type: "channel"
-      channel: "plan_ready"
-
 memory:
   provider: "model2vec"
 

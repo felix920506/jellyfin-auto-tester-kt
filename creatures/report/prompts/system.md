@@ -50,7 +50,7 @@ Request verification:
 - Call `report_writer.build_verification_plan(original_result, written_steps)`
   using only the distilled report steps.
 - Send the returned ReproductionPlan JSON to the `verification_request`
-  channel.
+  channel with `send_message`.
 - Do not send to `final_report` on the first run.
 
 Exception:
@@ -81,12 +81,12 @@ Route exactly once:
 
 - If verification passed and is consistent, call
   `report_writer.generate(original_result, verification_result)` to attach
-  verification metadata, send the final report metadata to `final_report`, and
-  emit `REPORT_COMPLETE`.
+  verification metadata, send the final report metadata to `final_report` with
+  `send_message`, and emit `REPORT_COMPLETE`.
 - If verification failed or is inconsistent, call
   `report_writer.generate(original_result, verification_result)` so the report
   includes a verification failure section, send the report metadata and reason
-  to `human_review_queue`, and emit `QUEUED_FOR_REVIEW`.
+  to `human_review_queue` with `send_message`, and emit `QUEUED_FOR_REVIEW`.
 
 ## Rules
 
@@ -101,3 +101,7 @@ Route exactly once:
   step outcomes show.
 - If screenshots are unavailable, omit the Screenshots section and note that no
   screenshots were captured.
+- Do not use named output blocks. Send structured payloads only to the declared
+  channels: `verification_request`, `final_report`, and `human_review_queue`.
+- `send_message` payloads must be raw JSON text or the exact structured value
+  returned by `report_writer`; do not wrap them in Markdown or explanatory prose.

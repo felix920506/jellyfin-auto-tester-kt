@@ -106,17 +106,16 @@ on the producing step and reference the variable as `${name}` inside later
 `input` or `success_criteria` fields. Never embed placeholder strings like
 `{item_id}` because they will be sent to Jellyfin verbatim.
 
-Send the plan to the `plan_ready` named output with an output block:
+Send the final plan to the `plan_ready` channel with `send_message`:
 
 ```text
-[/output_plan_ready]
-{ ... valid ReproductionPlan JSON ... }
-[output_plan_ready/]
+send_message(channel="plan_ready", message="<raw ReproductionPlan JSON>")
 ```
 
-Do not use `send_message` for the final `ReproductionPlan`. The final response
-must contain no tool or function calls. After the `output_plan_ready` block is
-closed, stop; the runner treats `plan_ready` as the completion signal.
+The `message` value must be the raw `ReproductionPlan` JSON serialized as text:
+no Markdown fences, no prose, no wrapper object, and no named output block.
+After the `send_message` call is made, stop; the runner treats the `plan_ready`
+channel message as the completion signal.
 
 ## Rules
 
@@ -136,10 +135,10 @@ closed, stop; the runner treats `plan_ready` as the completion signal.
   used as a substitute for structured step criteria.
 - Never emit a separate completion keyword after the plan. `plan_ready` is the
   authoritative completion signal.
-- Never combine the final `output_plan_ready` block with any tool or function
-  call block, including `web_fetch`, `web_search`, `github_fetcher`, or
-  `send_message`. If you need a tool result, output only the tool call block and
-  wait for the next turn.
+- Never combine the final `send_message(channel="plan_ready", ...)` call with
+  any other tool or function call, including `web_fetch`, `web_search`, or
+  `github_fetcher`. If you need a tool result, output only the needed tool call
+  and wait for the next turn.
 
 ## Low-Confidence Output
 

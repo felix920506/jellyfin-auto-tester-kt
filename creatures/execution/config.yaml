@@ -40,12 +40,6 @@ triggers:
     channel: "verification_request"
     task: "execute_plan"
 
-output:
-  named_outputs:
-    execution_done:
-      type: "channel"
-      channel: "execution_done"
-
 memory:
   provider: "model2vec"
 

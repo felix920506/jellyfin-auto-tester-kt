@@ -21,7 +21,6 @@ from main import (
     _build_stage_parser,
     _assert_stage1_model_allowed_for_recipe,
     _assert_stage1_model_config_allowed,
-    _bind_channel_named_outputs,
     _default_log_level,
     _default_log_stderr,
     _normalize_stage_argv,
@@ -62,33 +61,9 @@ class FakeDefaultOutput:
 class FakeOutputRouter:
     def __init__(self):
         self.default_output = FakeDefaultOutput()
-        self.named_outputs = {}
-        self._completed_outputs = []
-
-    def get_and_clear_completed_outputs(self):
-        outputs = self._completed_outputs
-        self._completed_outputs = []
-        return outputs
-
-    def get_output_feedback(self):
-        outputs = self.get_and_clear_completed_outputs()
-        if not outputs:
-            return None
-        return "## Outputs Sent\n" + "\n".join(
-            output.to_feedback_line() for output in outputs
-        )
 
     def notify_activity(self, _activity_type, *_args, **_kwargs):
         pass
-
-
-class FakeCompletedOutput:
-    def __init__(self, target, content):
-        self.target = target
-        self.content = content
-
-    def to_feedback_line(self):
-        return f"- [{self.target}]: {self.content[:40]!r}"
 
 
 class FakeInnerAgent:
@@ -151,25 +126,6 @@ class ConversationOnlyAnalysisAgent:
             yield ""
 
 
-class PlanReadyThenHangingAnalysisAgent:
-    def __init__(self, plan_channel, plan):
-        self.plan_channel = plan_channel
-        self.plan = plan
-        self.prompts = []
-        self.cancelled = False
-
-    async def chat(self, prompt):
-        self.prompts.append(prompt)
-        self.plan_channel.send(self.plan)
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            self.cancelled = True
-            raise
-        if False:
-            yield ""
-
-
 class RetryThenPlanReadyAnalysisAgent:
     def __init__(self, plan_channel, plan):
         self.plan_channel = plan_channel
@@ -183,7 +139,26 @@ class RetryThenPlanReadyAnalysisAgent:
             yield "The reproduction plan has been sent to `plan_ready`.\n"
             return
 
-        self.plan_channel.send(self.plan)
+        self.plan_channel.send(json.dumps(self.plan))
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        if False:
+            yield ""
+
+
+class SendMessagePlanReadyAnalysisAgent:
+    def __init__(self, plan_channel, plan):
+        self.plan_channel = plan_channel
+        self.plan = plan
+        self.prompts = []
+        self.cancelled = False
+
+    async def chat(self, prompt):
+        self.prompts.append(prompt)
+        self.plan_channel.send(json.dumps(self.plan))
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -283,123 +258,10 @@ class ProviderConversationAnalysisAgent:
         self.plan_channel.send(self.plan)
 
 
-class MixedPlanToolOutputAnalysisAgent:
-    def __init__(self, stale_plan, final_plan):
-        self.prompts = []
-        self.stale_plan = stale_plan
-        self.final_plan = final_plan
-        named_outputs = {
-            "plan_ready": FakeOutputConfigItem(
-                "channel",
-                {"channel": "plan_ready"},
-            )
-        }
-        self.agent = FakeNamedOutputAgent("analysis_agent", named_outputs)
-
-    async def chat(self, prompt):
-        self.prompts.append(prompt)
-        guard = self.agent._analysis_plan_guard
-        output = self.agent.output_router.named_outputs["plan_ready"]
-
-        guard.begin_provider_response()
-        await output.on_processing_start()
-        await output.write(json.dumps(self.stale_plan))
-        guard.record_tool_call()
-        await output.on_processing_end()
-        yield "tool call completed\n"
-
-        guard.begin_provider_response()
-        await output.on_processing_start()
-        await output.write(json.dumps(self.final_plan))
-        await output.on_processing_end()
-
-
-class ProcessingCyclePlanReadyAnalysisAgent:
-    def __init__(self, plan):
-        self.prompts = []
-        self.plan = plan
-        self.feedbacks = []
-        named_outputs = {
-            "plan_ready": FakeOutputConfigItem(
-                "channel",
-                {"channel": "plan_ready"},
-            )
-        }
-        self.agent = FakeNamedOutputAgent("analysis_agent", named_outputs)
-        self.agent._check_termination = lambda _round_text: False
-
-    async def chat(self, prompt):
-        self.prompts.append(prompt)
-        guard = self.agent._analysis_plan_guard
-        router = self.agent.output_router
-        output = router.named_outputs["plan_ready"]
-
-        guard.begin_provider_response()
-        await output.on_processing_start()
-        content = json.dumps(self.plan)
-        await output.write(content)
-        router._completed_outputs.append(FakeCompletedOutput("plan_ready", content))
-
-        if not self.agent._check_termination([]):
-            feedback = router.get_output_feedback()
-            if feedback is not None:
-                self.feedbacks.append(feedback)
-            await asyncio.Event().wait()
-
-        await output.on_processing_end()
-        if False:
-            yield ""
-
-
 class FakeExecutionAgent:
     def __init__(self):
         self.max_iterations = 1
         self.termination = {"max_turns": 1}
-
-
-class FakeOutputConfigItem:
-    def __init__(self, output_type, options=None):
-        self.type = output_type
-        self.options = options or {}
-
-
-class FakeOutputConfig:
-    def __init__(self, named_outputs):
-        self.named_outputs = named_outputs
-
-
-class FakeAgentConfig:
-    def __init__(self, name, named_outputs):
-        self.name = name
-        self.output = FakeOutputConfig(named_outputs)
-
-
-class FakeNamedOutputAgent:
-    def __init__(self, name, named_outputs):
-        self.output_router = FakeOutputRouter()
-        self.output_router.named_outputs = {
-            name: FakeDefaultOutput() for name in named_outputs
-        }
-        self.config = FakeAgentConfig(name, named_outputs)
-
-
-class FakeCreature:
-    """Mimic the Terrarium ``Creature`` wrapper around an inner agent.
-
-    The real engine returns a Creature whose ``output_router`` and
-    ``config`` live one level deeper at ``creature.agent``.
-    """
-
-    def __init__(self, inner_agent):
-        self.agent = inner_agent
-
-
-class CapturingAsyncChannel:
-    def __init__(self):
-        self.messages = []
-
-    async def send(self, message):
-        self.messages.append(message)
 
 
 class FakeChannel:
@@ -866,7 +728,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_issue_treats_plan_ready_as_analysis_completion(self):
         plan_channel = FakeOnSendChannel("plan_ready")
         payload = {"report_path": "/tmp/artifacts/run-1/report.md"}
-        analysis_agent = PlanReadyThenHangingAnalysisAgent(
+        analysis_agent = SendMessagePlanReadyAnalysisAgent(
             plan_channel,
             _sample_plan(),
         )
@@ -926,52 +788,35 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("attempt 2 of 3", analysis_agent.prompts[1])
         self.assertTrue(analysis_agent.cancelled)
 
-    async def test_binds_channel_named_outputs_to_shared_channels(self):
-        channel = CapturingAsyncChannel()
-        named_outputs = {
-            "plan_ready": FakeOutputConfigItem(
-                "channel",
-                {"channel": "plan_ready"},
-            )
-        }
-        analysis_agent = FakeNamedOutputAgent("analysis_agent", named_outputs)
+    async def test_run_analysis_stage_accepts_send_message_plan_delivery(self):
+        plan = _sample_plan()
+        plan_channel = FakeOnSendChannel("plan_ready")
+        analysis_agent = SendMessagePlanReadyAnalysisAgent(plan_channel, plan)
         engine = FakeEngine(
             [],
-            channels={"plan_ready": channel},
+            channels={"plan_ready": plan_channel},
             analysis_agent=analysis_agent,
         )
 
-        _bind_channel_named_outputs(engine)
-        await analysis_agent.output_router.named_outputs["plan_ready"].write('{"ok": true}')
-
-        self.assertEqual(len(channel.messages), 1)
-        self.assertEqual(channel.messages[0].sender, "analysis_agent")
-        self.assertEqual(channel.messages[0].content, '{"ok": true}')
-
-    async def test_binds_channel_named_outputs_through_creature_wrapper(self):
-        channel = CapturingAsyncChannel()
-        named_outputs = {
-            "plan_ready": FakeOutputConfigItem(
-                "channel",
-                {"channel": "plan_ready"},
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/1",
+                    "10.9.7",
+                    temp_dir,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
             )
-        }
-        inner_agent = FakeNamedOutputAgent("analysis_agent", named_outputs)
-        creature = FakeCreature(inner_agent)
-        engine = FakeEngine(
-            [],
-            channels={"plan_ready": channel},
-            analysis_agent=creature,
-        )
 
-        _bind_channel_named_outputs(engine)
-        await inner_agent.output_router.named_outputs["plan_ready"].write(
-            '{"ok": true}'
-        )
+            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
 
-        self.assertEqual(len(channel.messages), 1)
-        self.assertEqual(channel.messages[0].sender, "analysis_agent")
-        self.assertEqual(channel.messages[0].content, '{"ok": true}')
+        self.assertEqual(result.status, "plan_ready")
+        self.assertEqual(result.metadata["source"], "channel")
+        self.assertEqual(written_plan, plan)
+        self.assertTrue(analysis_agent.cancelled)
 
     async def test_run_issue_stops_on_insufficient_information(self):
         engine = FakeEngine(["INSUFFICIENT_INFORMATION\nmissing steps\n"])
@@ -1164,68 +1009,6 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             3,
         )
 
-    async def test_run_analysis_stage_ignores_plan_from_tool_calling_response(self):
-        stale_plan = _sample_plan()
-        stale_plan["reproduction_goal"] = "Stale plan before tool results."
-        final_plan = _sample_plan()
-        final_plan["reproduction_goal"] = "Final plan after tool results."
-        plan_channel = FakeOnSendChannel("plan_ready")
-        analysis_agent = MixedPlanToolOutputAnalysisAgent(stale_plan, final_plan)
-        engine = FakeEngine(
-            [],
-            channels={"plan_ready": plan_channel},
-            analysis_agent=analysis_agent,
-        )
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            result = await asyncio.wait_for(
-                run_analysis_stage(
-                    "https://github.com/jellyfin/jellyfin/issues/1",
-                    "10.9.7",
-                    temp_dir,
-                    stream=None,
-                    engine_factory=lambda stage: engine,
-                    issue_fetcher=_sample_issue_fetcher,
-                ),
-                timeout=1,
-            )
-
-            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
-
-        self.assertEqual(result.status, "plan_ready")
-        self.assertEqual(
-            written_plan["reproduction_goal"],
-            "Final plan after tool results.",
-        )
-
-    async def test_run_analysis_stage_stops_before_plan_ready_feedback_loop(self):
-        plan = _sample_plan()
-        analysis_agent = ProcessingCyclePlanReadyAnalysisAgent(plan)
-        engine = FakeEngine(
-            [],
-            channels={"plan_ready": FakeOnSendChannel("plan_ready")},
-            analysis_agent=analysis_agent,
-        )
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            result = await asyncio.wait_for(
-                run_analysis_stage(
-                    "https://github.com/jellyfin/jellyfin/issues/1",
-                    "10.9.7",
-                    temp_dir,
-                    stream=None,
-                    engine_factory=lambda stage: engine,
-                    issue_fetcher=_sample_issue_fetcher,
-                ),
-                timeout=1,
-            )
-
-            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
-
-        self.assertEqual(result.status, "plan_ready")
-        self.assertEqual(written_plan, plan)
-        self.assertEqual(analysis_agent.feedbacks, [])
-
     async def test_run_analysis_stage_accepts_context_filled_provider_plan(self):
         plan = _sample_provider_plan_without_target_version()
         engine = FakeEngine(
@@ -1330,7 +1113,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(
                 AnalysisAgentProtocolError,
-                "emit plan_ready",
+                "send plan_ready",
             ):
                 await asyncio.wait_for(
                     run_analysis_stage(
@@ -1368,7 +1151,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(
                 AnalysisAgentProtocolError,
-                "emit plan_ready",
+                "send plan_ready",
             ):
                 await asyncio.wait_for(
                     run_analysis_stage(
@@ -1410,7 +1193,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(
                 AnalysisAgentProtocolError,
-                "emit plan_ready",
+                "send plan_ready",
             ):
                 await asyncio.wait_for(
                     run_analysis_stage(
@@ -1432,7 +1215,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(written_transcript["output"]["sources"][0]["source"], "conversation")
             self.assertFalse((Path(temp_dir) / "plan.json").exists())
 
-    async def test_run_analysis_stage_rejects_send_message_plan_without_output_block(self):
+    async def test_run_analysis_stage_rejects_printed_send_message_without_delivery(self):
         partial_plan = _sample_gemini_partial_plan()
         transcript = (
             "[/web_search]\n"
@@ -1453,7 +1236,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(
                 AnalysisAgentProtocolError,
-                "emit plan_ready",
+                "send plan_ready",
             ):
                 await asyncio.wait_for(
                     run_analysis_stage(
@@ -1477,7 +1260,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(
                 AnalysisAgentProtocolError,
-                "emit plan_ready",
+                "send plan_ready",
             ):
                 await asyncio.wait_for(
                     run_analysis_stage(

@@ -16,6 +16,8 @@ ExecutionResult file writing.
 
 After the runner returns, send the returned JSON unchanged to the
 `execution_done` channel with `send_message`. Then emit `EXECUTION_COMPLETE`.
+Do not use named output blocks. Do not send the final structured payload to any
+channel other than `execution_done`.
 
 ## Required Semantics
 
@@ -81,3 +83,7 @@ Always send an ExecutionResult JSON containing:
 
 All artifact paths in the output must be absolute. Preserve the artifact
 directory after teardown.
+
+Use only `send_message(channel="execution_done", message="<raw ExecutionResult JSON>")`
+for the final structured payload. The message must be raw JSON text, not
+Markdown or prose.

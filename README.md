@@ -75,8 +75,9 @@ model blocklist needs to change.
 
 ## Running Stages Individually
 
-The full pipeline remains channel-driven. For debugging, each stage can also be
-run with disk handoff folders:
+The full pipeline remains channel-driven through explicit KohakuTerrarium
+`send_message` calls. For debugging, each stage can also be run with disk
+handoff folders:
 
 ### Key Environment Variables
 

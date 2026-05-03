@@ -38,12 +38,6 @@ tools:
   - name: "send_message"
     type: "builtin"
 
-output:
-  named_outputs:
-    - name: "plan_ready"
-      type: "channel"
-      channel: "plan_ready"
-
 memory:
   provider: "model2vec"
 
@@ -126,17 +120,16 @@ variable as `${name}` inside any later step's `input`. See plan-master.md for th
 capture/interpolation rules. Never embed placeholder strings like `{item_id}` —
 they will be sent to Jellyfin verbatim.
 
-Send the plan to the `plan_ready` named output with an output block:
+Send the final plan to the `plan_ready` channel with `send_message`:
 
 ```text
-[/output_plan_ready]
-{ ... valid ReproductionPlan JSON ... }
-[output_plan_ready/]
+send_message(channel="plan_ready", message="<raw ReproductionPlan JSON>")
 ```
 
-Do not use `send_message` for the final `ReproductionPlan`. The final response
-must contain no tool or function calls. After the `output_plan_ready` block is
-closed, stop; the runner treats `plan_ready` as the completion signal.
+The `message` value must be the raw `ReproductionPlan` JSON serialized as text:
+no Markdown fences, no prose, no wrapper object, and no named output block.
+After the `send_message` call is made, stop; the runner treats the `plan_ready`
+channel message as the completion signal.
 
 Never emit a separate completion keyword after the plan. If you need a tool
 result, output only the tool call block and wait for the next turn.
@@ -195,7 +188,7 @@ Turn 4:  web_search for related issues or known behavior if needed
 Turn 5:  Assess confidence; if low → emit INSUFFICIENT_INFORMATION + halt
 Turn 6:  Draft ReproductionPlan JSON
 Turn 7:  Self-review: are all steps executable? Are success criteria objective?
-Turn 8:  Emit output_plan_ready block containing <plan JSON>; Stage 1 is complete
+Turn 8:  send_message(channel="plan_ready", message=<plan JSON>); Stage 1 is complete
 ```
 
 ---

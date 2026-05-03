@@ -321,7 +321,7 @@ jellyfin-auto-tester-kt/
 - **One verification loop only.** The report agent re-runs Stage 2 exactly once using only the written steps. A second failure queues for human review rather than looping again—prevents runaway costs.
 - **Maintainer specifies version.** Docker image version is always a human-provided input, never inferred by the agent, to avoid false reproductions against wrong versions.
 - **Artifacts are stored locally.** All screenshots, logs, and outputs land in `/artifacts/<run-uuid>/` so every run is independently reviewable.
-- **Channel-based decoupling.** Stages communicate via KohakuTerrarium queue channels, not direct function calls, so each stage can be run and debugged independently.
+- **Channel-based decoupling.** Stages communicate via KohakuTerrarium queue channels using explicit `send_message` calls, not direct function calls or named output blocks, so each stage can be run and debugged independently.
 
 ## Channel Consumers
 

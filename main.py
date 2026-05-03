@@ -11,12 +11,10 @@ import os
 import re
 import shlex
 import sys
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, TextIO
 from urllib.parse import urlencode, urlparse
-from uuid import uuid4
 
 from stage1_model_blacklist import is_stage1_model_blacklisted
 
@@ -119,19 +117,6 @@ class StageDebugResult:
     metadata: dict[str, Any] | None = None
 
 
-@dataclass(slots=True)
-class _OutputChannelMessage:
-    """Local ChannelMessage-compatible payload for Terrarium channels."""
-
-    sender: str
-    content: str | dict | list[dict]
-    metadata: dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.now)
-    message_id: str = field(default_factory=lambda: f"msg_{uuid4().hex[:12]}")
-    reply_to: str | None = None
-    channel: str | None = None
-
-
 class _NullOutput:
     """Output sink used when the pipeline fabric owns stdout streaming."""
 
@@ -212,51 +197,6 @@ class _TranscriptOutput:
         self._parts.append(text)
         if self._on_write is not None:
             self._on_write(text)
-
-
-class _AnalysisPlanGuard:
-    """Track whether the current Stage 1 provider response used tools."""
-
-    def __init__(self) -> None:
-        self._processing = False
-        self._response_index = 0
-        self._current_response_index = 0
-        self._tool_call_response_indexes: set[int] = set()
-        self._plan_output_response_indexes: set[int] = set()
-
-    @property
-    def processing(self) -> bool:
-        return self._processing
-
-    @property
-    def current_response_index(self) -> int:
-        return self._current_response_index
-
-    def on_processing_start(self) -> None:
-        self._processing = True
-
-    def on_processing_end(self) -> None:
-        self._processing = False
-
-    def begin_provider_response(self) -> int:
-        self._response_index += 1
-        self._current_response_index = self._response_index
-        return self._current_response_index
-
-    def record_tool_call(self) -> None:
-        self._tool_call_response_indexes.add(self._current_response_index)
-
-    def record_plan_output(self) -> None:
-        self._plan_output_response_indexes.add(self._current_response_index)
-
-    def response_has_tool_calls(self, response_index: int) -> bool:
-        return response_index in self._tool_call_response_indexes
-
-    def current_response_has_tool_calls(self) -> bool:
-        return self.response_has_tool_calls(self._current_response_index)
-
-    def current_response_has_plan_output(self) -> bool:
-        return self._current_response_index in self._plan_output_response_indexes
 
 
 class _AnalysisTranscriptWriter:
@@ -644,7 +584,6 @@ async def run_issue(
     issue_thread = await _prefetch_issue_thread(issue_url, issue_fetcher)
     logger.info("Loading Terrarium recipe from %s", recipe_path)
     engine = await _load_engine(recipe_path, engine_factory=engine_factory)
-    _bind_channel_named_outputs(engine)
     _apply_default_execution_budget(engine)
 
     terminal_task = asyncio.create_task(_wait_for_terminal_message(engine))
@@ -653,12 +592,10 @@ async def run_issue(
         await asyncio.sleep(0)
     analysis_output: list[str] = []
     chat_task: asyncio.Task[None] | None = None
-    plan_guard_hooks: list[tuple[Any, str, Any]] = []
     try:
         prompt = _analysis_prompt(issue_url, container_version, issue_thread)
         analysis_agent = _get_agent(engine, "analysis_agent")
         _suppress_default_output(analysis_agent)
-        plan_guard_hooks = _install_analysis_plan_guard_hooks(analysis_agent)
         current_prompt = prompt
         plan_ready_observed = False
         observer_failed = False
@@ -736,7 +673,7 @@ async def run_issue(
                 break
 
             logger.warning(
-                "Rejecting Stage 1 attempt %s/%s: no plan_ready output observed",
+                "Rejecting Stage 1 attempt %s/%s: no plan_ready channel message observed",
                 attempt,
                 ANALYSIS_PLAN_MAX_ATTEMPTS,
             )
@@ -791,8 +728,6 @@ async def run_issue(
         terminal_task.cancel()
         await _cancel_task(terminal_task)
         raise
-    finally:
-        _restore_analysis_plan_guard_hooks(plan_guard_hooks)
 
 
 async def run_analysis_stage(
@@ -838,12 +773,10 @@ async def run_analysis_stage(
     )
 
     engine = await _load_stage_engine("analysis", engine_factory=engine_factory)
-    _bind_channel_named_outputs(engine)
     plan_task = asyncio.create_task(_receive_channel_message(engine, "plan_ready"))
     await asyncio.sleep(0)
     transcript_parts: list[str] = []
     chat_task: asyncio.Task[None] | None = None
-    plan_guard_hooks: list[tuple[Any, str, Any]] = []
     transcript_message_hooks: list[tuple[Any, str, Any]] = []
     try:
         analysis_agent = _get_agent(engine, "analysis_agent")
@@ -858,7 +791,6 @@ async def run_analysis_stage(
             system_prompt=system_prompt,
         )
         transcript_writer.initialize()
-        plan_guard_hooks = _install_analysis_plan_guard_hooks(analysis_agent)
         transcript_message_hooks = _install_transcript_message_hooks(
             analysis_agent,
             transcript_writer,
@@ -979,7 +911,7 @@ async def run_analysis_stage(
                     break
 
                 logger.warning(
-                    "Rejecting Stage 1 attempt %s/%s: no plan_ready output received",
+                    "Rejecting Stage 1 attempt %s/%s: no plan_ready channel message received",
                     attempt,
                     ANALYSIS_PLAN_MAX_ATTEMPTS,
                 )
@@ -1008,7 +940,6 @@ async def run_analysis_stage(
                 await _cancel_task(chat_task)
             _restore_transcript_output(transcript_capture_state)
             _restore_transcript_message_hooks(transcript_message_hooks)
-            _restore_analysis_plan_guard_hooks(plan_guard_hooks)
         if plan is None:
             transcript_writer.write_snapshot(
                 assistant_output=transcript,
@@ -1431,18 +1362,15 @@ def _analysis_prompt(
 def _analysis_plan_retry_prompt(attempt: int, max_attempts: int) -> str:
     return (
         "REJECTED: Your previous Stage 1 response did not deliver a valid "
-        "`ReproductionPlan` to the `plan_ready` named output. You may have "
-        "claimed that the plan was sent, but the runner did not receive an "
-        "`[/output_plan_ready]... [output_plan_ready/]` block with the actual "
-        "JSON payload.\n\n"
-        f"This is attempt {attempt} of {max_attempts}. Reply with no prose, no "
-        "summary, and no tool calls. Your entire response must be exactly one "
-        "named output block in this form:\n\n"
-        "[/output_plan_ready]\n"
-        "{ ... valid ReproductionPlan JSON ... }\n"
-        "[output_plan_ready/]\n\n"
-        "Do not say the plan has been sent. Do not use `send_message`. If an "
-        "executable plan cannot be produced, reply with "
+        "`ReproductionPlan` to the `plan_ready` channel. You may have claimed "
+        "that the plan was sent, but the runner did not observe a real "
+        "`send_message` delivery to `plan_ready` with the JSON payload.\n\n"
+        f"This is attempt {attempt} of {max_attempts}. Send no prose and no "
+        "summary. Call exactly:\n\n"
+        'send_message(channel="plan_ready", message="<raw ReproductionPlan JSON>")\n\n'
+        "The message value must be the raw JSON object serialized as text, not "
+        "Markdown, not a named output block, and not a description. Do not say "
+        "the plan has been sent. If an executable plan cannot be produced, reply with "
         "`INSUFFICIENT_INFORMATION` and the missing details instead."
     )
 
@@ -1507,13 +1435,13 @@ def _raise_analysis_plan_protocol_error(
 ) -> None:
     if not transcript.strip():
         raise AnalysisAgentEmptyResponseError(
-            "analysis agent returned an empty response without emitting plan_ready "
+            "analysis agent returned an empty response without sending plan_ready "
             f"after {attempts} attempts"
         )
     raise AnalysisAgentProtocolError(
-        f"analysis agent failed to emit plan_ready after {attempts} attempts; "
-        "final Stage 1 output must use "
-        "[/output_plan_ready]...[output_plan_ready/]"
+        f"analysis agent failed to send plan_ready after {attempts} attempts; "
+        "final Stage 1 output must call "
+        'send_message(channel="plan_ready", message="<raw ReproductionPlan JSON>")'
     )
 
 
@@ -1960,187 +1888,6 @@ def _apply_default_execution_budget(engine: Any) -> None:
         _set_if_present(termination, "max_turns", max_turns)
 
 
-class _ChannelOutput:
-    """Named output adapter that writes output blocks to a Terrarium channel."""
-
-    def __init__(self, channel: Any, *, channel_name: str, sender: str) -> None:
-        self._channel = channel
-        self._channel_name = channel_name
-        self._sender = sender
-
-    async def start(self) -> None:
-        pass
-
-    async def stop(self) -> None:
-        pass
-
-    async def write(self, content: str) -> None:
-        await self._send(content)
-
-    async def _send(self, content: str) -> None:
-        message = _OutputChannelMessage(sender=self._sender, content=content)
-        await _maybe_await(self._channel.send(message))
-
-    async def write_stream(self, _chunk: str) -> None:
-        pass
-
-    async def flush(self) -> None:
-        pass
-
-    async def on_processing_start(self) -> None:
-        pass
-
-    async def on_processing_end(self) -> None:
-        pass
-
-    def on_activity(self, _activity_type: str, _detail: str) -> None:
-        pass
-
-    async def on_user_input(self, _text: str) -> None:
-        pass
-
-
-class _DeferredPlanReadyOutput(_ChannelOutput):
-    """Defer Stage 1 plan output until the provider turn is known tool-free."""
-
-    def __init__(
-        self,
-        channel: Any,
-        *,
-        channel_name: str,
-        sender: str,
-        guard: _AnalysisPlanGuard,
-        router: Any,
-        output_name: str,
-    ) -> None:
-        super().__init__(channel, channel_name=channel_name, sender=sender)
-        self._guard = guard
-        self._router = router
-        self._output_name = output_name
-        self._pending_content: str | None = None
-        self._pending_response_index: int | None = None
-
-    async def write(self, content: str) -> None:
-        if not self._guard.processing:
-            await self._send(content)
-            return
-        self._guard.record_plan_output()
-        self._pending_content = content
-        self._pending_response_index = self._guard.current_response_index
-
-    async def on_processing_start(self) -> None:
-        self._guard.on_processing_start()
-
-    async def on_processing_end(self) -> None:
-        self._guard.on_processing_end()
-        if self._pending_content is None:
-            return
-
-        content = self._pending_content
-        response_index = self._pending_response_index
-        self._pending_content = None
-        self._pending_response_index = None
-        if (
-            response_index is not None
-            and self._guard.response_has_tool_calls(response_index)
-        ):
-            self._remove_completed_output(content)
-            _logger().info(
-                "Discarding Stage 1 plan_ready output from tool-calling response"
-            )
-            return
-        await self._send(content)
-
-    def _remove_completed_output(self, content: str) -> None:
-        completed = getattr(self._router, "_completed_outputs", None)
-        if not isinstance(completed, list):
-            return
-        for index in range(len(completed) - 1, -1, -1):
-            item = completed[index]
-            if (
-                getattr(item, "target", None) == self._output_name
-                and getattr(item, "content", None) == content
-            ):
-                completed.pop(index)
-                return
-
-
-def _remove_completed_named_outputs(router: Any, output_name: str) -> None:
-    completed = getattr(router, "_completed_outputs", None)
-    if not isinstance(completed, list):
-        return
-    completed[:] = [
-        item
-        for item in completed
-        if getattr(item, "target", None) != output_name
-    ]
-
-
-def _bind_channel_named_outputs(engine: Any) -> None:
-    """Bind ``type: channel`` named outputs to Terrarium shared channels.
-
-    KohakuTerrarium's generic output factory does not currently ship a builtin
-    ``channel`` output type, so those entries otherwise fall back to stdout.
-    """
-
-    for agent_name in ("analysis_agent", "execution_agent", "report_agent"):
-        try:
-            creature_or_agent = _get_agent(engine, agent_name)
-        except Exception:
-            continue
-
-        # Terrarium returns a ``Creature`` wrapper; the OutputRouter and the
-        # AgentConfig with named_outputs live on the inner Agent.
-        agent = getattr(creature_or_agent, "agent", creature_or_agent)
-
-        router = getattr(agent, "output_router", None)
-        named_outputs = getattr(router, "named_outputs", None)
-        if not isinstance(named_outputs, dict):
-            continue
-
-        config = getattr(agent, "config", None)
-        output_config = getattr(config, "output", None)
-        output_items = getattr(output_config, "named_outputs", None)
-        if not isinstance(output_items, dict):
-            continue
-
-        sender = _nonempty_string(getattr(config, "name", None)) or agent_name
-        for output_name, output_item in output_items.items():
-            if getattr(output_item, "type", None) != "channel":
-                continue
-            options = getattr(output_item, "options", {}) or {}
-            channel_name = options.get("channel") or output_name
-            channel = _get_channel(engine, channel_name)
-            if channel is None:
-                _logger().warning(
-                    "Named output channel not found for %s.%s -> %s",
-                    agent_name,
-                    output_name,
-                    channel_name,
-                )
-                continue
-            guard = _analysis_plan_guard(creature_or_agent)
-            if (
-                agent_name == "analysis_agent"
-                and output_name == "plan_ready"
-                and channel_name == "plan_ready"
-            ):
-                named_outputs[output_name] = _DeferredPlanReadyOutput(
-                    channel,
-                    channel_name=channel_name,
-                    sender=sender,
-                    guard=guard,
-                    router=router,
-                    output_name=output_name,
-                )
-            else:
-                named_outputs[output_name] = _ChannelOutput(
-                    channel,
-                    channel_name=channel_name,
-                    sender=sender,
-                )
-
-
 def apply_execution_turn_budget(engine: Any, plan: dict[str, Any]) -> tuple[int, int]:
     """Apply the master-plan Stage 2 budget for a concrete ReproductionPlan.
 
@@ -2412,125 +2159,6 @@ def _restore_transcript_output(
         return
     _, output_router, default_output = state
     setattr(output_router, "default_output", default_output)
-
-
-def _analysis_plan_guard(creature_or_agent: Any) -> _AnalysisPlanGuard:
-    agent = getattr(creature_or_agent, "agent", creature_or_agent)
-    guard = getattr(agent, "_analysis_plan_guard", None)
-    if not isinstance(guard, _AnalysisPlanGuard):
-        guard = _AnalysisPlanGuard()
-        setattr(agent, "_analysis_plan_guard", guard)
-    return guard
-
-
-def _install_analysis_plan_guard_hooks(
-    creature_or_agent: Any,
-) -> list[tuple[Any, str, Any]]:
-    guard = _analysis_plan_guard(creature_or_agent)
-    states: list[tuple[Any, str, Any]] = []
-    agent = getattr(creature_or_agent, "agent", creature_or_agent)
-
-    output_router = getattr(agent, "output_router", None)
-    notify_activity = getattr(output_router, "notify_activity", None)
-    if callable(notify_activity):
-        setattr(
-            output_router,
-            "notify_activity",
-            _analysis_guard_activity_hook(notify_activity, guard),
-        )
-        states.append((output_router, "notify_activity", notify_activity))
-
-    llm = _agent_llm(creature_or_agent)
-    chat = getattr(llm, "chat", None) if llm is not None else None
-    if callable(chat):
-        setattr(llm, "chat", _analysis_guard_chat_hook(chat, guard, llm))
-        states.append((llm, "chat", chat))
-
-    check_termination = getattr(agent, "_check_termination", None)
-    if callable(check_termination):
-        setattr(
-            agent,
-            "_check_termination",
-            _analysis_guard_termination_hook(check_termination, guard, output_router),
-        )
-        states.append((agent, "_check_termination", check_termination))
-
-    return states
-
-
-def _restore_analysis_plan_guard_hooks(states: list[tuple[Any, str, Any]]) -> None:
-    for target, name, original in reversed(states):
-        setattr(target, name, original)
-
-
-def _analysis_guard_activity_hook(
-    original_notify_activity: Callable[..., Any],
-    guard: _AnalysisPlanGuard,
-) -> Callable[..., Any]:
-    def wrapper(activity_type: str, *args: Any, **kwargs: Any) -> Any:
-        if _is_tool_call_activity(activity_type):
-            guard.record_tool_call()
-        return original_notify_activity(activity_type, *args, **kwargs)
-
-    return wrapper
-
-
-def _analysis_guard_chat_hook(
-    original_chat: Callable[..., Any],
-    guard: _AnalysisPlanGuard,
-    llm: Any,
-) -> Callable[..., Any]:
-    async def wrapper(messages: Any, *args: Any, **kwargs: Any):
-        guard.begin_provider_response()
-        async for chunk in original_chat(messages, *args, **kwargs):
-            yield chunk
-        if _last_provider_tool_calls(llm):
-            guard.record_tool_call()
-
-    return wrapper
-
-
-def _analysis_guard_termination_hook(
-    original_check_termination: Callable[..., Any],
-    guard: _AnalysisPlanGuard,
-    output_router: Any,
-) -> Callable[..., Any]:
-    def wrapper(round_text: list[str]) -> bool:
-        if guard.current_response_has_tool_calls():
-            if guard.current_response_has_plan_output():
-                _remove_completed_named_outputs(output_router, "plan_ready")
-                _logger().info(
-                    "Discarding Stage 1 plan_ready output from tool-calling response"
-                )
-            _logger().info(
-                "Deferring Stage 1 termination for provider response with tool calls"
-            )
-            return False
-        if guard.current_response_has_plan_output():
-            _logger().info("Observed Stage 1 plan_ready output; ending analysis turn")
-            return True
-        return original_check_termination(round_text)
-
-    return wrapper
-
-
-def _is_tool_call_activity(activity_type: Any) -> bool:
-    return str(activity_type) in {"tool_start", "subagent_start"}
-
-
-def _last_provider_tool_calls(llm: Any) -> list[Any]:
-    tool_calls = getattr(llm, "last_tool_calls", None)
-    if callable(tool_calls):
-        try:
-            tool_calls = tool_calls()
-        except TypeError:
-            tool_calls = None
-    if isinstance(tool_calls, Iterable) and not isinstance(
-        tool_calls,
-        (str, bytes, dict),
-    ):
-        return [call for call in tool_calls if call]
-    return []
 
 
 def _install_transcript_message_hooks(
