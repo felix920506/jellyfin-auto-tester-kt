@@ -398,7 +398,7 @@ class BrowserDriver:
             return
         page.wait_for_function(
             "expected => document.body && document.body.innerText.includes(expected)",
-            text,
+            arg=text,
             timeout=timeout_ms,
         )
 
@@ -421,7 +421,7 @@ class BrowserDriver:
         timeout_ms: int,
     ) -> None:
         state = str(action.get("state") or action.get("value") or "playing")
-        page.wait_for_function(MEDIA_WAIT_SCRIPT, state, timeout=timeout_ms)
+        page.wait_for_function(MEDIA_WAIT_SCRIPT, arg=state, timeout=timeout_ms)
 
     def _action_evaluate(self, page: Any, action: Mapping[str, Any]) -> Any:
         script = action.get("script") or action.get("expression")

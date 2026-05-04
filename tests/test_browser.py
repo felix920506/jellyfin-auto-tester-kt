@@ -148,7 +148,7 @@ class FakePage:
     def wait_for_timeout(self, timeout):
         self.calls.append(("wait_for_timeout", timeout))
 
-    def wait_for_function(self, script, arg=None, timeout=None):
+    def wait_for_function(self, script, *, arg=None, timeout=None, polling=None):
         self.calls.append(("wait_for_function", script, arg, timeout))
 
     def wait_for_url(self, target, timeout=None):

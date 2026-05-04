@@ -2,11 +2,13 @@ import asyncio
 import copy
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import call, patch
 
 import tools.web_client_runner as web_client_runner_module
+from tools.async_compat import shutdown_sync_workers
 from tools.web_client_runner import (
     WebClientExecutePlanTool,
     WebClientPlanSessionTool,
@@ -62,6 +64,24 @@ def demo_browser_plan(release_track="stable", include_base_url=True):
             f"https://demo.jellyfin.org/{release_track}"
         )
     return plan
+
+
+class ThreadTrackingBrowserDriver(FakeBrowserDriver):
+    def __init__(self, artifacts_root, results=None):
+        super().__init__(artifacts_root, results=results)
+        self.thread_events = []
+
+    def configure(self, base_url=None, run_id=None):
+        self.thread_events.append(("configure", threading.get_ident()))
+        return super().configure(base_url=base_url, run_id=run_id)
+
+    def run(self, browser_input, run_id, step_id=None):
+        self.thread_events.append(("run", threading.get_ident()))
+        return super().run(browser_input, run_id=run_id, step_id=step_id)
+
+    def close(self):
+        self.thread_events.append(("close", threading.get_ident()))
+        return super().close()
 
 
 class WebClientRunnerTests(unittest.TestCase):
@@ -812,6 +832,115 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(start["session_id"], "module-session")
             self.assertEqual(action["status"], "pass")
             self.assertEqual(len(browser_driver.runs), 1)
+
+    def test_module_level_run_task_uses_same_worker_thread_inside_event_loop(self):
+        main_thread = threading.get_ident()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = ThreadTrackingBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "module-session",
+            )
+            previous = web_client_runner_module._DEFAULT_TASK_RUNNER
+            web_client_runner_module._DEFAULT_TASK_RUNNER = runner
+
+            async def exercise():
+                start = web_client_runner_module.run_task(
+                    {
+                        "command": "start",
+                        "request_id": "worker-start",
+                        "run_id": "worker-task-run",
+                        "base_url": "http://localhost:9000",
+                        "artifacts_root": temp_dir,
+                        "browser_input": {"path": "/web"},
+                    }
+                )
+                action = web_client_runner_module.run_task(
+                    {
+                        "command": "action",
+                        "request_id": "worker-action",
+                        "session_id": start["session_id"],
+                        "action": {"type": "goto"},
+                    }
+                )
+                final = web_client_runner_module.run_task(
+                    {
+                        "command": "finalize",
+                        "request_id": "worker-finalize",
+                        "session_id": start["session_id"],
+                    }
+                )
+                return start, action, final
+
+            try:
+                start, action, final = asyncio.run(exercise())
+            finally:
+                web_client_runner_module._DEFAULT_TASK_RUNNER = previous
+                shutdown_sync_workers()
+
+            thread_ids = {thread_id for _event, thread_id in browser_driver.thread_events}
+            self.assertEqual(start["session_id"], "module-session")
+            self.assertEqual(action["status"], "pass")
+            self.assertEqual(final["status"], "pass")
+            self.assertEqual(len(thread_ids), 1)
+            self.assertNotEqual(next(iter(thread_ids)), main_thread)
+
+    def test_module_level_plan_session_uses_same_worker_thread_inside_event_loop(self):
+        main_thread = threading.get_ident()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = ThreadTrackingBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "module-plan-session",
+            )
+            previous = web_client_runner_module._DEFAULT_PLAN_SESSION_RUNNER
+            web_client_runner_module._DEFAULT_PLAN_SESSION_RUNNER = runner
+
+            async def exercise():
+                start = web_client_runner_module.plan_session(
+                    {
+                        "command": "start",
+                        "request_id": "worker-start",
+                        "run_id": "worker-plan-run",
+                        "plan": demo_browser_plan(),
+                    }
+                )
+                action = web_client_runner_module.plan_session(
+                    {
+                        "command": "next_action",
+                        "request_id": "worker-next",
+                        "session_id": start["session_id"],
+                    }
+                )
+                final = web_client_runner_module.plan_session(
+                    {
+                        "command": "finalize",
+                        "request_id": "worker-finalize",
+                        "session_id": start["session_id"],
+                    }
+                )
+                return start, action, final
+
+            try:
+                start, action, final = asyncio.run(exercise())
+            finally:
+                web_client_runner_module._DEFAULT_PLAN_SESSION_RUNNER = previous
+                shutdown_sync_workers()
+
+            thread_ids = {thread_id for _event, thread_id in browser_driver.thread_events}
+            self.assertEqual(start["session_id"], "module-plan-session")
+            self.assertEqual(action["status"], "pass")
+            self.assertEqual(final["overall_result"], "reproduced")
+            self.assertEqual(len(thread_ids), 1)
+            self.assertNotEqual(next(iter(thread_ids)), main_thread)
 
 
 class WebClientRunnerToolTests(unittest.TestCase):

@@ -1960,11 +1960,9 @@ def run_task(
     task: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    global _DEFAULT_TASK_RUNNER
-    if _DEFAULT_TASK_RUNNER is None:
-        _DEFAULT_TASK_RUNNER = WebClientRunner()
     return run_sync_away_from_loop(
-        lambda: _DEFAULT_TASK_RUNNER.run_task(task=task, **kwargs)
+        lambda: _run_task_on_worker(task=task, **kwargs),
+        worker_key="web_client_run_task",
     )
 
 
@@ -1972,16 +1970,34 @@ def plan_session(
     request: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    global _DEFAULT_PLAN_SESSION_RUNNER
-    if _DEFAULT_PLAN_SESSION_RUNNER is None:
-        _DEFAULT_PLAN_SESSION_RUNNER = WebClientRunner()
     return run_sync_away_from_loop(
-        lambda: _DEFAULT_PLAN_SESSION_RUNNER.plan_session(request=request, **kwargs)
+        lambda: _run_plan_session_on_worker(request=request, **kwargs),
+        worker_key="web_client_plan_session",
     )
 
 
 _DEFAULT_TASK_RUNNER: WebClientRunner | None = None
 _DEFAULT_PLAN_SESSION_RUNNER: WebClientRunner | None = None
+
+
+def _run_task_on_worker(
+    task: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    global _DEFAULT_TASK_RUNNER
+    if _DEFAULT_TASK_RUNNER is None:
+        _DEFAULT_TASK_RUNNER = WebClientRunner()
+    return _DEFAULT_TASK_RUNNER.run_task(task=task, **kwargs)
+
+
+def _run_plan_session_on_worker(
+    request: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    global _DEFAULT_PLAN_SESSION_RUNNER
+    if _DEFAULT_PLAN_SESSION_RUNNER is None:
+        _DEFAULT_PLAN_SESSION_RUNNER = WebClientRunner()
+    return _DEFAULT_PLAN_SESSION_RUNNER.plan_session(request=request, **kwargs)
 
 
 class WebClientPlanSessionTool(BaseTool):
