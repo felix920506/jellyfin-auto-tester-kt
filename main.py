@@ -671,6 +671,9 @@ async def run_issue(
                 logger.info("Stage 1 stopped with insufficient information")
                 terminal_task.cancel()
                 await _cancel_task(terminal_task)
+                if plan_observer_task is not None and not plan_observer_task.done():
+                    plan_observer_task.cancel()
+                    await _cancel_task(plan_observer_task)
                 return PipelineResult(
                     channel="analysis",
                     message=transcript.strip(),
@@ -696,6 +699,9 @@ async def run_issue(
             logger.info("Stage 1 stopped with insufficient information")
             terminal_task.cancel()
             await _cancel_task(terminal_task)
+            if plan_observer_task is not None and not plan_observer_task.done():
+                plan_observer_task.cancel()
+                await _cancel_task(plan_observer_task)
             return PipelineResult(
                 channel="analysis",
                 message=transcript.strip(),

@@ -939,6 +939,29 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "insufficient_information")
         self.assertIn("missing steps", result.message)
 
+    async def test_run_issue_cleans_plan_observers_on_insufficient_information(self):
+        plan_channel = FakeOnSendChannel("plan_ready")
+        web_plan_channel = FakeOnSendChannel("web_client_plan_ready")
+        engine = FakeEngine(
+            ["INSUFFICIENT_INFORMATION\nmissing steps\n"],
+            channels={
+                "plan_ready": plan_channel,
+                "web_client_plan_ready": web_plan_channel,
+            },
+        )
+
+        result = await run_issue(
+            "https://github.com/jellyfin/jellyfin/issues/2",
+            "10.9.7",
+            stream=None,
+            engine_factory=lambda recipe: engine,
+            issue_fetcher=_sample_issue_fetcher,
+        )
+
+        self.assertEqual(result.status, "insufficient_information")
+        self.assertEqual(plan_channel.callbacks, [])
+        self.assertEqual(web_plan_channel.callbacks, [])
+
     async def test_channel_listener_observes_kohaku_graph_environment_channel(self):
         channel = FakeOnSendChannel()
         engine = FakeGraphEngine({"final_report": channel})
