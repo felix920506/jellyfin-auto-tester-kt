@@ -1,11 +1,17 @@
+import asyncio
 import copy
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import call, patch
 
 import tools.web_client_runner as web_client_runner_module
-from tools.web_client_runner import WebClientRunner
+from tools.web_client_runner import (
+    WebClientExecutePlanTool,
+    WebClientRunTaskTool,
+    WebClientRunner,
+)
 
 from tests.test_execution_runner import (
     FakeAPI,
@@ -578,6 +584,90 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(start["session_id"], "module-session")
             self.assertEqual(action["status"], "pass")
             self.assertEqual(len(browser_driver.runs), 1)
+
+
+class WebClientRunnerToolTests(unittest.TestCase):
+    def test_execute_plan_tool_accepts_wrapped_json_body(self):
+        plan = browser_plan()
+        payload = {"plan": plan, "run_id": "tool-run"}
+        expected = {"overall_result": "reproduced", "run_id": "tool-run"}
+
+        with patch.object(
+            web_client_runner_module,
+            "execute_plan",
+            return_value=expected,
+        ) as execute_plan:
+            result = asyncio.run(
+                WebClientExecutePlanTool()._execute(
+                    {"content": json.dumps(payload)}
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(json.loads(result.output), expected)
+        execute_plan.assert_called_once_with(plan=plan, run_id="tool-run")
+
+    def test_execute_plan_tool_accepts_raw_plan_payload(self):
+        plan = browser_plan()
+        expected = {"overall_result": "reproduced", "run_id": "generated-run"}
+
+        with patch.object(
+            web_client_runner_module,
+            "execute_plan",
+            return_value=expected,
+        ) as execute_plan:
+            result = asyncio.run(WebClientExecutePlanTool()._execute(plan))
+
+        self.assertIsNone(result.error)
+        self.assertEqual(json.loads(result.output), expected)
+        execute_plan.assert_called_once_with(plan=plan, run_id=None)
+
+    def test_run_task_tool_accepts_wrapped_and_raw_payloads(self):
+        task = {
+            "command": "start",
+            "request_id": "task-1",
+            "run_id": "task-run",
+            "base_url": "http://localhost:9000",
+            "artifacts_root": "/tmp/artifacts",
+        }
+        expected = {"request_id": "task-1", "status": "pass"}
+
+        with patch.object(
+            web_client_runner_module,
+            "run_task",
+            return_value=expected,
+        ) as run_task_tool:
+            wrapped = asyncio.run(
+                WebClientRunTaskTool()._execute(
+                    {"content": json.dumps({"task": task})}
+                )
+            )
+            raw = asyncio.run(WebClientRunTaskTool()._execute(task))
+
+        self.assertIsNone(wrapped.error)
+        self.assertEqual(json.loads(wrapped.output), expected)
+        self.assertIsNone(raw.error)
+        self.assertEqual(json.loads(raw.output), expected)
+        self.assertEqual(
+            run_task_tool.call_args_list,
+            [
+                call(task=task),
+                call(task=task),
+            ],
+        )
+
+    def test_tool_malformed_json_returns_error(self):
+        with patch.object(
+            web_client_runner_module,
+            "execute_plan",
+        ) as execute_plan:
+            result = asyncio.run(
+                WebClientExecutePlanTool()._execute({"content": "{not json"})
+            )
+
+        self.assertIsNotNone(result.error)
+        self.assertIn("malformed JSON", result.error)
+        execute_plan.assert_not_called()
 
 
 if __name__ == "__main__":

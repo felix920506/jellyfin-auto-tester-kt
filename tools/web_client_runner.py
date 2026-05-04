@@ -10,12 +10,31 @@ import subprocess
 import time
 import uuid
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
 from urllib.request import urlretrieve
+
+try:
+    from kohakuterrarium.modules.tool.base import BaseTool, ExecutionMode, ToolResult
+except Exception:
+    class _FallbackExecutionMode:
+        DIRECT = "direct"
+
+    class BaseTool:
+        def __init__(self, config: Any | None = None, **_kwargs: Any) -> None:
+            self.config = config
+
+    @dataclass
+    class ToolResult:
+        output: str = ""
+        exit_code: int | None = None
+        error: str | None = None
+        metadata: dict[str, Any] = field(default_factory=dict)
+
+    ExecutionMode = _FallbackExecutionMode()
 
 from tools.async_compat import run_sync_away_from_loop
 from tools.browser import BrowserDriver
@@ -1364,6 +1383,291 @@ def run_task(
 
 
 _DEFAULT_TASK_RUNNER: WebClientRunner | None = None
+
+
+class WebClientExecutePlanTool(BaseTool):
+    """KT tool wrapper for full web-client ReproductionPlan execution."""
+
+    is_concurrency_safe = False
+
+    def __init__(self, config: Any | None = None, **_unused: Any) -> None:
+        super().__init__(config=config)
+
+    @property
+    def tool_name(self) -> str:
+        return "web_client_execute_plan"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Execute a Jellyfin Web ReproductionPlan and return the raw "
+            "ExecutionResult JSON."
+        )
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        return ExecutionMode.DIRECT
+
+    def get_parameters_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": True,
+            "properties": {
+                "plan": {
+                    "type": "object",
+                    "description": (
+                        "A ReproductionPlan. If omitted, the whole tool "
+                        "payload is treated as the plan."
+                    ),
+                },
+                "run_id": {
+                    "type": "string",
+                    "description": "Optional run identifier for artifacts.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Bracket-call JSON body.",
+                },
+            },
+        }
+
+    def prompt_contribution(self) -> str | None:
+        return (
+            "Call `web_client_execute_plan` with bracket-body JSON: either "
+            "`{\"plan\": {...}, \"run_id\": \"...\"}` or a raw "
+            "ReproductionPlan object. Send its returned JSON unchanged to "
+            "`execution_done`."
+        )
+
+    async def _execute(self, args: dict[str, Any], **_kwargs: Any) -> ToolResult:
+        plan, run_id, error = _execute_plan_tool_args(args)
+        if error:
+            return ToolResult(error=error)
+        try:
+            result = execute_plan(plan=plan, run_id=run_id)
+        except Exception as exc:
+            return ToolResult(error=f"web_client_execute_plan failed: {exc}")
+        return ToolResult(
+            output=json.dumps(result, ensure_ascii=False, indent=2),
+            exit_code=0,
+        )
+
+
+class WebClientRunTaskTool(BaseTool):
+    """KT tool wrapper for delegated interactive browser task commands."""
+
+    is_concurrency_safe = False
+
+    def __init__(self, config: Any | None = None, **_unused: Any) -> None:
+        super().__init__(config=config)
+
+    @property
+    def tool_name(self) -> str:
+        return "web_client_run_task"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Run one web_client_task browser-session command and return the "
+            "raw WebClientResult JSON."
+        )
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        return ExecutionMode.DIRECT
+
+    def get_parameters_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": True,
+            "properties": {
+                "task": {
+                    "type": "object",
+                    "description": (
+                        "A WebClientTask. If omitted, the whole tool payload "
+                        "is treated as the task."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Bracket-call JSON body.",
+                },
+            },
+        }
+
+    def prompt_contribution(self) -> str | None:
+        return (
+            "Call `web_client_run_task` with bracket-body JSON: either "
+            "`{\"task\": {...}}` or a raw WebClientTask object. Send its "
+            "returned JSON unchanged to `web_client_done`."
+        )
+
+    async def _execute(self, args: dict[str, Any], **_kwargs: Any) -> ToolResult:
+        task, error = _run_task_tool_args(args)
+        if error:
+            return ToolResult(error=error)
+        try:
+            result = run_task(task=task)
+        except Exception as exc:
+            return ToolResult(error=f"web_client_run_task failed: {exc}")
+        return ToolResult(
+            output=json.dumps(result, ensure_ascii=False, indent=2),
+            exit_code=0,
+        )
+
+
+def _execute_plan_tool_args(
+    args: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    payload, raw_args, error = _tool_payload_object(
+        args,
+        tool_name="web_client_execute_plan",
+    )
+    if error:
+        return None, None, error
+
+    run_id = _optional_tool_string(
+        payload.get("run_id")
+        if "run_id" in payload
+        else raw_args.get("run_id")
+    )
+    if "plan" in payload:
+        plan, plan_error = _json_object_value(payload["plan"], "plan")
+        if plan_error:
+            return None, None, plan_error
+        if not _looks_like_reproduction_plan(plan):
+            return (
+                None,
+                None,
+                "plan must be a ReproductionPlan object with reproduction_steps",
+            )
+        return plan, run_id, None
+
+    plan = _without_tool_only_keys(payload, {"run_id"})
+    if not _looks_like_reproduction_plan(plan):
+        return (
+            None,
+            None,
+            (
+                "web_client_execute_plan missing plan: expected "
+                "{\"plan\": {...}} or raw ReproductionPlan JSON"
+            ),
+        )
+    return plan, run_id, None
+
+
+def _run_task_tool_args(
+    args: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    payload, _raw_args, error = _tool_payload_object(
+        args,
+        tool_name="web_client_run_task",
+    )
+    if error:
+        return None, error
+
+    if "task" in payload:
+        task, task_error = _json_object_value(payload["task"], "task")
+        if task_error:
+            return None, task_error
+        if not _looks_like_web_client_task(task):
+            return None, "task must be a WebClientTask object"
+        return task, None
+
+    task = _without_tool_only_keys(payload)
+    if not _looks_like_web_client_task(task):
+        return (
+            None,
+            (
+                "web_client_run_task missing task: expected "
+                "{\"task\": {...}} or raw WebClientTask JSON"
+            ),
+        )
+    return task, None
+
+
+def _tool_payload_object(
+    args: Mapping[str, Any] | None,
+    *,
+    tool_name: str,
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    if args is None:
+        raw_args: dict[str, Any] = {}
+    elif isinstance(args, Mapping):
+        raw_args = dict(args)
+    else:
+        return {}, {}, f"{tool_name} arguments must be an object"
+
+    if "content" not in raw_args:
+        return dict(raw_args), raw_args, None
+
+    content = raw_args.get("content")
+    if content is None or (isinstance(content, str) and not content.strip()):
+        return {}, raw_args, f"{tool_name} JSON body is empty"
+
+    payload, error = _json_object_value(content, f"{tool_name} JSON body")
+    if error:
+        return {}, raw_args, error
+    return payload, raw_args, None
+
+
+def _json_object_value(
+    value: Any,
+    label: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if isinstance(value, Mapping):
+        return deepcopy(dict(value)), None
+    if not isinstance(value, str):
+        return None, f"{label} must be a JSON object"
+
+    text = value.strip()
+    if not text:
+        return None, f"{label} is empty"
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return (
+            None,
+            (
+                f"malformed JSON in {label}: {exc.msg} "
+                f"at line {exc.lineno} column {exc.colno}"
+            ),
+        )
+    if not isinstance(decoded, Mapping):
+        return None, f"{label} must decode to a JSON object"
+    return deepcopy(dict(decoded)), None
+
+
+def _without_tool_only_keys(
+    payload: Mapping[str, Any],
+    extra: set[str] | None = None,
+) -> dict[str, Any]:
+    tool_keys = {"_tool_call_id", "content", *(extra or set())}
+    return {
+        key: deepcopy(value)
+        for key, value in payload.items()
+        if key not in tool_keys
+    }
+
+
+def _looks_like_reproduction_plan(value: Any) -> bool:
+    return isinstance(value, Mapping) and isinstance(
+        value.get("reproduction_steps"),
+        list,
+    )
+
+
+def _looks_like_web_client_task(value: Any) -> bool:
+    return isinstance(value, Mapping) and (
+        "command" in value or "request_id" in value
+    )
+
+
+def _optional_tool_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _trigger_tool(plan: dict[str, Any]) -> str | None:

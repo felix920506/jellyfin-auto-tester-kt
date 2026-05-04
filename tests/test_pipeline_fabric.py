@@ -437,20 +437,6 @@ class ProviderWebClientStageEngine(FakeWebClientStageEngine):
         self.received_channel = pending[message_task]
         message = message_task.result()
         self.received_payload = json.loads(message.content)
-
-        conversation = self.web_client_agent.agent.controller.conversation
-        conversation.append(
-            "user",
-            f"Channel: {self.received_channel}\n{message.content}",
-        )
-        response_parts = []
-        async for chunk in self.web_client_agent.agent.llm.chat(
-            conversation.to_messages(),
-            stream=True,
-        ):
-            response_parts.append(chunk)
-        conversation.append("assistant", "".join(response_parts))
-
         plan = self.received_payload.get("plan", self.received_payload)
         run_id = self.received_payload.get("run_id") or self.default_run_id
         result = {
@@ -465,6 +451,26 @@ class ProviderWebClientStageEngine(FakeWebClientStageEngine):
             "jellyfin_logs": "",
             "error_summary": None,
         }
+
+        conversation = self.web_client_agent.agent.controller.conversation
+        conversation.append(
+            "user",
+            f"Channel: {self.received_channel}\n{message.content}",
+        )
+        response_parts = []
+        async for chunk in self.web_client_agent.agent.llm.chat(
+            conversation.to_messages(),
+            stream=True,
+        ):
+            response_parts.append(chunk)
+        assistant_response = "".join(response_parts)
+        conversation.append("assistant", assistant_response)
+        if "[/web_client_execute_plan]" in assistant_response:
+            conversation.append(
+                "tool",
+                json.dumps(result),
+                name="web_client_execute_plan",
+            )
         await self.channels["execution_done"].send(
             types.SimpleNamespace(
                 sender=self.agent_sender,
@@ -1966,10 +1972,16 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
     def test_run_web_client_stage_writes_provider_transcript(self):
         plan = _sample_web_client_plan()
+        tool_call = (
+            "[/web_client_execute_plan]\n"
+            + json.dumps({"plan": plan, "run_id": "web-run-transcript"})
+            + "\n"
+            + "[web_client_execute_plan/]\n"
+        )
         llm = FakeProviderLLM(
             [
                 [
-                    "calling runner\n",
+                    tool_call,
                     "WEB_CLIENT_COMPLETE\n",
                 ]
             ]
@@ -2007,7 +2019,15 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [message["role"] for message in transcript_payload["messages"]],
-            ["user", "assistant"],
+            ["user", "assistant", "tool"],
+        )
+        self.assertIn(
+            "[/web_client_execute_plan]",
+            transcript_payload["messages"][1]["content"],
+        )
+        self.assertEqual(
+            transcript_payload["messages"][2]["name"],
+            "web_client_execute_plan",
         )
         self.assertIn(
             "WEB_CLIENT_COMPLETE",

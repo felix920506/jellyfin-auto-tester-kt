@@ -20,9 +20,10 @@ Do not listen to or depend on `plan_ready`, standard `verification_request`,
 
 For a `web_client_plan_ready` or `web_client_verification_request` message:
 
-1. Call `web_client_runner.execute_plan(plan=<incoming ReproductionPlan JSON>)`.
-   If the message is a wrapper object with `plan` and `run_id`, use the inner
-   `plan` as the ReproductionPlan and pass `run_id` to the tool.
+1. Call `web_client_execute_plan` using a bracket tool block whose body is raw
+   JSON. If the message is a wrapper object with `plan` and `run_id`, pass that
+   wrapper unchanged. Otherwise pass the incoming ReproductionPlan JSON as the
+   raw body.
 2. Send the returned JSON unchanged to `execution_done`.
 3. Emit `WEB_CLIENT_COMPLETE`.
 
@@ -40,7 +41,9 @@ ExecutionResult.
 
 For a `web_client_task` message:
 
-1. Call `web_client_runner.run_task(task=<incoming WebClientTask JSON>)`.
+1. Call `web_client_run_task` using a bracket tool block whose body is raw JSON.
+   If the message is a wrapper object with `task`, pass that wrapper unchanged.
+   Otherwise pass the incoming WebClientTask JSON as the raw body.
 2. Send the returned JSON unchanged to `web_client_done`.
 3. Emit `WEB_CLIENT_COMPLETE`.
 

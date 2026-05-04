@@ -2,6 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
+import yaml
 from jsonschema import Draft202012Validator
 
 from main import _normalize_reproduction_plan
@@ -310,6 +311,34 @@ class BrowserContractTests(unittest.TestCase):
         self.assertIn("one action per browser task", web_client_prompt)
         self.assertIn("Wait for `web_client_done`", web_client_prompt)
         self.assertIn('command: "finalize"', web_client_prompt)
+
+    def test_web_client_tool_contract_uses_valid_tool_names(self):
+        config = yaml.safe_load(
+            (REPO_ROOT / "creatures" / "web_client" / "config.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        package_tools = {
+            tool["name"]: tool
+            for tool in config.get("tools", [])
+            if tool.get("type") == "package"
+        }
+        prompt = (
+            REPO_ROOT / "creatures" / "web_client" / "prompts" / "system.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(
+            package_tools["web_client_execute_plan"]["class_name"],
+            "WebClientExecutePlanTool",
+        )
+        self.assertEqual(
+            package_tools["web_client_run_task"]["class_name"],
+            "WebClientRunTaskTool",
+        )
+        self.assertIn("web_client_execute_plan", prompt)
+        self.assertIn("web_client_run_task", prompt)
+        self.assertNotIn("web_client_runner.execute_plan", prompt)
+        self.assertNotIn("web_client_runner.run_task", prompt)
 
     def test_plan_normalization_defaults_browser_criteria_to_action_run(self):
         plan = minimal_plan()

@@ -3,11 +3,11 @@
 Stage 2 peer for pure Jellyfin Web client issues and delegated browser tasks.
 
 Full-plan mode listens on `web_client_plan_ready`, runs
-`web_client_runner.execute_plan`, and sends the returned standard
+`web_client_execute_plan`, and sends the returned standard
 `ExecutionResult` unchanged to `execution_done`.
 
 Task mode listens on `web_client_task` and runs the interactive browser session
 protocol: `start` creates a session, each `action` message executes exactly one
 Playwright action, and `finalize` closes the browser. The returned
-`WebClientResult` is sent to `web_client_done`. Task mode never starts or stops
-Docker.
+`WebClientResult` from `web_client_run_task` is sent to `web_client_done`. Task
+mode never starts or stops Docker.
