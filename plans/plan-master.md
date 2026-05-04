@@ -344,7 +344,6 @@ Used for interactive browser delegation during a standard execution run.
 {
   "command": "start | action | finalize",
   "request_id": "string",
-  "session_id": "string | null",
   "run_id": "string | null",
   "base_url": "string | null",
   "artifacts_root": "string | null",

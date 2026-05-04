@@ -91,7 +91,6 @@ class _TaskBrowserSession:
 
 @dataclass
 class _WebClientSession:
-    session_id: str
     request_id: str
     run_id: str
     artifacts_root: Path
@@ -138,7 +137,7 @@ class WebClientRunner:
         self.command_runner = command_runner or self._run_bash
         self.uuid_factory = uuid_factory
         self._task_sessions: dict[str, _TaskBrowserSession] = {}
-        self._web_sessions: dict[str, _WebClientSession] = {}
+        self._web_session: _WebClientSession | None = None
 
     def execute_plan(
         self,
@@ -558,15 +557,14 @@ class WebClientRunner:
         payload = dict(request or kwargs)
         request_id_value = payload.get("request_id")
         request_id = str(request_id_value or "unknown")
-        session_id = str(payload.get("session_id") or "")
         command = str(payload.get("command") or "").strip().lower()
 
         if not request_id_value:
-            return _web_client_error(request_id, "request_id is required", session_id)
+            return _web_client_error(request_id, "request_id is required")
 
         legacy_error = _legacy_session_payload_error(payload)
         if legacy_error:
-            result = _web_client_error(request_id, legacy_error, session_id)
+            result = _web_client_error(request_id, legacy_error)
             self._write_session_result_if_possible(payload, result)
             return result
 
@@ -574,7 +572,6 @@ class WebClientRunner:
             result = _web_client_error(
                 request_id,
                 "web_client_session command is required; use start, action, or finalize",
-                session_id,
             )
             self._write_session_result_if_possible(payload, result)
             return result
@@ -588,24 +585,21 @@ class WebClientRunner:
             if command == "action":
                 return self._run_web_client_session_action(
                     request_id=request_id,
-                    session_id=session_id,
                     payload=payload,
                 )
             if command == "finalize":
                 return self._finalize_web_client_session(
                     request_id=request_id,
-                    session_id=session_id,
                     payload=payload,
                 )
             result = _web_client_error(
                 request_id,
                 f"unsupported web_client_session command: {command}",
-                session_id,
             )
             self._write_session_result_if_possible(payload, result)
             return result
         except Exception as exc:
-            result = _web_client_error(request_id, str(exc), session_id)
+            result = _web_client_error(request_id, str(exc))
             self._write_session_result_if_possible(payload, result)
             return result
 
@@ -684,6 +678,14 @@ class WebClientRunner:
         request_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._web_session is not None:
+            result = _web_client_error(
+                request_id,
+                "web_client_session already has an active session; finalize it before starting a new one",
+            )
+            self._write_session_result_if_possible(payload, result)
+            return result
+
         run_id = str(payload.get("run_id") or "")
         artifacts_root_value = payload.get("artifacts_root")
         if not run_id or not artifacts_root_value:
@@ -818,11 +820,6 @@ class WebClientRunner:
             self._write_session_result_if_possible(payload, result)
             return result
 
-        session_id = str(payload.get("session_id") or self.uuid_factory())
-        existing = self._web_sessions.pop(session_id, None)
-        if existing is not None:
-            _close_quietly(existing.browser_driver)
-
         if plan is not None:
             browser_driver = self.browser_driver
             if hasattr(browser_driver, "artifacts_root"):
@@ -832,7 +829,6 @@ class WebClientRunner:
         else:
             browser_driver = self._task_browser_driver(artifacts_root, base_url, run_id)
         session = _WebClientSession(
-            session_id=session_id,
             request_id=request_id,
             run_id=run_id,
             artifacts_root=artifacts_root,
@@ -852,11 +848,10 @@ class WebClientRunner:
                 plan,
                 reason=error_summary or "setup failed",
             )
-        self._web_sessions[session_id] = session
+        self._web_session = session
 
         result = _web_client_session_result(
             request_id=request_id,
-            session_id=session_id,
             status="error" if setup_failed else "pass",
             error=error_summary,
         )
@@ -873,19 +868,13 @@ class WebClientRunner:
         self,
         *,
         request_id: str,
-        session_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        if not session_id:
-            result = _web_client_error(request_id, "session_id is required for action")
-            self._write_session_result_if_possible(payload, result)
-            return result
-        session = self._web_sessions.get(session_id)
+        session = self._web_session
         if session is None:
             result = _web_client_error(
                 request_id,
-                f"browser session not found: {session_id}",
-                session_id,
+                "no active web_client_session; call start before action",
             )
             self._write_session_result_if_possible(payload, result)
             return result
@@ -893,14 +882,13 @@ class WebClientRunner:
             result = _web_client_error(
                 request_id,
                 session.error_summary or "session setup failed",
-                session_id,
             )
             self._write_session_result_if_possible(payload, result)
             return result
         if session.container_id and not self._container_running(session.container_id):
             session.container_crashed = True
             session.error_summary = session.error_summary or "container exited unexpectedly"
-            result = _web_client_error(request_id, session.error_summary, session_id)
+            result = _web_client_error(request_id, session.error_summary)
             self._write_session_result_if_possible(payload, result)
             return result
 
@@ -913,7 +901,6 @@ class WebClientRunner:
             result = _web_client_error(
                 request_id,
                 "action must be a single browser action object, not an array",
-                session_id,
             )
             _write_json(
                 session.artifacts_dir
@@ -925,7 +912,6 @@ class WebClientRunner:
             result = _web_client_error(
                 request_id,
                 "action is required for action command and must be an object",
-                session_id,
             )
             _write_json(
                 session.artifacts_dir
@@ -938,7 +924,7 @@ class WebClientRunner:
             payload.get("browser_input")
         )
         if metadata_error:
-            result = _web_client_error(request_id, metadata_error, session_id)
+            result = _web_client_error(request_id, metadata_error)
             _write_json(
                 session.artifacts_dir
                 / f"web_client_result_{_safe_label(request_id)}.json",
@@ -966,7 +952,6 @@ class WebClientRunner:
             result = {
                 "request_id": request_id,
                 "status": str(entry.get("outcome") or "fail"),
-                "session_id": session_id,
                 "run_id": session.run_id,
                 "browser": entry.get("browser"),
                 "screenshot_path": entry.get("screenshot_path"),
@@ -988,7 +973,6 @@ class WebClientRunner:
                 step_id=payload.get("step_id", session.step_id),
                 payload=payload,
             )
-            result["session_id"] = session_id
             result["run_id"] = session.run_id
 
         _write_json(
@@ -1001,22 +985,17 @@ class WebClientRunner:
         self,
         *,
         request_id: str,
-        session_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        if not session_id:
-            result = _web_client_error(request_id, "session_id is required for finalize")
-            self._write_session_result_if_possible(payload, result)
-            return result
-        session = self._web_sessions.pop(session_id, None)
+        session = self._web_session
         if session is None:
             result = _web_client_error(
                 request_id,
-                f"browser session not found: {session_id}",
-                session_id,
+                "no active web_client_session; call start before finalize",
             )
             self._write_session_result_if_possible(payload, result)
             return result
+        self._web_session = None
 
         _write_json(
             session.artifacts_dir / f"web_client_session_{_safe_label(request_id)}.json",
@@ -1029,7 +1008,6 @@ class WebClientRunner:
         if session.plan is None:
             result = _web_client_session_result(
                 request_id=request_id,
-                session_id=session_id,
                 status="error" if close_error else "pass",
                 error=close_error,
             )
@@ -1111,9 +1089,8 @@ class WebClientRunner:
         payload: Mapping[str, Any],
         result: dict[str, Any],
     ) -> None:
-        session_id = str(payload.get("session_id") or "")
-        if session_id and session_id in self._web_sessions:
-            artifacts_dir = self._web_sessions[session_id].artifacts_dir
+        if self._web_session is not None:
+            artifacts_dir = self._web_session.artifacts_dir
         elif payload.get("run_id") and payload.get("artifacts_root"):
             artifacts_dir = (
                 Path(str(payload["artifacts_root"])).expanduser().resolve()
@@ -1965,10 +1942,10 @@ class WebClientSessionTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Run one command in a Jellyfin Web browser session. start opens a "
-            "plan-backed or task browser session, action executes exactly one "
-            "browser action, and finalize closes resources and returns the raw "
-            "result JSON."
+            "Run one command in the active Jellyfin Web browser session. start "
+            "opens a plan-backed or task browser session, action executes "
+            "exactly one browser action, and finalize closes resources and "
+            "returns the raw result JSON."
         )
 
     @property
@@ -1997,8 +1974,9 @@ class WebClientSessionTool(BaseTool):
     def prompt_contribution(self) -> str | None:
         return (
             "Call `web_client_session` with bracket-body JSON: "
-            "`command=start`, then one `command=action` call with exactly one "
-            "top-level action object per browser move, then `command=finalize`. "
+            "`command=start`, then one `command=action` call against the active "
+            "session with exactly one top-level action object per browser move, "
+            "then `command=finalize`. "
             "Never submit `actions` arrays or an `action` array."
         )
 
@@ -2553,9 +2531,9 @@ def _selector_criteria_assertions(selector_assertions: Any) -> list[dict[str, An
 def _web_client_session_result(
     *,
     request_id: str,
-    session_id: str,
     status: str,
     error: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     result = _web_client_error(request_id, error, session_id)
     result["status"] = status

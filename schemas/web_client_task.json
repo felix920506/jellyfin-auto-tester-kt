@@ -20,10 +20,6 @@
       "type": "string",
       "minLength": 1
     },
-    "session_id": {
-      "type": "string",
-      "minLength": 1
-    },
     "run_id": {
       "type": "string",
       "minLength": 1
@@ -118,25 +114,7 @@
       },
       "then": {
         "required": [
-          "session_id",
           "action"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "command": {
-            "const": "finalize"
-          }
-        },
-        "required": [
-          "command"
-        ]
-      },
-      "then": {
-        "required": [
-          "session_id"
         ]
       }
     }

@@ -378,7 +378,7 @@ class WebClientRunnerTests(unittest.TestCase):
             )
 
             self.assertEqual(start["status"], "pass")
-            self.assertEqual(start["session_id"], "plan-session-1")
+            self.assertNotIn("session_id", start)
             self.assertTrue(start["plan_loaded"])
             self.assertEqual(browser_driver.runs, [])
             self.assertEqual(docker.pulled, [("jellyfin/jellyfin:10.9.7", "plan-run")])
@@ -388,7 +388,6 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "finalize",
                     "request_id": "finalize-1",
-                    "session_id": start["session_id"],
                     "overall_result": "inconclusive",
                 }
             )
@@ -420,7 +419,6 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "action",
                     "request_id": "next-1",
-                    "session_id": start["session_id"],
                     "step_id": 1,
                     "role": "trigger",
                     "action_label": "Capture home",
@@ -441,7 +439,6 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "finalize",
                     "request_id": "finalize-1",
-                    "session_id": start["session_id"],
                     "overall_result": "reproduced",
                 }
             )
@@ -474,7 +471,6 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "action",
                     "request_id": "next-1",
-                    "session_id": start["session_id"],
                     "action": {"type": "goto"},
                 }
             )
@@ -482,7 +478,6 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "action",
                     "request_id": "next-2",
-                    "session_id": start["session_id"],
                     "action": {"type": "wait_for", "selector": "body"},
                 }
             )
@@ -490,7 +485,6 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "action",
                     "request_id": "next-3",
-                    "session_id": start["session_id"],
                     "action": {"type": "screenshot", "label": "web_home"},
                 }
             )
@@ -514,7 +508,6 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "finalize",
                     "request_id": "finalize-1",
-                    "session_id": start["session_id"],
                     "overall_result": "reproduced",
                 }
             )
@@ -546,7 +539,6 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "action",
                     "request_id": "next-1",
-                    "session_id": start["session_id"],
                     "step_id": 1,
                     "role": "trigger",
                     "action": {"type": "screenshot", "label": "web_home"},
@@ -557,7 +549,6 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "finalize",
                     "request_id": "finalize-1",
-                    "session_id": start["session_id"],
                     "overall_result": "reproduced",
                 }
             )
@@ -579,12 +570,20 @@ class WebClientRunnerTests(unittest.TestCase):
                 screenshotter=FakeScreenshotter(temp_dir),
                 browser_driver=browser_driver,
             )
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "session-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
 
             result = runner.session(
                 {
                     "command": "action",
                     "request_id": "bad-action",
-                    "session_id": "session-1",
                     "action": [
                         {"type": "goto"},
                         {"type": "screenshot", "label": "home"},
@@ -595,6 +594,122 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(result["status"], "error")
             self.assertIn("single browser action object", result["error"])
             self.assertEqual(browser_driver.runs, [])
+
+    def test_session_action_before_start_returns_no_active_session_error(self):
+        temp_dir = tempfile.gettempdir()
+        runner = WebClientRunner(
+            docker=FakeDocker(),
+            api=FakeAPI(),
+            screenshotter=FakeScreenshotter(temp_dir),
+            browser_driver=FakeBrowserDriver(temp_dir),
+        )
+
+        result = runner.session(
+            {
+                "command": "action",
+                "request_id": "action-before-start",
+                "action": {"type": "goto"},
+            }
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("no active web_client_session", result["error"])
+
+    def test_session_finalize_before_start_returns_no_active_session_error(self):
+        temp_dir = tempfile.gettempdir()
+        runner = WebClientRunner(
+            docker=FakeDocker(),
+            api=FakeAPI(),
+            screenshotter=FakeScreenshotter(temp_dir),
+            browser_driver=FakeBrowserDriver(temp_dir),
+        )
+
+        result = runner.session(
+            {
+                "command": "finalize",
+                "request_id": "finalize-before-start",
+            }
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("no active web_client_session", result["error"])
+
+    def test_session_rejects_second_start_without_replacing_active_session(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            first = runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "task-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+
+            second = runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-2",
+                    "run_id": "other-run",
+                    "base_url": "http://localhost:9001",
+                    "artifacts_root": temp_dir,
+                }
+            )
+            action = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "action-1",
+                    "action": {"type": "goto"},
+                }
+            )
+
+            self.assertEqual(first["status"], "pass")
+            self.assertEqual(second["status"], "error")
+            self.assertIn("already has an active session", second["error"])
+            self.assertFalse(browser_driver.closed)
+            self.assertEqual(action["status"], "pass")
+            self.assertEqual(action["run_id"], "task-run")
+
+    def test_session_ignores_deprecated_session_id_when_active_session_exists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "task-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+
+            result = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "action-1",
+                    "session_id": "stale-session",
+                    "action": {"type": "goto"},
+                }
+            )
+
+            self.assertEqual(result["status"], "pass")
+            self.assertNotIn("session_id", result)
+            self.assertEqual(result["run_id"], "task-run")
 
     def test_task_start_returns_session_without_running_browser_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -838,15 +953,15 @@ class WebClientRunnerTests(unittest.TestCase):
                     {
                         "command": "action",
                         "request_id": "module-action",
-                        "session_id": start["session_id"],
                         "action": {"type": "goto"},
                     }
                 )
             finally:
                 web_client_runner_module._DEFAULT_SESSION_RUNNER = previous
 
-            self.assertEqual(start["session_id"], "module-session")
+            self.assertNotIn("session_id", start)
             self.assertEqual(action["status"], "pass")
+            self.assertNotIn("session_id", action)
             self.assertEqual(len(browser_driver.runs), 1)
 
     def test_module_level_session_task_mode_uses_same_worker_thread_inside_event_loop(self):
@@ -879,7 +994,6 @@ class WebClientRunnerTests(unittest.TestCase):
                     {
                         "command": "action",
                         "request_id": "worker-action",
-                        "session_id": start["session_id"],
                         "action": {"type": "goto"},
                     }
                 )
@@ -887,7 +1001,6 @@ class WebClientRunnerTests(unittest.TestCase):
                     {
                         "command": "finalize",
                         "request_id": "worker-finalize",
-                        "session_id": start["session_id"],
                     }
                 )
                 return start, action, final
@@ -899,9 +1012,11 @@ class WebClientRunnerTests(unittest.TestCase):
                 shutdown_sync_workers()
 
             thread_ids = {thread_id for _event, thread_id in browser_driver.thread_events}
-            self.assertEqual(start["session_id"], "module-session")
+            self.assertNotIn("session_id", start)
             self.assertEqual(action["status"], "pass")
+            self.assertNotIn("session_id", action)
             self.assertEqual(final["status"], "pass")
+            self.assertNotIn("session_id", final)
             self.assertEqual(len(thread_ids), 1)
             self.assertNotEqual(next(iter(thread_ids)), main_thread)
 
@@ -936,7 +1051,6 @@ class WebClientRunnerTests(unittest.TestCase):
                     {
                         "command": "action",
                         "request_id": "worker-next",
-                        "session_id": start["session_id"],
                         "step_id": 1,
                         "role": "trigger",
                         "action": {"type": "screenshot", "label": "home"},
@@ -946,7 +1060,6 @@ class WebClientRunnerTests(unittest.TestCase):
                     {
                         "command": "finalize",
                         "request_id": "worker-finalize",
-                        "session_id": start["session_id"],
                         "overall_result": "reproduced",
                     }
                 )
@@ -959,8 +1072,9 @@ class WebClientRunnerTests(unittest.TestCase):
                 shutdown_sync_workers()
 
             thread_ids = {thread_id for _event, thread_id in browser_driver.thread_events}
-            self.assertEqual(start["session_id"], "module-plan-session")
+            self.assertNotIn("session_id", start)
             self.assertEqual(action["status"], "pass")
+            self.assertNotIn("session_id", action)
             self.assertEqual(final["overall_result"], "reproduced")
             self.assertEqual(len(thread_ids), 1)
             self.assertNotEqual(next(iter(thread_ids)), main_thread)
@@ -978,7 +1092,6 @@ class WebClientRunnerToolTests(unittest.TestCase):
         expected = {
             "request_id": "start-1",
             "status": "pass",
-            "session_id": "session-1",
         }
 
         with patch.object(

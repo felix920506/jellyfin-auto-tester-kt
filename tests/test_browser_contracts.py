@@ -156,7 +156,6 @@ class BrowserContractTests(unittest.TestCase):
         action_task = {
             "command": "action",
             "request_id": "request-2",
-            "session_id": "session-1",
             "action": {"type": "goto"},
             "selector_assertions": [{"selector": "body", "state": "visible"}],
             "capture": {"url": {"from": "browser_url"}},
@@ -164,7 +163,6 @@ class BrowserContractTests(unittest.TestCase):
         finalize_task = {
             "command": "finalize",
             "request_id": "request-3",
-            "session_id": "session-1",
         }
         validator = Draft202012Validator(load_schema("web_client_task.json"))
 
@@ -190,13 +188,11 @@ class BrowserContractTests(unittest.TestCase):
         top_level_multi_action = {
             "command": "action",
             "request_id": "request-2",
-            "session_id": "session-1",
             "action": [{"type": "goto"}, {"type": "screenshot", "label": "home"}],
         }
         top_level_actions = {
             "command": "action",
             "request_id": "request-3",
-            "session_id": "session-1",
             "actions": [{"type": "goto"}],
         }
 
@@ -222,7 +218,6 @@ class BrowserContractTests(unittest.TestCase):
         action_request = {
             "command": "action",
             "request_id": "request-3",
-            "session_id": "session-1",
             "action": {"type": "screenshot", "label": "home"},
             "step_id": 1,
             "role": "trigger",
@@ -232,7 +227,6 @@ class BrowserContractTests(unittest.TestCase):
         finalize_request = {
             "command": "finalize",
             "request_id": "request-4",
-            "session_id": "session-1",
             "overall_result": "inconclusive",
         }
         validator = Draft202012Validator(load_schema("web_client_session.json"))
@@ -253,7 +247,6 @@ class BrowserContractTests(unittest.TestCase):
         browser_input_actions = {
             "command": "action",
             "request_id": "request-1",
-            "session_id": "session-1",
             "browser_input": {
                 "path": "/web",
                 "actions": [{"type": "goto"}],
@@ -263,14 +256,12 @@ class BrowserContractTests(unittest.TestCase):
         top_level_actions = {
             "command": "action",
             "request_id": "request-2",
-            "session_id": "session-1",
             "action": {"type": "goto"},
             "actions": [{"type": "goto"}],
         }
         action_array = {
             "command": "action",
             "request_id": "request-3",
-            "session_id": "session-1",
             "action": [{"type": "goto"}],
         }
 
@@ -398,6 +389,8 @@ class BrowserContractTests(unittest.TestCase):
         self.assertIn("exactly one top-level `action` object", web_client_prompt)
         self.assertIn("Do not echo the plan JSON into a tool call", web_client_prompt)
         self.assertIn('command: "finalize"', web_client_prompt)
+        self.assertIn("There is only one active web-client session", web_client_prompt)
+        self.assertNotIn("session_id", web_client_prompt)
 
     def test_web_client_tool_contract_uses_valid_tool_names(self):
         config = yaml.safe_load(
@@ -425,6 +418,7 @@ class BrowserContractTests(unittest.TestCase):
         self.assertNotIn("web_client_execute_plan", prompt)
         self.assertNotIn("web_client_runner.execute_plan", prompt)
         self.assertNotIn("web_client_runner.run_task", prompt)
+        self.assertNotIn("session_id", prompt)
 
     def test_plan_normalization_defaults_browser_criteria_to_action_run(self):
         plan = minimal_plan()

@@ -26,6 +26,10 @@ and every browser move is exactly one top-level `action` object. Never send an
 `browser_input` is only for session/default metadata: `path`, `url`, `auth`,
 `label`, `timeout_s`, `viewport`, and `locale`.
 
+There is only one active web-client session. After `start`, every `action` and
+`finalize` command applies to that active session. Do not store, send, or depend
+on a session identifier.
+
 ## Full-Plan Mode
 
 For a `web_client_plan_ready` or `web_client_verification_request` message:
@@ -34,19 +38,18 @@ For a `web_client_plan_ready` or `web_client_verification_request` message:
    `artifacts_root`, and `run_id`. Do not echo the plan JSON into a tool call.
 2. Call `web_client_session` with `command: "start"`, a unique `request_id`,
    `run_id`, `artifacts_root`, and `plan_path`.
-3. Wait for the returned `session_id`.
-4. Decide the next browser action from the plan, current evidence, and page
-   state. Call `web_client_session` with `command: "action"`, that `session_id`,
-   exactly one `action`, and step metadata: `step_id`, `role`, and
-   `action_label`. Include `success_criteria`, `selector_assertions`, or
-   `capture` only when they apply to that one action.
-5. Wait for the returned JSON before making another browser call. Continue one
+3. Decide the next browser action from the plan, current evidence, and page
+   state. Call `web_client_session` with `command: "action"`, exactly one
+   `action`, and step metadata: `step_id`, `role`, and `action_label`. Include
+   `success_criteria`, `selector_assertions`, or `capture` only when they apply
+   to that one action.
+4. Wait for the returned JSON before making another browser call. Continue one
    action at a time until enough evidence has been collected.
-6. Call `web_client_session` with `command: "finalize"`, the `session_id`, and
+5. Call `web_client_session` with `command: "finalize"` and
    `overall_result` (`reproduced`, `not_reproduced`, or `inconclusive`). Include
    `error_summary` when the result is blocked or inconclusive.
-7. Send the returned `ExecutionResult` JSON unchanged to `execution_done`.
-8. Emit `WEB_CLIENT_COMPLETE`.
+6. Send the returned `ExecutionResult` JSON unchanged to `execution_done`.
+7. Emit `WEB_CLIENT_COMPLETE`.
 
 For Docker-backed full plans, the runner owns Docker image pull/start/stop,
 health checks, startup wizard provisioning, admin authentication, artifacts,
@@ -62,9 +65,8 @@ For a `web_client_task` message:
 
 1. Call `web_client_session` with `command: "start"`, the supplied `run_id`,
    `base_url`, and `artifacts_root`.
-2. Send each requested browser move as one `command: "action"` call with the
-   returned `session_id`.
-3. Call `web_client_session` with `command: "finalize"` and the `session_id`.
+2. Send each requested browser move as one `command: "action"` call.
+3. Call `web_client_session` with `command: "finalize"`.
 4. Send the returned JSON unchanged to `web_client_done`.
 5. Emit `WEB_CLIENT_COMPLETE`.
 
