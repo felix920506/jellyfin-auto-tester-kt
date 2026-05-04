@@ -121,6 +121,10 @@
         "viewport": {
           "$ref": "#/$defs/browser_viewport"
         },
+        "locale": {
+          "type": "string",
+          "minLength": 1
+        },
         "actions": {
           "type": "array",
           "minItems": 1,
@@ -201,6 +205,10 @@
         },
         "viewport": {
           "$ref": "#/$defs/browser_viewport"
+        },
+        "locale": {
+          "type": "string",
+          "minLength": 1
         },
         "actions": {
           "type": "array",

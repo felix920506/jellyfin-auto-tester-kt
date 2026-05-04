@@ -390,6 +390,7 @@ class WebClientRunnerTests(unittest.TestCase):
                     "repair_policy": {
                         "browser_input": {
                             "label": "fixed",
+                            "locale": "fr-FR",
                             "actions": [
                                 {"type": "refresh"},
                                 {"type": "click", "selector": "#new"},
@@ -404,6 +405,7 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertTrue(result["repair_attempted"])
             self.assertEqual(len(browser_driver.runs), 2)
             self.assertEqual(browser_driver.runs[1]["browser_input"]["label"], "fixed")
+            self.assertEqual(browser_driver.runs[1]["browser_input"]["locale"], "fr-FR")
 
     def test_task_mode_rejects_repair_fields_outside_browser_input(self):
         with tempfile.TemporaryDirectory() as temp_dir:

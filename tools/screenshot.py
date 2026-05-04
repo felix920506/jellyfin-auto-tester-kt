@@ -15,6 +15,7 @@ DEFAULT_ARTIFACTS_ROOT = Path(
     os.environ.get("JF_AUTO_TESTER_ARTIFACTS_ROOT", REPO_ROOT / "artifacts")
 ).resolve()
 BROWSER_HEADLESS_ENV = "JF_AUTO_TESTER_BROWSER_HEADLESS"
+DEFAULT_BROWSER_LOCALE = "en-US"
 TRUTHY_VALUES = {"1", "true", "yes", "on", "headless"}
 FALSY_VALUES = {"0", "false", "no", "off", "headed", "gui"}
 
@@ -26,9 +27,11 @@ class Screenshotter:
         self,
         artifacts_root: str | Path | None = None,
         playwright_factory: Any | None = None,
+        locale: str | None = None,
     ) -> None:
         self.artifacts_root = Path(artifacts_root or DEFAULT_ARTIFACTS_ROOT).resolve()
         self._playwright_factory = playwright_factory
+        self.locale = browser_locale(locale)
 
     def capture(
         self,
@@ -37,11 +40,13 @@ class Screenshotter:
         label: str,
         wait_selector: str | None = None,
         wait_ms: int = 2000,
+        locale: str | None = None,
     ) -> dict[str, Any]:
         """Take a PNG screenshot and return a serializable artifact record."""
 
         timestamp = datetime.now(timezone.utc).isoformat()
         path = self._path(run_id, label)
+        page_locale = browser_locale(locale or self.locale)
         try:
             factory = self._playwright_factory or _load_sync_playwright()
         except RuntimeError as exc:
@@ -59,7 +64,10 @@ class Screenshotter:
                 headless = browser_should_run_headless()
                 browser = playwright.chromium.launch(headless=headless)
                 try:
-                    page = browser.new_page(viewport={"width": 1280, "height": 720})
+                    page = browser.new_page(
+                        viewport={"width": 1280, "height": 720},
+                        locale=page_locale,
+                    )
                     page.goto(url, wait_until="networkidle", timeout=max(wait_ms, 1) + 30000)
                     if wait_selector:
                         page.wait_for_selector(wait_selector, timeout=max(wait_ms, 1))
@@ -83,6 +91,7 @@ class Screenshotter:
             "label": label,
             "timestamp": timestamp,
             "headless": headless,
+            "locale": page_locale,
         }
 
     def _path(self, run_id: str, label: str) -> Path:
@@ -96,6 +105,7 @@ def capture(
     label: str,
     wait_selector: str | None = None,
     wait_ms: int = 2000,
+    locale: str | None = None,
 ) -> dict[str, Any]:
     return Screenshotter().capture(
         url=url,
@@ -103,6 +113,7 @@ def capture(
         label=label,
         wait_selector=wait_selector,
         wait_ms=wait_ms,
+        locale=locale,
     )
 
 
@@ -130,6 +141,13 @@ def browser_should_run_headless() -> bool:
             )
 
     return not system_has_gui()
+
+
+def browser_locale(locale: Any = None) -> str:
+    """Return the Playwright locale, defaulting to deterministic English."""
+
+    text = str(locale or "").strip()
+    return text or DEFAULT_BROWSER_LOCALE
 
 
 def system_has_gui() -> bool:

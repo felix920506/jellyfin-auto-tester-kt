@@ -182,9 +182,11 @@ class FakeBrowser:
         self.contexts = []
         self.closed = False
 
-    def new_context(self, viewport=None):
+    def new_context(self, viewport=None, locale=None):
         context = FakeContext(self.page)
-        self.contexts.append({"viewport": viewport, "context": context})
+        self.contexts.append(
+            {"viewport": viewport, "locale": locale, "context": context}
+        )
         return context
 
     def close(self):
@@ -403,6 +405,37 @@ class BrowserDriverTests(unittest.TestCase):
             self.assertEqual(
                 manager.playwright.chromium.launches,
                 [{"headless": False}],
+            )
+
+    def test_context_defaults_to_en_us_locale(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            driver, manager = self.make_driver(temp_dir, page)
+
+            result = driver.run({"actions": [{"type": "wait_for", "selector": "body"}]})
+
+            self.assertEqual(result["locale"], "en-US")
+            self.assertEqual(
+                manager.playwright.chromium.browser.contexts[0]["locale"],
+                "en-US",
+            )
+
+    def test_context_uses_explicit_locale(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            driver, manager = self.make_driver(temp_dir, page)
+
+            result = driver.run(
+                {
+                    "locale": "fr-FR",
+                    "actions": [{"type": "wait_for", "selector": "body"}],
+                }
+            )
+
+            self.assertEqual(result["locale"], "fr-FR")
+            self.assertEqual(
+                manager.playwright.chromium.browser.contexts[0]["locale"],
+                "fr-FR",
             )
 
 

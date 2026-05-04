@@ -77,8 +77,18 @@ class FakeScreenshotter:
         self.artifacts_root = Path(artifacts_root)
         self.captures = []
 
-    def capture(self, url, run_id, label, wait_selector=None, wait_ms=2000):
-        self.captures.append({"url": url, "run_id": run_id, "label": label})
+    def capture(
+        self,
+        url,
+        run_id,
+        label,
+        wait_selector=None,
+        wait_ms=2000,
+        locale=None,
+    ):
+        self.captures.append(
+            {"url": url, "run_id": run_id, "label": label, "locale": locale}
+        )
         path = self.artifacts_root / run_id / "screenshots" / f"{label}.png"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"png")
@@ -747,6 +757,7 @@ class ExecutionRunnerTests(unittest.TestCase):
             result = runner.retry_browser_step(
                 1,
                 {
+                    "locale": "fr-FR",
                     "label": "fixed",
                     "actions": [
                         {"type": "refresh"},
@@ -765,6 +776,7 @@ class ExecutionRunnerTests(unittest.TestCase):
                 [entry["browser"]["status"] for entry in result["execution_log"]],
                 ["fail", "pass"],
             )
+            self.assertEqual(browser_driver.runs[1]["browser_input"]["locale"], "fr-FR")
             self.assertEqual(browser_driver.runs[1]["browser_input"]["label"], "fixed")
 
             rejected = runner.retry_browser_step(1, {"actions": []})

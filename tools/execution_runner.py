@@ -681,6 +681,7 @@ class ExecutionRunner:
                 label=label,
                 wait_selector=step_input.get("wait_selector"),
                 wait_ms=int(step_input.get("wait_ms", 2000)),
+                locale=step_input.get("locale"),
             )
             return {
                 "entry": {"screenshot_path": shot.get("path")},
@@ -739,6 +740,7 @@ class ExecutionRunner:
                     url=self._screenshot_url(step.get("input", {})),
                     run_id=run_id,
                     label=label,
+                    locale=(step.get("input", {}) or {}).get("locale"),
                 )
                 screenshots[label] = shot.get("path")
                 entry["failure_screenshot_path"] = shot.get("path")
@@ -1023,6 +1025,7 @@ ALLOWED_BROWSER_REPAIR_FIELDS = {
     "label",
     "timeout_s",
     "viewport",
+    "locale",
 }
 
 

@@ -68,6 +68,16 @@ class BrowserContractTests(unittest.TestCase):
 
         self.assertEqual(errors, [])
 
+    def test_reproduction_plan_schema_accepts_browser_locale_override(self):
+        validator = Draft202012Validator(load_schema("reproduction_plan.json"))
+        plan = minimal_plan()
+        plan["execution_target"] = "web_client"
+        plan["reproduction_steps"][0]["input"]["locale"] = "fr-FR"
+
+        errors = sorted(validator.iter_errors(plan), key=lambda error: error.path)
+
+        self.assertEqual(errors, [])
+
     def test_reproduction_plan_schema_accepts_demo_without_docker_image(self):
         validator = Draft202012Validator(load_schema("reproduction_plan.json"))
         plan = minimal_plan()
@@ -127,6 +137,7 @@ class BrowserContractTests(unittest.TestCase):
             "browser_input": {
                 "path": "/web",
                 "auth": {"mode": "auto", "username": "demo", "password": ""},
+                "locale": "fr-FR",
                 "actions": [
                     {"type": "goto"},
                     {"type": "screenshot", "label": "home"},
@@ -137,7 +148,7 @@ class BrowserContractTests(unittest.TestCase):
             "repair_policy": {
                 "enabled": True,
                 "max_attempts": 1,
-                "browser_input": {"actions": [{"type": "refresh"}]},
+                "browser_input": {"locale": "en-GB", "actions": [{"type": "refresh"}]},
             },
         }
         validator = Draft202012Validator(load_schema("web_client_task.json"))

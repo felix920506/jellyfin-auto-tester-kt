@@ -34,8 +34,9 @@ class FakeBrowser:
         self.page = FakePage()
         self.closed = False
 
-    def new_page(self, viewport=None):
+    def new_page(self, viewport=None, locale=None):
         self.viewport = viewport
+        self.locale = locale
         return self.page
 
     def close(self):
@@ -98,6 +99,7 @@ class ScreenshotTests(unittest.TestCase):
             self.assertTrue(Path(result["path"]).exists())
             self.assertTrue(context.chromium.browser.closed)
             self.assertIn(context.chromium.headless, {True, False})
+            self.assertEqual(context.chromium.browser.locale, "en-US")
             calls = context.chromium.browser.page.calls
             self.assertEqual(calls[0][0], "goto")
             self.assertEqual(calls[1], ("wait_for_selector", "#login", 50))
@@ -144,6 +146,25 @@ class ScreenshotTests(unittest.TestCase):
 
             self.assertFalse(result["headless"])
             self.assertFalse(context.chromium.headless)
+
+    def test_capture_uses_explicit_locale(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            context = FakePlaywrightContext()
+            screenshotter = Screenshotter(
+                artifacts_root=temp_dir,
+                playwright_factory=lambda: context,
+            )
+
+            result = screenshotter.capture(
+                "http://localhost:8096/web",
+                "run",
+                "visible",
+                wait_ms=0,
+                locale="de-DE",
+            )
+
+            self.assertEqual(result["locale"], "de-DE")
+            self.assertEqual(context.chromium.browser.locale, "de-DE")
 
 
 if __name__ == "__main__":

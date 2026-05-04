@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 from tools.screenshot import (
     DEFAULT_ARTIFACTS_ROOT,
     _load_sync_playwright,
+    browser_locale,
     browser_should_run_headless,
 )
 
@@ -83,25 +84,35 @@ class BrowserDriver:
         base_url: str | None = None,
         run_id: str | None = None,
         playwright_factory: Any | None = None,
+        locale: str | None = None,
     ) -> None:
         self.artifacts_root = Path(artifacts_root or DEFAULT_ARTIFACTS_ROOT).resolve()
         self.base_url = base_url or "http://localhost:8096"
         self.run_id = run_id
         self._playwright_factory = playwright_factory
+        self.locale = browser_locale(locale)
         self._playwright_cm: Any | None = None
         self._playwright: Any | None = None
         self._browser: Any | None = None
         self._context: Any | None = None
         self._page: Any | None = None
         self._viewport: dict[str, int] | None = None
+        self._locale: str | None = None
         self._console_messages: list[dict[str, Any]] = []
         self._failed_network: list[dict[str, Any]] = []
 
-    def configure(self, base_url: str | None = None, run_id: str | None = None) -> None:
+    def configure(
+        self,
+        base_url: str | None = None,
+        run_id: str | None = None,
+        locale: str | None = None,
+    ) -> None:
         if base_url:
             self.base_url = base_url
         if run_id:
             self.run_id = run_id
+        if locale is not None:
+            self.locale = browser_locale(locale)
 
     def run(
         self,
@@ -118,7 +129,8 @@ class BrowserDriver:
 
         timeout_s = float(browser_input.get("timeout_s") or DEFAULT_TIMEOUT_S)
         viewport = _viewport(browser_input.get("viewport"))
-        page = self._ensure_page(viewport)
+        locale = browser_locale(browser_input.get("locale") or self.locale)
+        page = self._ensure_page(viewport, locale)
         console_start = len(self._console_messages)
         network_start = len(self._failed_network)
         actions: list[dict[str, Any]] = []
@@ -174,9 +186,14 @@ class BrowserDriver:
         self._page = None
         self._playwright = None
         self._playwright_cm = None
+        self._locale = None
 
-    def _ensure_page(self, viewport: dict[str, int]) -> Any:
-        if self._page is not None and self._viewport == viewport:
+    def _ensure_page(self, viewport: dict[str, int], locale: str) -> Any:
+        if (
+            self._page is not None
+            and self._viewport == viewport
+            and self._locale == locale
+        ):
             return self._page
         if self._context is not None:
             try:
@@ -184,6 +201,7 @@ class BrowserDriver:
             except Exception:
                 pass
             self._context = None
+            self._locale = None
             self._page = None
 
         if self._playwright is None:
@@ -195,9 +213,10 @@ class BrowserDriver:
                 headless=browser_should_run_headless()
             )
 
-        self._context = self._browser.new_context(viewport=viewport)
+        self._context = self._browser.new_context(viewport=viewport, locale=locale)
         self._page = self._context.new_page()
         self._viewport = viewport
+        self._locale = locale
         self._register_page_handlers(self._page)
         return self._page
 
@@ -420,6 +439,7 @@ class BrowserDriver:
             "dom_path": dom_path,
             "page_text": page_text,
             "media_state": media_state,
+            "locale": self._locale or self.locale,
             "error": error,
             "auth": {
                 "mode": _browser_auth_mode(browser_input.get("auth", "none")),
