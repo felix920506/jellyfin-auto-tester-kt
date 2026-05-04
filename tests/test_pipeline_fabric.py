@@ -391,6 +391,92 @@ class FakeWebClientStageEngine(FakeStage2AgentEngine):
         )
 
 
+class FakeWebClientAgent:
+    def __init__(self, llm):
+        self.agent = FakeInnerAgent()
+        conversation = FakeMessageListConversation()
+        self.agent.controller = FakeController(conversation)
+        self.agent.llm = llm
+
+
+class CrashingProviderLLM:
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.calls = []
+
+    async def chat(self, messages, **_kwargs):
+        self.calls.append([dict(message) for message in messages])
+        for chunk in self.chunks:
+            yield chunk
+        raise RuntimeError("web-client provider crashed")
+
+
+class ProviderWebClientStageEngine(FakeWebClientStageEngine):
+    def __init__(self, llm):
+        super().__init__()
+        self.web_client_agent = FakeWebClientAgent(llm)
+
+    def __getitem__(self, name):
+        if name == "web_client_agent":
+            return self.web_client_agent
+        return super().__getitem__(name)
+
+    async def run(self):
+        self.run_thread = threading.get_ident()
+        pending = {
+            asyncio.create_task(self.channels[channel].receive()): channel
+            for channel in self.plan_channels
+        }
+        done, pending_tasks = await asyncio.wait(
+            set(pending),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending_tasks:
+            task.cancel()
+        message_task = next(iter(done))
+        self.received_channel = pending[message_task]
+        message = message_task.result()
+        self.received_payload = json.loads(message.content)
+
+        conversation = self.web_client_agent.agent.controller.conversation
+        conversation.append(
+            "user",
+            f"Channel: {self.received_channel}\n{message.content}",
+        )
+        response_parts = []
+        async for chunk in self.web_client_agent.agent.llm.chat(
+            conversation.to_messages(),
+            stream=True,
+        ):
+            response_parts.append(chunk)
+        conversation.append("assistant", "".join(response_parts))
+
+        plan = self.received_payload.get("plan", self.received_payload)
+        run_id = self.received_payload.get("run_id") or self.default_run_id
+        result = {
+            "plan": plan,
+            "run_id": run_id,
+            "is_verification": bool(plan.get("is_verification", False)),
+            "original_run_id": plan.get("original_run_id"),
+            "container_id": None,
+            "execution_log": [_sample_execution_entry(plan)],
+            "overall_result": "reproduced",
+            "artifacts_dir": "agent-artifacts",
+            "jellyfin_logs": "",
+            "error_summary": None,
+        }
+        await self.channels["execution_done"].send(
+            types.SimpleNamespace(
+                sender=self.agent_sender,
+                content=json.dumps(result),
+                metadata={},
+                message_id="execution-done",
+                reply_to=None,
+                channel="execution_done",
+            )
+        )
+
+
 class FakeStartedTerrariumStageEngine:
     def __init__(
         self,
@@ -1877,6 +1963,96 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(engine.received_payload["run_id"], "web-run-1")
             self.assertEqual(engine.received_payload["plan"], plan)
             self.assertTrue(engine.stopped)
+
+    def test_run_web_client_stage_writes_provider_transcript(self):
+        plan = _sample_web_client_plan()
+        llm = FakeProviderLLM(
+            [
+                [
+                    "calling runner\n",
+                    "WEB_CLIENT_COMPLETE\n",
+                ]
+            ]
+        )
+        engine = ProviderWebClientStageEngine(llm)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            result = run_web_client_stage(
+                input_dir,
+                temp_path / "web-client",
+                run_id="web-run-transcript",
+                engine_factory=lambda stage: engine,
+            )
+
+            transcript_payload = _read_stage_transcript(temp_path / "web-client")
+            stage_result = json.loads(
+                (temp_path / "web-client" / "stage_result.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(result.status, "reproduced")
+        self.assertEqual(transcript_payload["schema_version"], 1)
+        self.assertEqual(transcript_payload["stage"], "web-client")
+        self.assertEqual(transcript_payload["status"], "execution_done")
+        self.assertEqual(transcript_payload["input"]["channel"], "web_client_plan_ready")
+        self.assertEqual(transcript_payload["input"]["plan"], plan)
+        self.assertIn(
+            "Channel: web_client_plan_ready",
+            transcript_payload["input"]["prompt"],
+        )
+        self.assertEqual(
+            [message["role"] for message in transcript_payload["messages"]],
+            ["user", "assistant"],
+        )
+        self.assertIn(
+            "WEB_CLIENT_COMPLETE",
+            transcript_payload["output"]["assistant"],
+        )
+        self.assertEqual(len(transcript_payload["provider_requests"]), 1)
+        self.assertEqual(
+            stage_result["metadata"]["transcript"],
+            ANALYSIS_TRANSCRIPT_FILE,
+        )
+
+    def test_run_web_client_stage_flushes_transcript_while_provider_runs(self):
+        plan = _sample_web_client_plan()
+        engine = ProviderWebClientStageEngine(
+            CrashingProviderLLM(["partial web-client response\n"])
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "web-client provider crashed"):
+                run_web_client_stage(
+                    input_dir,
+                    temp_path / "web-client",
+                    engine_factory=lambda stage: engine,
+                )
+
+            transcript_payload = _read_stage_transcript(temp_path / "web-client")
+
+        self.assertEqual(transcript_payload["status"], "running")
+        self.assertEqual(
+            [message["role"] for message in transcript_payload["messages"]],
+            ["user", "assistant"],
+        )
+        self.assertEqual(
+            transcript_payload["messages"][1]["content"],
+            "partial web-client response\n",
+        )
+        self.assertEqual(
+            transcript_payload["output"]["assistant"],
+            "partial web-client response\n",
+        )
+        self.assertEqual(len(transcript_payload["provider_requests"]), 1)
 
     def test_run_web_client_stage_supports_started_terrarium_engine_lifecycle(self):
         plan = _sample_web_client_plan()

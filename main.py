@@ -219,24 +219,28 @@ class _TranscriptOutput:
 
 
 class _AnalysisTranscriptWriter:
-    """Keep Stage 1 transcript.json valid while provider traffic is in flight."""
+    """Keep a stage transcript.json valid while provider traffic is in flight."""
 
     def __init__(
         self,
         path: str | Path,
         *,
-        issue_url: str,
-        container_version: str,
+        issue_url: str | None,
+        container_version: str | None,
         prompt: str,
         issue_thread: dict[str, Any] | None,
         system_prompt: str | None,
+        stage: str = "analysis",
+        input_metadata: dict[str, Any] | None = None,
     ) -> None:
         self.path = Path(path).expanduser()
+        self.stage = stage
         self.issue_url = issue_url
         self.container_version = container_version
         self.prompt = prompt
         self.issue_thread = issue_thread
         self.system_prompt = system_prompt
+        self.input_metadata = dict(input_metadata or {})
         self._fallback_messages: list[dict[str, Any]] = []
         self._conversation_messages: list[dict[str, Any]] = []
         self._provider_messages: list[dict[str, Any]] = []
@@ -364,11 +368,13 @@ class _AnalysisTranscriptWriter:
         _write_json_file(
             self.path,
             _analysis_transcript_payload(
+                stage=self.stage,
                 issue_url=self.issue_url,
                 container_version=self.container_version,
                 prompt=self.prompt,
                 issue_thread=self.issue_thread,
                 system_prompt=self.system_prompt,
+                input_metadata=self.input_metadata,
                 assistant_output=assistant,
                 output_sources=(
                     output_sources
@@ -1215,20 +1221,77 @@ async def _run_web_client_stage_impl(
     message: Any = message_plan
     if run_id:
         message = {"plan": message_plan, "run_id": run_id}
+    prompt = _web_client_stage_prompt(route_channel, message)
+    web_client_agent = _optional_agent(engine, "web_client_agent")
+    system_prompt = (
+        _agent_system_prompt_text(web_client_agent)
+        if web_client_agent is not None
+        else None
+    )
+    transcript_writer = _AnalysisTranscriptWriter(
+        output_dir / ANALYSIS_TRANSCRIPT_FILE,
+        issue_url=_optional_text(plan.get("issue_url")),
+        container_version=_optional_text(
+            plan.get("target_version") or plan.get("jellyfin_version")
+        ),
+        prompt=prompt,
+        issue_thread=None,
+        system_prompt=system_prompt,
+        stage="web-client",
+        input_metadata={
+            "channel": route_channel,
+            "input_path": str(plan_path),
+            "plan": plan,
+            "run_id": run_id,
+        },
+    )
+    transcript_writer.initialize()
+    transcript_writer.record_prompt(prompt, attempt=1)
+    transcript_message_hooks: list[tuple[Any, str, Any]] = []
+    transcript_capture_state: tuple[_TranscriptOutput, Any, Any] | None = None
+    if web_client_agent is not None:
+        transcript_message_hooks = _install_transcript_message_hooks(
+            web_client_agent,
+            transcript_writer,
+        )
+
+        def record_visible_output(text: str) -> None:
+            if not transcript_writer.has_provider_traffic:
+                transcript_writer.record_assistant_text(text, source="output_router")
+
+        transcript_capture_state = _install_transcript_output(
+            web_client_agent,
+            on_write=record_visible_output,
+        )
 
     logger.debug(
         "Routing web-client Stage 2 plan through KT agent channel=%s run_id=%s",
         route_channel,
         run_id,
     )
-    result = await _run_web_client_agent_handoff(
-        engine,
-        route_channel=route_channel,
-        message=message,
-        timeout_s=timeout_s,
-    )
+    try:
+        result = await _run_web_client_agent_handoff(
+            engine,
+            route_channel=route_channel,
+            message=message,
+            timeout_s=timeout_s,
+        )
+    finally:
+        _restore_transcript_output(transcript_capture_state)
+        _restore_transcript_message_hooks(transcript_message_hooks)
     _write_json_file(output_dir / "execution_result.json", result)
     _write_json_file(output_dir / "result.json", result)
+    conversation_output = _assistant_conversation_text(web_client_agent)
+    assistant_output = conversation_output or transcript_writer.assistant_text
+    output_sources = _transcript_sources(
+        ("conversation", conversation_output),
+        ("incremental", transcript_writer.assistant_text),
+    )
+    transcript_writer.write_snapshot(
+        assistant_output=assistant_output,
+        output_sources=output_sources,
+        status=EXECUTION_DONE_CHANNEL,
+    )
     logger.debug(
         "Web-client Stage 2 agent finished run_id=%s overall_result=%s artifacts_dir=%s",
         result.get("run_id"),
@@ -1246,6 +1309,7 @@ async def _run_web_client_stage_impl(
                 "input": str(plan_path),
                 "run_id": result.get("run_id"),
                 "artifacts_dir": result.get("artifacts_dir"),
+                "transcript": ANALYSIS_TRANSCRIPT_FILE,
             },
         )
     )
@@ -1437,6 +1501,17 @@ def _web_client_stage_plan_channel(plan: dict[str, Any]) -> str:
     if plan.get("is_verification"):
         return "web_client_verification_request"
     return "web_client_plan_ready"
+
+
+def _web_client_stage_prompt(route_channel: str, message: Any) -> str:
+    payload = json.dumps(message, ensure_ascii=True, sort_keys=True, default=str)
+    return (
+        f"Channel: {route_channel}\n\n"
+        "Web-client Stage 2 handoff JSON:\n"
+        "```json\n"
+        f"{payload}\n"
+        "```"
+    )
 
 
 def _execution_stage_plan_channel(plan: dict[str, Any]) -> str:
@@ -3092,6 +3167,13 @@ def _get_agent(engine: Any, name: str) -> Any:
     raise KeyError(f"Terrarium engine does not expose agent {name!r}")
 
 
+def _optional_agent(engine: Any, name: str) -> Any | None:
+    try:
+        return _get_agent(engine, name)
+    except KeyError:
+        return None
+
+
 def _suppress_default_output(creature_or_agent: Any) -> None:
     """Prevent KohakuTerrarium's default stdout output from duplicating chat.
 
@@ -3349,13 +3431,15 @@ def _merge_transcript_sources(*sources: str) -> str:
 
 def _analysis_transcript_payload(
     *,
-    issue_url: str,
-    container_version: str,
+    issue_url: str | None,
+    container_version: str | None,
     prompt: str,
     issue_thread: dict[str, Any] | None,
     system_prompt: str | None,
     assistant_output: str,
     output_sources: list[dict[str, str]],
+    stage: str = "analysis",
+    input_metadata: dict[str, Any] | None = None,
     messages: list[dict[str, Any]] | None = None,
     status: str | None = None,
     provider_requests: list[dict[str, Any]] | None = None,
@@ -3383,18 +3467,22 @@ def _analysis_transcript_payload(
                 },
             ]
         )
+    input_payload: dict[str, Any] = {
+        "system_prompt": system_prompt,
+        "prompt": prompt,
+        "issue_url": issue_url,
+        "container_version": container_version,
+        "prefetched_issue_thread": issue_thread,
+    }
+    if input_metadata:
+        input_payload.update(_json_safe_value(input_metadata))
+
     payload = {
-        "stage": "analysis",
+        "stage": stage,
         "schema_version": 1,
         "issue_url": issue_url,
         "container_version": container_version,
-        "input": {
-            "system_prompt": system_prompt,
-            "prompt": prompt,
-            "issue_url": issue_url,
-            "container_version": container_version,
-            "prefetched_issue_thread": issue_thread,
-        },
+        "input": input_payload,
         "output": {
             "assistant": assistant_output,
             "sources": output_sources,
