@@ -84,7 +84,10 @@ handoff folders:
 - `GITHUB_TOKEN`: Recommended to avoid GitHub API rate limits.
 - `JF_AUTO_TESTER_LOG_LEVEL`: Controls logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
 - `JF_AUTO_TESTER_LOG_STDERR`: Controls whether logs are mirrored to stderr (`on`, `off`, `auto`).
-- `JF_AUTO_TESTER_BROWSER_HEADLESS`: Controls browser visibility in Stage 2 (`true`, `false`, `auto`).
+- `JF_AUTO_TESTER_BROWSER_HEADLESS`: Controls browser visibility in Stage 2.
+  Leave unset or use `auto` to show a GUI browser when the host has a display,
+  `true` to force headless mode, or `false` / `headed` / `gui` to force a
+  visible browser.
 
 ### Browser Steps
 

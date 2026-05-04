@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.browser import BrowserDriver, DOM_SUMMARY_SCRIPT, MEDIA_STATE_SCRIPT
+from tools.screenshot import BROWSER_HEADLESS_ENV
 
 
 class FakeConsoleMessage:
@@ -363,6 +365,19 @@ class BrowserDriverTests(unittest.TestCase):
 
             self.assertTrue(manager.playwright.chromium.browser.closed)
             self.assertTrue(manager.exited)
+
+    def test_launch_uses_browser_visibility_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            driver, manager = self.make_driver(temp_dir, page)
+
+            with patch.dict("os.environ", {BROWSER_HEADLESS_ENV: "gui"}, clear=True):
+                driver.run({"actions": [{"type": "wait_for", "selector": "body"}]})
+
+            self.assertEqual(
+                manager.playwright.chromium.launches,
+                [{"headless": False}],
+            )
 
 
 if __name__ == "__main__":
