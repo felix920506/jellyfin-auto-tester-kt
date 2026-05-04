@@ -127,8 +127,9 @@ class BrowserContractTests(unittest.TestCase):
             "https://demo.jellyfin.org/unstable",
         )
 
-    def test_web_client_task_schema_accepts_browser_request(self):
-        task = {
+    def test_web_client_task_schema_accepts_session_commands(self):
+        start_task = {
+            "command": "start",
             "request_id": "request-1",
             "run_id": "run-1",
             "base_url": "http://localhost:8096",
@@ -138,24 +139,58 @@ class BrowserContractTests(unittest.TestCase):
                 "path": "/web",
                 "auth": {"mode": "auto", "username": "demo", "password": ""},
                 "locale": "fr-FR",
-                "actions": [
-                    {"type": "goto"},
-                    {"type": "screenshot", "label": "home"},
-                ],
             },
+        }
+        action_task = {
+            "command": "action",
+            "request_id": "request-2",
+            "session_id": "session-1",
+            "action": {"type": "goto"},
             "selector_assertions": [{"selector": "body", "state": "visible"}],
             "capture": {"url": {"from": "browser_url"}},
-            "repair_policy": {
-                "enabled": True,
-                "max_attempts": 1,
-                "browser_input": {"locale": "en-GB", "actions": [{"type": "refresh"}]},
-            },
+        }
+        finalize_task = {
+            "command": "finalize",
+            "request_id": "request-3",
+            "session_id": "session-1",
         }
         validator = Draft202012Validator(load_schema("web_client_task.json"))
 
-        errors = sorted(validator.iter_errors(task), key=lambda error: error.path)
+        errors = []
+        for task in (start_task, action_task, finalize_task):
+            errors.extend(validator.iter_errors(task))
 
-        self.assertEqual(errors, [])
+        self.assertEqual(sorted(errors, key=lambda error: error.path), [])
+
+    def test_web_client_task_schema_rejects_multi_action_payloads(self):
+        validator = Draft202012Validator(load_schema("web_client_task.json"))
+        legacy_task = {
+            "command": "start",
+            "request_id": "request-1",
+            "run_id": "run-1",
+            "base_url": "http://localhost:8096",
+            "artifacts_root": "/tmp/artifacts",
+            "browser_input": {
+                "path": "/web",
+                "actions": [{"type": "goto"}],
+            },
+        }
+        top_level_multi_action = {
+            "command": "action",
+            "request_id": "request-2",
+            "session_id": "session-1",
+            "action": [{"type": "goto"}, {"type": "screenshot", "label": "home"}],
+        }
+        top_level_actions = {
+            "command": "action",
+            "request_id": "request-3",
+            "session_id": "session-1",
+            "actions": [{"type": "goto"}],
+        }
+
+        self.assertTrue(list(validator.iter_errors(legacy_task)))
+        self.assertTrue(list(validator.iter_errors(top_level_multi_action)))
+        self.assertTrue(list(validator.iter_errors(top_level_actions)))
 
     def test_web_client_result_schema_accepts_browser_result(self):
         result = {
@@ -266,6 +301,15 @@ class BrowserContractTests(unittest.TestCase):
         self.assertIn("does not own server lifecycle", web_client_prompt)
         self.assertIn("web_client_verification_request", report_prompt)
         self.assertIn('execution_target: "web_client"', report_prompt)
+
+    def test_web_client_prompt_describes_one_action_session_protocol(self):
+        web_client_prompt = (
+            REPO_ROOT / "creatures" / "web_client" / "prompts" / "system.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("one action per browser task", web_client_prompt)
+        self.assertIn("Wait for `web_client_done`", web_client_prompt)
+        self.assertIn('command: "finalize"', web_client_prompt)
 
     def test_plan_normalization_defaults_browser_criteria_to_action_run(self):
         plan = minimal_plan()

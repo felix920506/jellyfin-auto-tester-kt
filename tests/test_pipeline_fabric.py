@@ -275,6 +275,88 @@ class FakeChannel:
         return self.message
 
 
+class FakeAsyncChannel:
+    def __init__(self):
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.history = []
+        self.callbacks = []
+
+    async def send(self, message):
+        self.history.append(message)
+        for callback in list(self.callbacks):
+            callback(getattr(message, "channel", None) or "", message)
+        await self.queue.put(message)
+
+    async def receive(self):
+        return await self.queue.get()
+
+    def on_send(self, callback):
+        self.callbacks.append(callback)
+
+    def remove_on_send(self, callback):
+        self.callbacks.remove(callback)
+
+
+class FakeWebClientStageEngine:
+    def __init__(self):
+        self.channels = {
+            "web_client_plan_ready": FakeAsyncChannel(),
+            "web_client_verification_request": FakeAsyncChannel(),
+            "execution_done": FakeAsyncChannel(),
+        }
+        self.received_channel = None
+        self.received_payload = None
+        self.run_thread = None
+        self.stopped = False
+
+    async def run(self):
+        self.run_thread = threading.get_ident()
+        pending = {
+            asyncio.create_task(self.channels[channel].receive()): channel
+            for channel in (
+                "web_client_plan_ready",
+                "web_client_verification_request",
+            )
+        }
+        done, pending_tasks = await asyncio.wait(
+            set(pending),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending_tasks:
+            task.cancel()
+        message_task = next(iter(done))
+        self.received_channel = pending[message_task]
+        message = message_task.result()
+        self.received_payload = json.loads(message.content)
+        plan = self.received_payload.get("plan", self.received_payload)
+        run_id = self.received_payload.get("run_id") or "web-agent-run"
+        result = {
+            "plan": plan,
+            "run_id": run_id,
+            "is_verification": bool(plan.get("is_verification", False)),
+            "original_run_id": plan.get("original_run_id"),
+            "container_id": None,
+            "execution_log": [_sample_execution_entry(plan)],
+            "overall_result": "reproduced",
+            "artifacts_dir": "agent-artifacts",
+            "jellyfin_logs": "",
+            "error_summary": None,
+        }
+        await self.channels["execution_done"].send(
+            types.SimpleNamespace(
+                sender="web_client_agent",
+                content=json.dumps(result),
+                metadata={},
+                message_id="execution-done",
+                reply_to=None,
+                channel="execution_done",
+            )
+        )
+
+    async def stop(self):
+        self.stopped = True
+
+
 class HangingChannel:
     async def receive(self):
         await asyncio.Event().wait()
@@ -1467,6 +1549,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
     def test_run_web_client_stage_reads_plan_and_writes_execution_result(self):
         plan = _sample_web_client_plan()
+        engine = FakeWebClientStageEngine()
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
@@ -1477,7 +1560,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 input_dir,
                 temp_path / "web-client",
                 run_id="web-run-1",
-                runner_factory=lambda artifacts_root: FakeStage2Runner(artifacts_root),
+                engine_factory=lambda stage: engine,
             )
 
             result_path = temp_path / "web-client" / "execution_result.json"
@@ -1488,25 +1571,67 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["run_id"], "web-run-1")
             self.assertEqual(payload["plan"], plan)
             self.assertTrue((temp_path / "web-client" / "result.json").is_file())
+            self.assertEqual(engine.received_channel, "web_client_plan_ready")
+            self.assertEqual(engine.received_payload["run_id"], "web-run-1")
+            self.assertEqual(engine.received_payload["plan"], plan)
+            self.assertTrue(engine.stopped)
 
-    def test_web_client_stage_offloads_sync_runner_inside_active_event_loop(self):
+    def test_run_web_client_stage_emits_debug_logging(self):
+        plan = _sample_web_client_plan()
+        engine = FakeWebClientStageEngine()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            with self.assertLogs(LOGGER_NAME, level="DEBUG") as logs:
+                run_web_client_stage(
+                    input_dir,
+                    temp_path / "web-client",
+                    run_id="web-run-logs",
+                    engine_factory=lambda stage: engine,
+                )
+
+            output = "\n".join(logs.output)
+            self.assertIn("Loaded web-client Stage 2 plan", output)
+            self.assertIn("Routing web-client Stage 2 plan through KT agent", output)
+            self.assertIn("Sent web-client Stage 2 plan", output)
+            self.assertIn("Web-client Stage 2 agent finished", output)
+
+    def test_run_web_client_stage_routes_verification_request_channel(self):
+        plan = _sample_web_client_plan()
+        plan["is_verification"] = True
+        engine = FakeWebClientStageEngine()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            result = run_web_client_stage(
+                input_dir,
+                temp_path / "web-client",
+                engine_factory=lambda stage: engine,
+            )
+
+            self.assertEqual(result.status, "reproduced")
+            self.assertEqual(
+                engine.received_channel,
+                "web_client_verification_request",
+            )
+
+    def test_web_client_stage_offloads_agent_engine_inside_active_event_loop(self):
         plan = _sample_web_client_plan()
         main_thread = threading.get_ident()
-        runner_thread: dict[str, int] = {}
-
-        class ThreadRecordingRunner(FakeStage2Runner):
-            def execute_plan(self, plan, run_id=None):
-                runner_thread["id"] = threading.get_ident()
-                return super().execute_plan(plan, run_id=run_id)
+        engine = FakeWebClientStageEngine()
 
         async def call_stage(input_dir, output_dir):
             return run_web_client_stage(
                 input_dir,
                 output_dir,
                 run_id="web-run-threaded",
-                runner_factory=lambda artifacts_root: ThreadRecordingRunner(
-                    artifacts_root
-                ),
+                engine_factory=lambda stage: engine,
             )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1518,8 +1643,8 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             result = asyncio.run(call_stage(input_dir, temp_path / "web-client"))
 
             self.assertEqual(result.status, "reproduced")
-            self.assertIn("id", runner_thread)
-            self.assertNotEqual(runner_thread["id"], main_thread)
+            self.assertIsNotNone(engine.run_thread)
+            self.assertNotEqual(engine.run_thread, main_thread)
 
     def test_run_report_stage_writes_report_and_verification_plan(self):
         plan = _sample_plan()

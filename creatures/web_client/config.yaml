@@ -2,7 +2,7 @@ name: "web_client_agent"
 version: "1.0"
 
 controller:
-  llm: "openrouter/claude-opus-4.7"
+  llm: "openrouter/gemini-3-flash"
   temperature: 0.1
 
 system_prompt_file: "prompts/system.md"

@@ -171,6 +171,19 @@ class BrowserDriver:
         )
         return evidence
 
+    def run_single_action(
+        self,
+        browser_input: Mapping[str, Any],
+        action: Mapping[str, Any],
+        run_id: str | None = None,
+        step_id: int | str | None = None,
+    ) -> dict[str, Any]:
+        """Execute exactly one browser action while preserving the session."""
+
+        action_input = dict(browser_input)
+        action_input["actions"] = [dict(action)]
+        return self.run(action_input, run_id=run_id, step_id=step_id)
+
     def close(self) -> None:
         """Close the persistent browser session."""
 

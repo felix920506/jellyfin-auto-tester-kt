@@ -1,8 +1,10 @@
+import copy
+import json
 import tempfile
 import unittest
-import copy
 from pathlib import Path
 
+import tools.web_client_runner as web_client_runner_module
 from tools.web_client_runner import WebClientRunner
 
 from tests.test_execution_runner import (
@@ -110,6 +112,15 @@ class WebClientRunnerTests(unittest.TestCase):
                     }
                 ],
             )
+            debug_log = Path(temp_dir, "demo-run", "web_client_runner.log")
+            events = [
+                json.loads(line)["event"]
+                for line in debug_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("demo_plan_start", events)
+            self.assertIn("step_start", events)
+            self.assertIn("step_done", events)
+            self.assertIn("demo_plan_done", events)
 
     def test_demo_plan_injects_demo_credentials_for_auto_auth(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -315,7 +326,7 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(docker.pulled, [])
             self.assertEqual(docker.started, [])
 
-    def test_task_mode_uses_supplied_base_url_and_never_starts_docker(self):
+    def test_task_start_returns_session_without_running_browser_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             docker = FakeDocker()
             browser_driver = FakeBrowserDriver(temp_dir)
@@ -325,10 +336,12 @@ class WebClientRunnerTests(unittest.TestCase):
                 api=FakeAPI(),
                 screenshotter=FakeScreenshotter(temp_dir),
                 browser_driver=browser_driver,
+                uuid_factory=lambda: "session-1",
             )
 
             result = runner.run_task(
                 {
+                    "command": "start",
                     "request_id": "request-1",
                     "run_id": "task-run",
                     "base_url": "http://localhost:9000",
@@ -337,16 +350,15 @@ class WebClientRunnerTests(unittest.TestCase):
                     "browser_input": {
                         "path": "/web",
                         "label": "home",
-                        "actions": [{"type": "screenshot", "label": "home"}],
                     },
-                    "selector_assertions": [{"selector": "body", "state": "visible"}],
-                    "capture": {"current_url": {"from": "browser_url"}},
                 }
             )
 
             self.assertEqual(result["status"], "pass")
             self.assertEqual(result["request_id"], "request-1")
-            self.assertEqual(result["capture_values"]["current_url"], "http://localhost:8097/web")
+            self.assertEqual(result["session_id"], "session-1")
+            self.assertIsNone(result["browser"])
+            self.assertEqual(browser_driver.runs, [])
             self.assertEqual(docker.pulled, [])
             self.assertEqual(docker.started, [])
             self.assertEqual(
@@ -354,117 +366,152 @@ class WebClientRunnerTests(unittest.TestCase):
                 [{"base_url": "http://localhost:9000", "run_id": "task-run"}],
             )
 
-    def test_task_mode_allows_one_browser_input_repair_only(self):
+    def test_task_action_runs_exactly_one_action_and_returns_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            repaired_path = Path(temp_dir) / "fixed.png"
-            repaired_path.write_bytes(b"png")
-            browser_driver = FakeBrowserDriver(
-                temp_dir,
-                results=[
-                    {
-                        "status": "fail",
-                        "actions": [
-                            {
-                                "type": "click",
-                                "status": "fail",
-                                "selector": "#old",
-                                "error": "selector not found",
-                            }
-                        ],
-                        "screenshot_paths": [],
-                        "final_url": "http://localhost:9000/web",
-                        "title": "Jellyfin",
-                        "console": [],
-                        "failed_network": [],
-                        "dom_summary": "old",
-                        "dom_path": None,
-                        "page_text": "old",
-                        "media_state": {"state": "none", "elements": []},
-                        "error": "selector not found",
-                    },
-                    {
-                        "status": "pass",
-                        "actions": [
-                            {
-                                "type": "screenshot",
-                                "status": "pass",
-                                "label": "fixed",
-                                "screenshot_path": str(repaired_path),
-                            }
-                        ],
-                        "screenshot_paths": [str(repaired_path)],
-                        "final_url": "http://localhost:9000/web",
-                        "title": "Jellyfin",
-                        "console": [],
-                        "failed_network": [],
-                        "dom_summary": "fixed",
-                        "dom_path": None,
-                        "page_text": "fixed",
-                        "media_state": {"state": "none", "elements": []},
-                        "error": None,
-                    },
-                ],
-            )
+            browser_driver = FakeBrowserDriver(temp_dir)
             runner = WebClientRunner(
                 artifacts_root=temp_dir,
                 docker=FakeDocker(),
                 api=FakeAPI(),
                 screenshotter=FakeScreenshotter(temp_dir),
                 browser_driver=browser_driver,
+                uuid_factory=lambda: "session-1",
+            )
+            start = runner.run_task(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "task-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                    "step_id": 7,
+                    "browser_input": {"path": "/web", "label": "home"},
+                }
             )
 
             result = runner.run_task(
                 {
-                    "request_id": "repair-1",
-                    "run_id": "repair-run",
-                    "base_url": "http://localhost:9000",
-                    "artifacts_root": temp_dir,
-                    "step_id": 7,
-                    "browser_input": {
-                        "path": "/web",
-                        "actions": [{"type": "click", "selector": "#old"}],
-                    },
-                    "repair_policy": {
-                        "browser_input": {
-                            "label": "fixed",
-                            "locale": "fr-FR",
-                            "actions": [
-                                {"type": "refresh"},
-                                {"type": "click", "selector": "#new"},
-                                {"type": "screenshot", "label": "fixed"},
-                            ],
-                        }
-                    },
+                    "command": "action",
+                    "request_id": "action-1",
+                    "session_id": start["session_id"],
+                    "action": {"type": "goto"},
+                    "selector_assertions": [{"selector": "body", "state": "visible"}],
+                    "capture": {"current_url": {"from": "browser_url"}},
                 }
             )
 
             self.assertEqual(result["status"], "pass")
-            self.assertTrue(result["repair_attempted"])
+            self.assertEqual(result["session_id"], "session-1")
+            self.assertEqual(result["browser"]["dom_summary"], "title='Jellyfin'")
+            self.assertEqual(
+                result["capture_values"]["current_url"],
+                "http://localhost:8097/web",
+            )
+            self.assertEqual(browser_driver.inspected_selectors, [["body"]])
+            self.assertEqual(len(browser_driver.runs), 1)
+            self.assertEqual(
+                browser_driver.runs[0]["browser_input"]["actions"],
+                [{"type": "goto"}],
+            )
+
+    def test_task_actions_reuse_session_driver_between_results(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "session-1",
+            )
+            start = runner.run_task(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "task-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                    "browser_input": {"path": "/web", "label": "home"},
+                }
+            )
+
+            first = runner.run_task(
+                {
+                    "command": "action",
+                    "request_id": "action-1",
+                    "session_id": start["session_id"],
+                    "action": {"type": "goto"},
+                }
+            )
+            self.assertEqual(first["status"], "pass")
+            self.assertEqual(len(browser_driver.runs), 1)
+
+            second = runner.run_task(
+                {
+                    "command": "action",
+                    "request_id": "action-2",
+                    "session_id": start["session_id"],
+                    "browser_input": {"locale": "fr-FR", "label": "after"},
+                    "action": {"type": "screenshot", "label": "after"},
+                }
+            )
+
+            self.assertEqual(second["status"], "pass")
             self.assertEqual(len(browser_driver.runs), 2)
-            self.assertEqual(browser_driver.runs[1]["browser_input"]["label"], "fixed")
+            self.assertFalse(browser_driver.closed)
+            self.assertEqual(
+                browser_driver.runs[1]["browser_input"]["actions"],
+                [{"type": "screenshot", "label": "after"}],
+            )
+            self.assertEqual(browser_driver.runs[1]["browser_input"]["path"], "/web")
             self.assertEqual(browser_driver.runs[1]["browser_input"]["locale"], "fr-FR")
 
-    def test_task_mode_rejects_repair_fields_outside_browser_input(self):
+    def test_task_finalize_closes_driver_and_removes_session(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            browser_driver = FakeBrowserDriver(
-                temp_dir,
-                results=[
-                    {
-                        "status": "fail",
-                        "actions": [{"type": "click", "status": "fail", "error": "bad"}],
-                        "screenshot_paths": [],
-                        "final_url": "http://localhost:9000/web",
-                        "title": "Jellyfin",
-                        "console": [],
-                        "failed_network": [],
-                        "dom_summary": "bad",
-                        "dom_path": None,
-                        "page_text": "bad",
-                        "media_state": {"state": "none", "elements": []},
-                        "error": "bad",
-                    }
-                ],
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "session-1",
             )
+            start = runner.run_task(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "task-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+
+            finalized = runner.run_task(
+                {
+                    "command": "finalize",
+                    "request_id": "finalize-1",
+                    "session_id": start["session_id"],
+                }
+            )
+            after_finalize = runner.run_task(
+                {
+                    "command": "action",
+                    "request_id": "action-after-finalize",
+                    "session_id": start["session_id"],
+                    "action": {"type": "screenshot", "label": "late"},
+                }
+            )
+
+            self.assertEqual(finalized["status"], "pass")
+            self.assertTrue(browser_driver.closed)
+            self.assertEqual(after_finalize["status"], "error")
+            self.assertIn("browser session not found", after_finalize["error"])
+
+    def test_task_mode_rejects_legacy_multi_action_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
             runner = WebClientRunner(
                 artifacts_root=temp_dir,
                 docker=FakeDocker(),
@@ -475,28 +522,61 @@ class WebClientRunnerTests(unittest.TestCase):
 
             result = runner.run_task(
                 {
-                    "request_id": "repair-reject",
-                    "run_id": "repair-reject-run",
+                    "request_id": "legacy-1",
+                    "run_id": "legacy-run",
                     "base_url": "http://localhost:9000",
                     "artifacts_root": temp_dir,
-                    "step_id": 7,
                     "browser_input": {
                         "path": "/web",
-                        "actions": [{"type": "click", "selector": "#old"}],
-                    },
-                    "repair_policy": {
-                        "browser_input": {
-                            "actions": [{"type": "click", "selector": "#new"}],
-                            "success_criteria": {
-                                "all_of": [{"type": "browser_action_run"}]
-                            },
-                        }
+                        "actions": [
+                            {"type": "goto"},
+                            {"type": "screenshot", "label": "home"},
+                        ],
                     },
                 }
             )
 
-            self.assertEqual(result["status"], "fail")
-            self.assertIn("forbidden browser repair fields", result["error"])
+            self.assertEqual(result["status"], "error")
+            self.assertIn("legacy browser_input.actions", result["error"])
+            self.assertEqual(browser_driver.runs, [])
+
+    def test_module_level_run_task_preserves_sessions_across_calls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "module-session",
+            )
+            previous = web_client_runner_module._DEFAULT_TASK_RUNNER
+            web_client_runner_module._DEFAULT_TASK_RUNNER = runner
+            try:
+                start = web_client_runner_module.run_task(
+                    {
+                        "command": "start",
+                        "request_id": "module-start",
+                        "run_id": "module-run",
+                        "base_url": "http://localhost:9000",
+                        "artifacts_root": temp_dir,
+                        "browser_input": {"path": "/web"},
+                    }
+                )
+                action = web_client_runner_module.run_task(
+                    {
+                        "command": "action",
+                        "request_id": "module-action",
+                        "session_id": start["session_id"],
+                        "action": {"type": "goto"},
+                    }
+                )
+            finally:
+                web_client_runner_module._DEFAULT_TASK_RUNNER = previous
+
+            self.assertEqual(start["session_id"], "module-session")
+            self.assertEqual(action["status"], "pass")
             self.assertEqual(len(browser_driver.runs), 1)
 
 

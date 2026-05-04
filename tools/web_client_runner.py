@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
 import time
 import uuid
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -41,22 +43,31 @@ DEMO_SERVER_URLS = {
     "unstable": "https://demo.jellyfin.org/unstable",
 }
 STEP_TIMEOUT_S = 120
-ALLOWED_BROWSER_REPAIR_FIELDS = {
-    "actions",
+TASK_BROWSER_METADATA_FIELDS = {
     "path",
     "url",
+    "auth",
     "label",
     "timeout_s",
     "viewport",
     "locale",
 }
-REPAIR_POLICY_CONTROL_FIELDS = {
-    "enabled",
-    "max_attempts",
-    "browser_input",
-    "retry_browser_input",
-    "input",
-}
+DEBUG_LOG_FILE = "web_client_runner.log"
+LOGGER = logging.getLogger(
+    "kohakuterrarium.jellyfin_auto_tester.tools.web_client_runner"
+)
+
+
+@dataclass
+class _TaskBrowserSession:
+    session_id: str
+    run_id: str
+    base_url: str
+    artifacts_root: Path
+    artifacts_dir: Path
+    browser_input: dict[str, Any]
+    step_id: Any
+    browser_driver: Any
 
 
 class WebClientRunner:
@@ -84,6 +95,7 @@ class WebClientRunner:
         self._browser_driver_injected = browser_driver is not None
         self.command_runner = command_runner or self._run_bash
         self.uuid_factory = uuid_factory
+        self._task_sessions: dict[str, _TaskBrowserSession] = {}
 
     def execute_plan(
         self,
@@ -96,9 +108,19 @@ class WebClientRunner:
         artifacts_dir = self.artifacts_root / run_id
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         _write_json(artifacts_dir / "plan.json", plan)
+        self._debug_event(
+            run_id,
+            "execute_plan_start",
+            _plan_debug_payload(plan),
+        )
 
         server_target = _server_target(plan)
         if server_target.get("mode") == "demo":
+            self._debug_event(
+                run_id,
+                "execute_plan_route_demo",
+                {"base_url": _demo_base_url(server_target, plan)},
+            )
             return self._execute_demo_plan(
                 plan=plan,
                 run_id=run_id,
@@ -124,6 +146,11 @@ class WebClientRunner:
         container_crashed = False
 
         try:
+            self._debug_event(
+                run_id,
+                "docker_plan_setup_start",
+                {"docker_image": plan.get("docker_image")},
+            )
             prepared = self._prepare_environment(plan, run_id)
             self.docker.pull(plan["docker_image"], run_id=run_id)
             start_result = self.docker.start(
@@ -134,6 +161,15 @@ class WebClientRunner:
                 run_id=run_id,
             )
             container_id = start_result.get("container_id")
+            self._debug_event(
+                run_id,
+                "docker_plan_container_started",
+                {
+                    "container_id": container_id,
+                    "base_url": start_result.get("base_url"),
+                    "host_port": start_result.get("host_port"),
+                },
+            )
             if hasattr(self.api, "configure"):
                 self.api.configure(base_url=start_result.get("base_url"), run_id=run_id)
             if hasattr(self.browser_driver, "configure"):
@@ -143,12 +179,25 @@ class WebClientRunner:
                 )
 
             health = self.api.wait_healthy(timeout_s=60)
+            self._debug_event(
+                run_id,
+                "docker_plan_health_checked",
+                {
+                    "healthy": health.get("healthy"),
+                    "error": health.get("error"),
+                },
+            )
             if not health.get("healthy"):
                 setup_failed = True
                 error_summary = f"Jellyfin did not become healthy: {health.get('error')}"
             else:
                 self.api.complete_startup_wizard()
                 auth = self.api.authenticate()
+                self._debug_event(
+                    run_id,
+                    "docker_plan_auth_checked",
+                    {"success": auth.get("success")},
+                )
                 if not auth.get("success"):
                     setup_failed = True
                     error_summary = "authentication failed"
@@ -160,6 +209,7 @@ class WebClientRunner:
                 )
             else:
                 for index, step in enumerate(plan.get("reproduction_steps", [])):
+                    self._debug_event(run_id, "step_start", _step_debug_payload(step))
                     if container_id and not self._container_running(container_id):
                         container_crashed = True
                         execution_log.extend(
@@ -178,6 +228,7 @@ class WebClientRunner:
                         screenshots=screenshots,
                     )
                     execution_log.append(entry)
+                    self._debug_event(run_id, "step_done", _entry_debug_payload(entry))
 
             if container_id:
                 try:
@@ -186,11 +237,26 @@ class WebClientRunner:
                         tail="all",
                         run_id=run_id,
                     ).get("logs", "")
+                    self._debug_event(
+                        run_id,
+                        "docker_plan_logs_collected",
+                        {"size": len(jellyfin_logs)},
+                    )
                 except Exception as exc:
                     error_summary = error_summary or f"failed to collect logs: {exc}"
+                    self._debug_event(
+                        run_id,
+                        "docker_plan_logs_failed",
+                        {"error": str(exc)},
+                    )
         except Exception as exc:
             setup_failed = True
             error_summary = str(exc)
+            self._debug_event(
+                run_id,
+                "execute_plan_error",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+            )
             if not execution_log:
                 execution_log = self._skip_all_steps(plan, reason=error_summary)
         finally:
@@ -198,11 +264,26 @@ class WebClientRunner:
                 self.browser_driver.close()
             except Exception as exc:
                 error_summary = error_summary or f"failed to close browser: {exc}"
+                self._debug_event(
+                    run_id,
+                    "browser_close_failed",
+                    {"error": str(exc)},
+                )
             if container_id:
                 try:
                     self.docker.stop(container_id, run_id=run_id)
+                    self._debug_event(
+                        run_id,
+                        "docker_plan_container_stopped",
+                        {"container_id": container_id},
+                    )
                 except Exception as exc:
                     error_summary = error_summary or f"failed to stop container: {exc}"
+                    self._debug_event(
+                        run_id,
+                        "docker_plan_stop_failed",
+                        {"container_id": container_id, "error": str(exc)},
+                    )
 
         if jellyfin_logs:
             (artifacts_dir / "jellyfin_server.log").write_text(
@@ -210,6 +291,11 @@ class WebClientRunner:
                 encoding="utf-8",
             )
 
+        overall_result = self._overall_result(
+            execution_log,
+            setup_failed=setup_failed,
+            container_crashed=container_crashed,
+        )
         result = {
             "plan": plan,
             "run_id": run_id,
@@ -217,15 +303,20 @@ class WebClientRunner:
             "original_run_id": plan.get("original_run_id"),
             "container_id": container_id,
             "execution_log": execution_log,
-            "overall_result": self._overall_result(
-                execution_log,
-                setup_failed=setup_failed,
-                container_crashed=container_crashed,
-            ),
+            "overall_result": overall_result,
             "artifacts_dir": str(artifacts_dir),
             "jellyfin_logs": jellyfin_logs,
             "error_summary": error_summary,
         }
+        self._debug_event(
+            run_id,
+            "execute_plan_done",
+            {
+                "overall_result": overall_result,
+                "error_summary": error_summary,
+                "execution_log_count": len(execution_log),
+            },
+        )
         _write_json(artifacts_dir / "result.json", result)
         return result
 
@@ -270,6 +361,17 @@ class WebClientRunner:
         setup_failed = False
         base_url = _demo_base_url(server_target, plan)
         browser_auth = _demo_browser_auth(server_target)
+        self._debug_event(
+            run_id,
+            "demo_plan_start",
+            {
+                "base_url": base_url,
+                "release_track": server_target.get("release_track"),
+                "step_count": len(plan.get("reproduction_steps", []))
+                if isinstance(plan.get("reproduction_steps"), list)
+                else 0,
+            },
+        )
 
         try:
             if hasattr(self.api, "configure"):
@@ -278,19 +380,25 @@ class WebClientRunner:
                 self.browser_driver.configure(base_url=base_url, run_id=run_id)
 
             for step in plan.get("reproduction_steps", []):
-                execution_log.append(
-                    self._execute_step(
-                        step=step,
-                        run_id=run_id,
-                        container_id=None,
-                        variables=variables,
-                        screenshots=screenshots,
-                        browser_auth=browser_auth,
-                    )
+                self._debug_event(run_id, "step_start", _step_debug_payload(step))
+                entry = self._execute_step(
+                    step=step,
+                    run_id=run_id,
+                    container_id=None,
+                    variables=variables,
+                    screenshots=screenshots,
+                    browser_auth=browser_auth,
                 )
+                execution_log.append(entry)
+                self._debug_event(run_id, "step_done", _entry_debug_payload(entry))
         except Exception as exc:
             setup_failed = True
             error_summary = str(exc)
+            self._debug_event(
+                run_id,
+                "demo_plan_error",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+            )
             if not execution_log:
                 execution_log = self._skip_all_steps(plan, reason=error_summary)
         finally:
@@ -298,6 +406,11 @@ class WebClientRunner:
                 self.browser_driver.close()
             except Exception as exc:
                 error_summary = error_summary or f"failed to close browser: {exc}"
+                self._debug_event(
+                    run_id,
+                    "browser_close_failed",
+                    {"error": str(exc)},
+                )
 
         overall_result = self._overall_result(
             execution_log,
@@ -322,6 +435,15 @@ class WebClientRunner:
             "jellyfin_logs": "",
             "error_summary": error_summary,
         }
+        self._debug_event(
+            run_id,
+            "demo_plan_done",
+            {
+                "overall_result": overall_result,
+                "error_summary": error_summary,
+                "execution_log_count": len(execution_log),
+            },
+        )
         _write_json(artifacts_dir / "result.json", result)
         return result
 
@@ -330,94 +452,267 @@ class WebClientRunner:
         task: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Run a delegated browser task against an already-running Jellyfin URL."""
+        """Run one command in a delegated interactive browser task session."""
 
         payload = dict(task or kwargs)
-        request_id = str(payload.get("request_id") or self.uuid_factory())
-        run_id = str(payload.get("run_id") or "")
-        base_url = str(payload.get("base_url") or "")
-        artifacts_root = Path(
-            payload.get("artifacts_root") or self.artifacts_root
-        ).expanduser().resolve()
-        step_id = payload.get("step_id")
-        browser_input = payload.get("browser_input")
+        request_id_value = payload.get("request_id")
+        request_id = str(request_id_value or "unknown")
+        session_id = str(payload.get("session_id") or "")
+        command = str(payload.get("command") or "").strip().lower()
 
-        if not run_id or not base_url or not isinstance(browser_input, dict):
-            return _web_client_error(
+        if not request_id_value:
+            return _web_client_error(request_id, "request_id is required", session_id)
+
+        legacy_error = _legacy_task_payload_error(payload)
+        if legacy_error:
+            result = _web_client_error(request_id, legacy_error, session_id)
+            self._write_task_result_if_possible(payload, result)
+            return result
+
+        if not command:
+            result = _web_client_error(
                 request_id,
-                "run_id, base_url, and browser_input are required",
+                "web_client_task command is required; use start, action, or finalize",
+                session_id,
             )
+            self._write_task_result_if_possible(payload, result)
+            return result
 
-        artifacts_dir = artifacts_root / run_id
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        _write_json(artifacts_dir / f"web_client_task_{_safe_label(request_id)}.json", payload)
-
-        browser_driver = self._task_browser_driver(artifacts_root, base_url, run_id)
-        attempts: list[dict[str, Any]] = []
         try:
-            result = self._run_task_attempt(
-                request_id=request_id,
-                browser_driver=browser_driver,
-                browser_input=browser_input,
-                run_id=run_id,
-                step_id=step_id,
-                payload=payload,
-            )
-            attempts.append(result)
-
-            if result["status"] != "pass":
-                repair_input, repair_error = _repair_input_from_policy(
-                    original_input=browser_input,
-                    repair_policy=payload.get("repair_policy"),
+            if command == "start":
+                return self._start_task_session(request_id=request_id, payload=payload)
+            if command == "action":
+                return self._run_task_session_action(
+                    request_id=request_id,
+                    session_id=session_id,
+                    payload=payload,
                 )
-                if repair_error:
-                    result["error"] = f"repair rejected: {repair_error}"
-                elif repair_input is not None:
-                    repaired = self._run_task_attempt(
-                        request_id=request_id,
-                        browser_driver=browser_driver,
-                        browser_input=repair_input,
-                        run_id=run_id,
-                        step_id=step_id,
-                        payload=payload,
-                    )
-                    repaired["repair_attempted"] = True
-                    attempts.append(repaired)
-                    result = repaired
-
-            if len(attempts) > 1:
-                result["browser_attempts"] = [
-                    attempt.get("browser") for attempt in attempts
-                ]
-            _write_json(
-                artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
-                result,
+            if command == "finalize":
+                return self._finalize_task_session(
+                    request_id=request_id,
+                    session_id=session_id,
+                    payload=payload,
+                )
+            result = _web_client_error(
+                request_id,
+                f"unsupported web_client_task command: {command}",
+                session_id,
             )
+            self._write_task_result_if_possible(payload, result)
             return result
         except Exception as exc:
-            result = _web_client_error(request_id, str(exc))
-            _write_json(
-                artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
-                result,
-            )
+            result = _web_client_error(request_id, str(exc), session_id)
+            self._write_task_result_if_possible(payload, result)
             return result
-        finally:
-            try:
-                browser_driver.close()
-            except Exception:
-                pass
 
-    def _run_task_attempt(
+    def _start_task_session(
         self,
         *,
         request_id: str,
-        browser_driver: Any,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        run_id = str(payload.get("run_id") or "")
+        base_url = str(payload.get("base_url") or "")
+        artifacts_root_value = payload.get("artifacts_root")
+        if not run_id or not base_url or not artifacts_root_value:
+            result = _web_client_error(
+                request_id,
+                "run_id, base_url, and artifacts_root are required for start",
+            )
+            self._write_task_result_if_possible(payload, result)
+            return result
+
+        browser_input, metadata_error = _task_browser_metadata(
+            payload.get("browser_input")
+        )
+        if metadata_error:
+            result = _web_client_error(request_id, metadata_error)
+            self._write_task_result_if_possible(payload, result)
+            return result
+
+        artifacts_root = Path(str(artifacts_root_value)).expanduser().resolve()
+        artifacts_dir = artifacts_root / run_id
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            artifacts_dir / f"web_client_task_{_safe_label(request_id)}.json",
+            payload,
+        )
+
+        session_id = str(payload.get("session_id") or self.uuid_factory())
+        existing = self._task_sessions.pop(session_id, None)
+        if existing is not None:
+            _close_quietly(existing.browser_driver)
+
+        browser_driver = self._task_browser_driver(artifacts_root, base_url, run_id)
+        self._task_sessions[session_id] = _TaskBrowserSession(
+            session_id=session_id,
+            run_id=run_id,
+            base_url=base_url,
+            artifacts_root=artifacts_root,
+            artifacts_dir=artifacts_dir,
+            browser_input=browser_input,
+            step_id=payload.get("step_id"),
+            browser_driver=browser_driver,
+        )
+        result = _web_client_session_result(
+            request_id=request_id,
+            session_id=session_id,
+            status="pass",
+        )
+        _write_json(
+            artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
+            result,
+        )
+        return result
+
+    def _run_task_session_action(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not session_id:
+            result = _web_client_error(request_id, "session_id is required for action")
+            self._write_task_result_if_possible(payload, result)
+            return result
+        session = self._task_sessions.get(session_id)
+        if session is None:
+            result = _web_client_error(
+                request_id,
+                f"browser session not found: {session_id}",
+                session_id,
+            )
+            self._write_task_result_if_possible(payload, result)
+            return result
+
+        _write_json(
+            session.artifacts_dir / f"web_client_task_{_safe_label(request_id)}.json",
+            payload,
+        )
+        action = payload.get("action")
+        if isinstance(action, list):
+            result = _web_client_error(
+                request_id,
+                "action must be a single browser action object, not an array",
+                session_id,
+            )
+            _write_json(
+                session.artifacts_dir
+                / f"web_client_result_{_safe_label(request_id)}.json",
+                result,
+            )
+            return result
+        if not isinstance(action, dict):
+            result = _web_client_error(
+                request_id,
+                "action is required for action command and must be an object",
+                session_id,
+            )
+            _write_json(
+                session.artifacts_dir
+                / f"web_client_result_{_safe_label(request_id)}.json",
+                result,
+            )
+            return result
+
+        override_input, metadata_error = _task_browser_metadata(
+            payload.get("browser_input")
+        )
+        if metadata_error:
+            result = _web_client_error(request_id, metadata_error, session_id)
+            _write_json(
+                session.artifacts_dir
+                / f"web_client_result_{_safe_label(request_id)}.json",
+                result,
+            )
+            return result
+
+        browser_input = dict(session.browser_input)
+        browser_input.update(override_input)
+        result = self._run_task_action_attempt(
+            request_id=request_id,
+            session=session,
+            browser_input=browser_input,
+            action=action,
+            step_id=payload.get("step_id", session.step_id),
+            payload=payload,
+        )
+        result["session_id"] = session_id
+        _write_json(
+            session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
+            result,
+        )
+        return result
+
+    def _finalize_task_session(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not session_id:
+            result = _web_client_error(request_id, "session_id is required for finalize")
+            self._write_task_result_if_possible(payload, result)
+            return result
+        session = self._task_sessions.pop(session_id, None)
+        if session is None:
+            result = _web_client_error(
+                request_id,
+                f"browser session not found: {session_id}",
+                session_id,
+            )
+            self._write_task_result_if_possible(payload, result)
+            return result
+
+        _write_json(
+            session.artifacts_dir / f"web_client_task_{_safe_label(request_id)}.json",
+            payload,
+        )
+        close_error: str | None = None
+        try:
+            session.browser_driver.close()
+        except Exception as exc:
+            close_error = str(exc)
+        result = _web_client_session_result(
+            request_id=request_id,
+            session_id=session_id,
+            status="error" if close_error else "pass",
+            error=close_error,
+        )
+        _write_json(
+            session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
+            result,
+        )
+        return result
+
+    def _run_task_action_attempt(
+        self,
+        *,
+        request_id: str,
+        session: _TaskBrowserSession,
         browser_input: dict[str, Any],
-        run_id: str,
+        action: dict[str, Any],
         step_id: Any,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        browser = browser_driver.run(browser_input, run_id=run_id, step_id=step_id)
+        browser_driver = session.browser_driver
+        if hasattr(browser_driver, "run_single_action"):
+            browser = browser_driver.run_single_action(
+                browser_input,
+                action,
+                run_id=session.run_id,
+                step_id=step_id,
+            )
+        else:
+            action_input = dict(browser_input)
+            action_input["actions"] = [action]
+            browser = browser_driver.run(
+                action_input,
+                run_id=session.run_id,
+                step_id=step_id,
+            )
         selector_states = _inspect_selector_states(
             browser_driver,
             payload.get("selector_assertions"),
@@ -448,7 +743,11 @@ class WebClientRunner:
             error = capture_error
         return {
             "request_id": request_id,
-            "status": "pass" if browser.get("status") == "pass" and error is None else "fail",
+            "status": (
+                "pass"
+                if browser.get("status") == "pass" and error is None
+                else "fail"
+            ),
             "browser": browser,
             "screenshot_path": screenshot_paths[0] if screenshot_paths else None,
             "browser_screenshots": browser_screenshots,
@@ -456,6 +755,31 @@ class WebClientRunner:
             "capture_values": capture_values,
             "error": error,
         }
+
+    def _write_task_result_if_possible(
+        self,
+        payload: Mapping[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        session_id = str(payload.get("session_id") or "")
+        if session_id and session_id in self._task_sessions:
+            artifacts_dir = self._task_sessions[session_id].artifacts_dir
+        elif payload.get("run_id") and payload.get("artifacts_root"):
+            artifacts_dir = (
+                Path(str(payload["artifacts_root"])).expanduser().resolve()
+                / str(payload["run_id"])
+            )
+        else:
+            return
+        try:
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            _write_json(
+                artifacts_dir
+                / f"web_client_result_{_safe_label(result.get('request_id'))}.json",
+                result,
+            )
+        except Exception:
+            return
 
     def _task_browser_driver(
         self,
@@ -474,6 +798,28 @@ class WebClientRunner:
             base_url=base_url,
             run_id=run_id,
         )
+
+    def _debug_event(
+        self,
+        run_id: str | None,
+        event: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        payload = dict(payload or {})
+        _log_debug_event(event, run_id=run_id, payload=payload)
+        log_dir = self.artifacts_root / run_id if run_id else self.artifacts_root
+        try:
+            _append_jsonl(
+                log_dir / DEBUG_LOG_FILE,
+                {"timestamp": _timestamp(), "event": event, **payload},
+            )
+        except Exception as exc:
+            LOGGER.debug(
+                "failed to write web-client debug event event=%s run_id=%s error=%s",
+                event,
+                run_id,
+                exc,
+            )
 
     def _unsupported_plan_result(
         self,
@@ -495,6 +841,11 @@ class WebClientRunner:
             "jellyfin_logs": "",
             "error_summary": reason,
         }
+        self._debug_event(
+            run_id,
+            "unsupported_plan",
+            {"reason": reason, **_plan_debug_payload(plan)},
+        )
         _write_json(artifacts_dir / "result.json", result)
         return result
 
@@ -1004,9 +1355,15 @@ def run_task(
     task: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    global _DEFAULT_TASK_RUNNER
+    if _DEFAULT_TASK_RUNNER is None:
+        _DEFAULT_TASK_RUNNER = WebClientRunner()
     return run_sync_away_from_loop(
-        lambda: WebClientRunner().run_task(task=task, **kwargs)
+        lambda: _DEFAULT_TASK_RUNNER.run_task(task=task, **kwargs)
     )
+
+
+_DEFAULT_TASK_RUNNER: WebClientRunner | None = None
 
 
 def _trigger_tool(plan: dict[str, Any]) -> str | None:
@@ -1218,65 +1575,57 @@ def _capture_task_values(
         return {}, f"capture failed: {exc}"
 
 
-def _repair_input_from_policy(
-    *,
-    original_input: Any,
-    repair_policy: Any,
-) -> tuple[dict[str, Any] | None, str | None]:
-    if not isinstance(repair_policy, Mapping):
-        return None, None
-    if repair_policy.get("enabled") is False:
-        return None, None
-    if int(repair_policy.get("max_attempts", 1)) < 1:
-        return None, None
-
-    proposed = (
-        repair_policy.get("browser_input")
-        or repair_policy.get("retry_browser_input")
-        or repair_policy.get("input")
-    )
-    if proposed is None:
-        direct_fields = set(repair_policy) - REPAIR_POLICY_CONTROL_FIELDS
-        if direct_fields:
-            forbidden = sorted(direct_fields - ALLOWED_BROWSER_REPAIR_FIELDS)
-            if forbidden:
-                return None, f"forbidden browser repair fields: {', '.join(forbidden)}"
-            proposed = {
-                key: deepcopy(repair_policy[key])
-                for key in direct_fields
-                if key in ALLOWED_BROWSER_REPAIR_FIELDS
-            }
-    if proposed is None:
-        return None, None
-    try:
-        return _sanitize_browser_repair_input(original_input, proposed), None
-    except ValueError as exc:
-        return None, str(exc)
+def _legacy_task_payload_error(payload: Mapping[str, Any]) -> str | None:
+    browser_input = payload.get("browser_input")
+    if isinstance(browser_input, Mapping) and "actions" in browser_input:
+        return (
+            "legacy browser_input.actions is not supported in web_client_task; "
+            "use command=start, then submit exactly one top-level action per "
+            "command=action call"
+        )
+    if isinstance(payload.get("actions"), list):
+        return (
+            "top-level actions arrays are not supported in web_client_task; "
+            "submit exactly one action object as action"
+        )
+    if isinstance(payload.get("action"), list):
+        return "action must be a single browser action object, not an array"
+    return None
 
 
-def _sanitize_browser_repair_input(
-    original_input: Any,
-    proposed_input: Any,
-) -> dict[str, Any]:
-    if not isinstance(proposed_input, dict):
-        raise ValueError("repair input must be a browser input object")
-    forbidden = sorted(set(proposed_input) - ALLOWED_BROWSER_REPAIR_FIELDS)
+def _task_browser_metadata(value: Any) -> tuple[dict[str, Any], str | None]:
+    if value is None:
+        return {}, None
+    if not isinstance(value, dict):
+        return {}, "browser_input must be an object when supplied"
+    forbidden = sorted(set(value) - TASK_BROWSER_METADATA_FIELDS)
     if forbidden:
-        raise ValueError(f"forbidden browser repair fields: {', '.join(forbidden)}")
-    repaired = dict(original_input) if isinstance(original_input, dict) else {}
-    for key in ALLOWED_BROWSER_REPAIR_FIELDS:
-        if key in proposed_input:
-            repaired[key] = deepcopy(proposed_input[key])
-    if "actions" in repaired and not isinstance(repaired["actions"], list):
-        raise ValueError("browser repair actions must be a list")
-    for index, action in enumerate(repaired.get("actions", []), start=1):
-        if not isinstance(action, dict):
-            raise ValueError(f"browser repair action {index} must be an object")
-    return repaired
+        return (
+            {},
+            "browser_input may only contain session metadata fields; "
+            f"unsupported field(s): {', '.join(forbidden)}",
+        )
+    return deepcopy(value), None
 
 
-def _web_client_error(request_id: str, error: str) -> dict[str, Any]:
-    return {
+def _web_client_session_result(
+    *,
+    request_id: str,
+    session_id: str,
+    status: str,
+    error: str | None = None,
+) -> dict[str, Any]:
+    result = _web_client_error(request_id, error, session_id)
+    result["status"] = status
+    return result
+
+
+def _web_client_error(
+    request_id: str,
+    error: str | None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    result = {
         "request_id": request_id,
         "status": "error",
         "browser": None,
@@ -1286,6 +1635,88 @@ def _web_client_error(request_id: str, error: str) -> dict[str, Any]:
         "capture_values": {},
         "error": error,
     }
+    if session_id:
+        result["session_id"] = session_id
+    return result
+
+
+def _close_quietly(target: Any) -> None:
+    try:
+        target.close()
+    except Exception:
+        return
+
+
+def _plan_debug_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
+    steps = plan.get("reproduction_steps")
+    server_target = plan.get("server_target")
+    if not isinstance(server_target, Mapping):
+        server_target = {}
+    return {
+        "issue_url": plan.get("issue_url"),
+        "execution_target": plan.get("execution_target"),
+        "server_mode": server_target.get("mode"),
+        "docker_image": plan.get("docker_image"),
+        "step_count": len(steps) if isinstance(steps, list) else 0,
+    }
+
+
+def _step_debug_payload(step: Mapping[str, Any]) -> dict[str, Any]:
+    step_input = step.get("input")
+    actions = step_input.get("actions") if isinstance(step_input, Mapping) else None
+    return {
+        "step_id": step.get("step_id"),
+        "role": step.get("role"),
+        "tool": step.get("tool"),
+        "action": step.get("action"),
+        "browser_action_count": len(actions) if isinstance(actions, list) else 0,
+    }
+
+
+def _entry_debug_payload(entry: Mapping[str, Any]) -> dict[str, Any]:
+    browser = entry.get("browser") if isinstance(entry.get("browser"), Mapping) else {}
+    return {
+        "step_id": entry.get("step_id"),
+        "role": entry.get("role"),
+        "tool": entry.get("tool"),
+        "outcome": entry.get("outcome"),
+        "reason": entry.get("reason"),
+        "duration_ms": entry.get("duration_ms"),
+        "browser_status": browser.get("status"),
+        "browser_error": browser.get("error"),
+    }
+
+
+def _log_debug_event(
+    event: str,
+    *,
+    run_id: str | None,
+    payload: Mapping[str, Any],
+) -> None:
+    if not LOGGER.isEnabledFor(logging.DEBUG):
+        return
+    fields = " ".join(
+        f"{key}={_log_value(value)}"
+        for key, value in payload.items()
+        if value is not None
+    )
+    if fields:
+        LOGGER.debug("web-client %s run_id=%s %s", event, run_id, fields)
+    else:
+        LOGGER.debug("web-client %s run_id=%s", event, run_id)
+
+
+def _log_value(value: Any) -> str:
+    text = str(value).replace("\n", "\\n")
+    if len(text) > 240:
+        text = f"{text[:237]}..."
+    return text
+
+
+def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

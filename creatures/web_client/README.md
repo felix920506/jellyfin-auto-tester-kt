@@ -6,6 +6,8 @@ Full-plan mode listens on `web_client_plan_ready`, runs
 `web_client_runner.execute_plan`, and sends the returned standard
 `ExecutionResult` unchanged to `execution_done`.
 
-Task mode listens on `web_client_task`, runs `web_client_runner.run_task` against
-the supplied `base_url`, `run_id`, and `artifacts_root`, and sends the returned
-`WebClientResult` to `web_client_done`. Task mode never starts or stops Docker.
+Task mode listens on `web_client_task` and runs the interactive browser session
+protocol: `start` creates a session, each `action` message executes exactly one
+Playwright action, and `finalize` closes the browser. The returned
+`WebClientResult` is sent to `web_client_done`. Task mode never starts or stops
+Docker.

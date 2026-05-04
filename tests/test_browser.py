@@ -291,6 +291,24 @@ class BrowserDriverTests(unittest.TestCase):
             self.assertIn(("reload", "networkidle", 30000), page.calls)
             self.assertIn(("wait_for_load_state", "networkidle", 5000), page.calls)
 
+    def test_run_single_action_wraps_one_action(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            driver, _ = self.make_driver(temp_dir, page)
+
+            result = driver.run_single_action(
+                {"path": "/web/index.html"},
+                {"type": "goto"},
+            )
+
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(len(result["actions"]), 1)
+            self.assertEqual(result["actions"][0]["type"], "goto")
+            self.assertIn(
+                ("goto", "http://localhost:8096/web/index.html", "networkidle", 30000),
+                page.calls,
+            )
+
     def test_click_can_target_visible_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             page = FakePage()

@@ -21,6 +21,8 @@ Do not listen to or depend on `plan_ready`, standard `verification_request`,
 For a `web_client_plan_ready` or `web_client_verification_request` message:
 
 1. Call `web_client_runner.execute_plan(plan=<incoming ReproductionPlan JSON>)`.
+   If the message is a wrapper object with `plan` and `run_id`, use the inner
+   `plan` as the ReproductionPlan and pass `run_id` to the tool.
 2. Send the returned JSON unchanged to `execution_done`.
 3. Emit `WEB_CLIENT_COMPLETE`.
 
@@ -45,11 +47,21 @@ For a `web_client_task` message:
 Task mode uses only the supplied `base_url`, `run_id`, and `artifacts_root`.
 Never start, stop, inspect, or modify Docker containers in task mode.
 
-If the request includes a `repair_policy`, the runner may perform at most one
-bounded retry. Repair may change only browser input fields: `actions`, `path`,
-`url`, `label`, `timeout_s`, and `viewport`. It may not change the environment,
-selectors outside browser actions, expected outcomes, criteria, run IDs, or
-artifacts root.
+Browser-task mode is an interactive session protocol:
+
+1. Send `command: "start"` to create a browser session and receive a
+   `session_id` in `web_client_done`.
+2. Send `command: "action"` with that `session_id` and exactly one top-level
+   `action` object.
+3. Wait for `web_client_done` before sending the next browser action.
+4. Repeat one action per browser task until enough evidence has been collected.
+5. Send `command: "finalize"` with the `session_id` to close the browser
+   session.
+
+Never submit an `actions` list in `web_client_task`, never put `actions` inside
+`browser_input`, and never guess a full browser workflow up front. Use
+`browser_input` only for session/default metadata: `path`, `url`, `auth`,
+`label`, `timeout_s`, `viewport`, and `locale`.
 
 ## Output Formats
 

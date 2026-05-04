@@ -13,6 +13,7 @@ import shlex
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable, TextIO
 from urllib.parse import urlparse
 
@@ -26,6 +27,13 @@ DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
 DEFAULT_ANALYSIS_CONFIG_PATH = REPO_ROOT / "creatures" / "analysis" / "config.yaml"
 TERMINAL_CHANNELS = ("final_report", "human_review_queue")
 ANALYSIS_PLAN_CHANNELS = ("plan_ready", "web_client_plan_ready")
+WEB_CLIENT_PLAN_CHANNELS = (
+    "web_client_plan_ready",
+    "web_client_verification_request",
+)
+WEB_CLIENT_TASK_CHANNEL = "web_client_task"
+WEB_CLIENT_DONE_CHANNEL = "web_client_done"
+EXECUTION_DONE_CHANNEL = "execution_done"
 STAGE_CHOICES = ("analysis", "execution", "web-client", "report")
 STAGE_CHANNEL_GRACE_S = 2.0
 ANALYSIS_TRANSCRIPT_FILE = "transcript.json"
@@ -1079,25 +1087,47 @@ def run_web_client_stage(
     out_dir: str | Path,
     *,
     run_id: str | None = None,
-    runner_factory: Callable[[Path], Any] | None = None,
+    timeout_s: float | None = 10 * 60,
+    engine_factory: Callable[[str], Any] | None = None,
 ) -> StageDebugResult:
-    """Run the web-client Stage 2 peer from a ReproductionPlan handoff."""
+    """Run the web-client Stage 2 KT peer from a ReproductionPlan handoff."""
 
     return run_sync_away_from_loop(
-        _run_web_client_stage_impl,
+        _run_web_client_stage_sync,
         input_path,
         out_dir,
         run_id=run_id,
-        runner_factory=runner_factory,
+        timeout_s=timeout_s,
+        engine_factory=engine_factory,
     )
 
 
-def _run_web_client_stage_impl(
+def _run_web_client_stage_sync(
     input_path: str | Path,
     out_dir: str | Path,
     *,
     run_id: str | None = None,
-    runner_factory: Callable[[Path], Any] | None = None,
+    timeout_s: float | None = 10 * 60,
+    engine_factory: Callable[[str], Any] | None = None,
+) -> StageDebugResult:
+    return asyncio.run(
+        _run_web_client_stage_impl(
+            input_path,
+            out_dir,
+            run_id=run_id,
+            timeout_s=timeout_s,
+            engine_factory=engine_factory,
+        )
+    )
+
+
+async def _run_web_client_stage_impl(
+    input_path: str | Path,
+    out_dir: str | Path,
+    *,
+    run_id: str | None = None,
+    timeout_s: float | None = 10 * 60,
+    engine_factory: Callable[[str], Any] | None = None,
 ) -> StageDebugResult:
     load_env_file()
     logger = _logger()
@@ -1106,17 +1136,46 @@ def _run_web_client_stage_impl(
     plan_path = _resolve_stage_input_file(input_path, "analysis")
     plan = _read_json_file(plan_path)
     _write_json_file(output_dir / "plan.json", plan)
+    logger.debug(
+        "Resolved web-client Stage 2 handoff input=%s output_dir=%s",
+        plan_path,
+        output_dir,
+    )
+    logger.debug(
+        "Loaded web-client Stage 2 plan execution_target=%s server_mode=%s steps=%s",
+        plan.get("execution_target"),
+        (plan.get("server_target") or {}).get("mode"),
+        len(plan.get("reproduction_steps", []))
+        if isinstance(plan.get("reproduction_steps"), list)
+        else 0,
+    )
 
-    if runner_factory is None:
-        from tools.web_client_runner import WebClientRunner
+    engine = await _load_stage_engine("web-client", engine_factory=engine_factory)
+    route_channel = _web_client_stage_plan_channel(plan)
+    message_plan = dict(plan)
+    message: Any = message_plan
+    if run_id:
+        message = {"plan": message_plan, "run_id": run_id}
 
-        runner = WebClientRunner(artifacts_root=output_dir)
-    else:
-        runner = runner_factory(output_dir)
-
-    result = runner.execute_plan(plan=plan, run_id=run_id)
+    logger.debug(
+        "Routing web-client Stage 2 plan through KT agent channel=%s run_id=%s",
+        route_channel,
+        run_id,
+    )
+    result = await _run_web_client_agent_handoff(
+        engine,
+        route_channel=route_channel,
+        message=message,
+        timeout_s=timeout_s,
+    )
     _write_json_file(output_dir / "execution_result.json", result)
     _write_json_file(output_dir / "result.json", result)
+    logger.debug(
+        "Web-client Stage 2 agent finished run_id=%s overall_result=%s artifacts_dir=%s",
+        result.get("run_id"),
+        result.get("overall_result"),
+        result.get("artifacts_dir"),
+    )
     logger.info("Web-client Stage 2 debug run wrote execution_result.json")
     return _write_stage_result(
         StageDebugResult(
@@ -1131,6 +1190,148 @@ def _run_web_client_stage_impl(
             },
         )
     )
+
+
+async def _run_web_client_agent_handoff(
+    engine: Any,
+    *,
+    route_channel: str,
+    message: Any,
+    timeout_s: float | None,
+) -> dict[str, Any]:
+    logger = _logger()
+    engine_task = asyncio.create_task(_run_stage_engine(engine))
+    result_task: asyncio.Task[tuple[str, Any]] | None = None
+    try:
+        await _wait_for_engine_channel(engine, route_channel, engine_task)
+        await _wait_for_engine_channel(engine, EXECUTION_DONE_CHANNEL, engine_task)
+        result_task = asyncio.create_task(
+            _receive_channel_message(engine, EXECUTION_DONE_CHANNEL)
+        )
+        await _send_channel_message(
+            engine,
+            route_channel,
+            json.dumps(message, sort_keys=True, default=str),
+            sender="web_client_stage_debug",
+        )
+        logger.debug("Sent web-client Stage 2 plan to %s", route_channel)
+
+        done, pending = await asyncio.wait(
+            {result_task, engine_task},
+            timeout=timeout_s,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if result_task in done:
+            _channel, payload = result_task.result()
+            if not isinstance(payload, dict):
+                raise RuntimeError("web-client agent emitted non-JSON execution result")
+            return payload
+        if engine_task in done:
+            engine_task.result()
+            try:
+                _channel, payload = await asyncio.wait_for(
+                    result_task,
+                    timeout=STAGE_CHANNEL_GRACE_S,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    "web-client stage engine stopped before emitting execution_done"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError("web-client agent emitted non-JSON execution result")
+            return payload
+        for task in pending:
+            task.cancel()
+        timeout_text = (
+            "without a timeout"
+            if timeout_s is None
+            else f"within {timeout_s:g} seconds"
+        )
+        raise PipelineTimeoutError(
+            f"timed out waiting for {EXECUTION_DONE_CHANNEL} {timeout_text}"
+        )
+    finally:
+        if result_task is not None and not result_task.done():
+            result_task.cancel()
+            await _cancel_task(result_task)
+        await _stop_stage_engine(engine)
+        if not engine_task.done():
+            engine_task.cancel()
+            await _cancel_task(engine_task)
+        elif engine_task.cancelled():
+            pass
+        else:
+            try:
+                engine_task.result()
+            except Exception:
+                if result_task is None or not result_task.done():
+                    raise
+
+
+async def _run_stage_engine(engine: Any) -> None:
+    run = getattr(engine, "run", None)
+    if callable(run):
+        await _maybe_await(run())
+        return
+    start = getattr(engine, "start", None)
+    if callable(start):
+        await _maybe_await(start())
+
+
+async def _stop_stage_engine(engine: Any) -> None:
+    stop = getattr(engine, "stop", None)
+    if callable(stop):
+        try:
+            await _maybe_await(stop())
+        except Exception as exc:
+            _logger().debug("Failed to stop stage engine: %s", exc)
+
+
+async def _wait_for_engine_channel(
+    engine: Any,
+    channel_name: str,
+    engine_task: asyncio.Task[Any],
+) -> None:
+    while _get_channel(engine, channel_name) is None:
+        if engine_task.done():
+            engine_task.result()
+            raise RuntimeError(
+                f"stage engine stopped before creating {channel_name!r} channel"
+            )
+        await asyncio.sleep(0.01)
+
+
+async def _send_channel_message(
+    engine: Any,
+    channel_name: str,
+    content: str,
+    *,
+    sender: str,
+) -> None:
+    channel = _get_channel(engine, channel_name)
+    if channel is None:
+        raise RuntimeError(f"Terrarium engine does not expose {channel_name!r} channel")
+
+    send = getattr(channel, "send", None)
+    if not callable(send):
+        raise RuntimeError(f"{channel_name!r} channel is not sendable")
+
+    message = SimpleNamespace(
+        sender=sender,
+        content=content,
+        metadata={},
+        timestamp=None,
+        message_id=f"stage_debug_{id(content)}",
+        reply_to=None,
+        channel=None,
+    )
+    await _maybe_await(send(message))
+
+
+def _web_client_stage_plan_channel(plan: dict[str, Any]) -> str:
+    if plan.get("is_verification"):
+        return "web_client_verification_request"
+    return "web_client_plan_ready"
 
 
 def run_report_stage(
@@ -1248,10 +1449,10 @@ async def _load_stage_engine(
 ) -> Any:
     if engine_factory is not None:
         return await _maybe_await(engine_factory(stage))
-    if stage != "analysis":
+    if stage not in {"analysis", "web-client"}:
         raise ValueError(f"no isolated Terrarium recipe is defined for stage {stage!r}")
-
-    _assert_stage1_model_config_allowed(DEFAULT_ANALYSIS_CONFIG_PATH)
+    if stage == "analysis":
+        _assert_stage1_model_config_allowed(DEFAULT_ANALYSIS_CONFIG_PATH)
 
     try:
         from kohakuterrarium import Terrarium
@@ -1262,28 +1463,57 @@ async def _load_stage_engine(
         )
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on runtime env
         raise RuntimeError(
-            "kohakuterrarium is required to run Stage 1. "
+            f"kohakuterrarium is required to run Stage {stage!r}. "
             "Install it in this environment, then rerun main.py."
         ) from exc
 
-    recipe = TerrariumConfig(
-        name="analysis_debug",
-        creatures=[
-            CreatureConfig(
-                name="analysis_agent",
-                config_data={
-                    "name": "analysis_agent",
-                    "base_config": "creatures/analysis",
-                },
-                base_dir=REPO_ROOT,
-                send_channels=list(ANALYSIS_PLAN_CHANNELS),
-            )
-        ],
-        channels=[
-            ChannelConfig(name=channel, channel_type="queue")
-            for channel in ANALYSIS_PLAN_CHANNELS
-        ],
-    )
+    if stage == "analysis":
+        recipe = TerrariumConfig(
+            name="analysis_debug",
+            creatures=[
+                CreatureConfig(
+                    name="analysis_agent",
+                    config_data={
+                        "name": "analysis_agent",
+                        "base_config": "creatures/analysis",
+                    },
+                    base_dir=REPO_ROOT,
+                    send_channels=list(ANALYSIS_PLAN_CHANNELS),
+                )
+            ],
+            channels=[
+                ChannelConfig(name=channel, channel_type="queue")
+                for channel in ANALYSIS_PLAN_CHANNELS
+            ],
+        )
+    else:
+        recipe = TerrariumConfig(
+            name="web_client_debug",
+            creatures=[
+                CreatureConfig(
+                    name="web_client_agent",
+                    config_data={
+                        "name": "web_client_agent",
+                        "base_config": "creatures/web_client",
+                    },
+                    base_dir=REPO_ROOT,
+                    listen_channels=[
+                        *WEB_CLIENT_PLAN_CHANNELS,
+                        WEB_CLIENT_TASK_CHANNEL,
+                    ],
+                    send_channels=[EXECUTION_DONE_CHANNEL, WEB_CLIENT_DONE_CHANNEL],
+                )
+            ],
+            channels=[
+                *[
+                    ChannelConfig(name=channel, channel_type="queue")
+                    for channel in WEB_CLIENT_PLAN_CHANNELS
+                ],
+                ChannelConfig(name=WEB_CLIENT_TASK_CHANNEL, channel_type="queue"),
+                ChannelConfig(name=WEB_CLIENT_DONE_CHANNEL, channel_type="queue"),
+                ChannelConfig(name=EXECUTION_DONE_CHANNEL, channel_type="queue"),
+            ],
+        )
     return await _maybe_await(Terrarium.from_recipe(recipe))
 
 
@@ -3197,6 +3427,13 @@ def _build_stage_parser(stage: str) -> argparse.ArgumentParser:
         )
         parser.add_argument("--out", required=True, help="Output handoff directory")
         parser.add_argument("--run-id", help="Optional deterministic run id")
+        if stage == "web-client":
+            parser.add_argument(
+                "--timeout-s",
+                type=float,
+                default=10 * 60,
+                help="Seconds to wait for execution_done",
+            )
     elif stage == "report":
         parser.add_argument(
             "--input",
@@ -3283,7 +3520,12 @@ async def _async_stage_main(argv: list[str]) -> int:
     elif args.stage == "execution":
         result = run_execution_stage(args.input, args.out, run_id=args.run_id)
     elif args.stage == "web-client":
-        result = run_web_client_stage(args.input, args.out, run_id=args.run_id)
+        result = run_web_client_stage(
+            args.input,
+            args.out,
+            run_id=args.run_id,
+            timeout_s=args.timeout_s,
+        )
     elif args.stage == "report":
         result = run_report_stage(
             args.input,

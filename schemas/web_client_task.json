@@ -5,15 +5,22 @@
   "type": "object",
   "additionalProperties": true,
   "required": [
-    "request_id",
-    "run_id",
-    "base_url",
-    "artifacts_root",
-    "step_id",
-    "browser_input"
+    "command",
+    "request_id"
   ],
   "properties": {
+    "command": {
+      "enum": [
+        "start",
+        "action",
+        "finalize"
+      ]
+    },
     "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
       "type": "string",
       "minLength": 1
     },
@@ -43,6 +50,10 @@
     "browser_input": {
       "$ref": "#/$defs/browser_input"
     },
+    "action": {
+      "$ref": "#/$defs/browser_action"
+    },
+    "actions": false,
     "selector_assertions": {
       "oneOf": [
         {
@@ -72,32 +83,68 @@
         "type": "object",
         "additionalProperties": true
       }
-    },
-    "repair_policy": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "max_attempts": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "browser_input": {
-          "$ref": "#/$defs/browser_input_patch"
-        }
-      }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "start"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "required": [
+          "run_id",
+          "base_url",
+          "artifacts_root"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "action"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "required": [
+          "session_id",
+          "action"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "finalize"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "required": [
+          "session_id"
+        ]
+      }
+    }
+  ],
   "$defs": {
     "browser_input": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "actions"
-      ],
       "properties": {
         "path": {
           "type": "string",
@@ -124,13 +171,6 @@
         "locale": {
           "type": "string",
           "minLength": 1
-        },
-        "actions": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/browser_action"
-          }
         }
       }
     },
@@ -180,42 +220,6 @@
         "height": {
           "type": "integer",
           "minimum": 1
-        }
-      }
-    },
-    "browser_input_patch": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "type": "string",
-          "minLength": 1
-        },
-        "url": {
-          "type": "string",
-          "minLength": 1
-        },
-        "label": {
-          "type": "string",
-          "minLength": 1
-        },
-        "timeout_s": {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        "viewport": {
-          "$ref": "#/$defs/browser_viewport"
-        },
-        "locale": {
-          "type": "string",
-          "minLength": 1
-        },
-        "actions": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/browser_action"
-          }
         }
       }
     },
