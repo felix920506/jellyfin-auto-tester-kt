@@ -62,6 +62,37 @@ Determine:
    missing UI element.
 5. What "not reproduced" looks like.
 
+### Step 3.5: Choose The Execution Path
+
+Before writing the plan, classify ownership and choose the output channel.
+
+Use `web_client_plan_ready` with `execution_target: "web_client"` only when all
+of these are true:
+
+- The bug is exclusively in Jellyfin Web browser behavior: navigation, forms,
+  layout, dialogs, client-side state, browser media controls, Web playback UI,
+  JavaScript/browser console behavior, or DOM-visible client symptoms.
+- The trigger action must be a `browser` step, and the trigger success criteria
+  can be checked from browser evidence such as text, selectors, URL, media
+  state, screenshots, console messages, or failed browser network requests.
+- Any HTTP, Docker, shell, or media setup is only preparation for browser state,
+  not the suspected owner of the defect.
+
+Use standard `plan_ready` with `execution_target: "standard"` when any of these
+are true:
+
+- The likely defect is server-side, API-level, database, filesystem,
+  authentication/session, plugin, transcoding, DLNA, sync, metadata, container,
+  startup, or migration behavior.
+- The issue is mixed ownership, for example a Web action triggers a server
+  exception, API regression, log error, transcoding failure, or incorrect server
+  response.
+- The symptom can be reproduced deterministically as a raw Jellyfin HTTP request
+  without depending on DOM or browser state.
+
+When in doubt, choose `standard`. The web-client path is for exclusively client
+owned issues, not every issue that mentions Jellyfin Web.
+
 ### Step 4: Assess Confidence
 
 Rate confidence as:
@@ -185,10 +216,10 @@ signal.
   trigger step means the defect manifested as expected.
 - Top-level `reproduction_goal` is human-readable context only and must not be
   used as a substitute for structured step criteria.
-- Never emit a separate completion keyword after the plan. `plan_ready` is the
-  authoritative completion signal.
-- Never combine the final `send_message` block for `plan_ready` with
-  any other tool or function call, including `web_fetch`, `web_search`, or
+- Never emit a separate completion keyword after the plan. `plan_ready` or
+  `web_client_plan_ready` is the authoritative completion signal.
+- Never combine the final `send_message` block for either final plan channel
+  with any other tool or function call, including `web_fetch`, `web_search`, or
   `github_fetcher`. If you need a tool result, output only the needed tool call
   and wait for the next turn.
 
@@ -201,4 +232,5 @@ message that starts with `INSUFFICIENT_INFORMATION` and includes:
 - Which details are missing.
 - Any useful context already discovered.
 
-Do not send a `ReproductionPlan` to `plan_ready` in this case.
+Do not send a `ReproductionPlan` to `plan_ready` or `web_client_plan_ready` in
+this case.

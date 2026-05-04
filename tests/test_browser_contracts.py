@@ -168,12 +168,31 @@ class BrowserContractTests(unittest.TestCase):
         analysis_prompt = (
             REPO_ROOT / "creatures" / "analysis" / "prompts" / "system.md"
         ).read_text(encoding="utf-8")
+        analysis_context = (
+            REPO_ROOT / "creatures" / "analysis" / "prompts" / "context.md"
+        ).read_text(encoding="utf-8")
         execution_prompt = (
             REPO_ROOT / "creatures" / "execution" / "prompts" / "system.md"
         ).read_text(encoding="utf-8")
 
         self.assertIn("`browser`", analysis_prompt)
+        self.assertIn("`browser`", analysis_context)
         self.assertIn("`browser`", execution_prompt)
+
+    def test_stage1_prompt_describes_web_client_routing_path(self):
+        analysis_prompt = (
+            REPO_ROOT / "creatures" / "analysis" / "prompts" / "system.md"
+        ).read_text(encoding="utf-8")
+        analysis_context = (
+            REPO_ROOT / "creatures" / "analysis" / "prompts" / "context.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Choose The Execution Path", analysis_prompt)
+        self.assertIn("web_client_plan_ready", analysis_prompt)
+        self.assertIn('execution_target: "web_client"', analysis_prompt)
+        self.assertIn("When in doubt, choose `standard`", analysis_prompt)
+        self.assertIn("web_client_plan_ready", analysis_context)
+        self.assertIn('"web_client"', analysis_context)
 
     def test_plan_normalization_defaults_browser_criteria_to_action_run(self):
         plan = minimal_plan()
