@@ -26,6 +26,7 @@ Run stages individually with disk handoffs:
 ```bash
 .venv/bin/python main.py --stage analysis URL VERSION --out debug/stage1
 .venv/bin/python main.py --stage execution --input debug/stage1 --out debug/stage2
+.venv/bin/python main.py --stage web-client --input debug/stage1 --out debug/stage2
 .venv/bin/python main.py --stage report --input debug/stage2 --out debug/stage3
 ```
 

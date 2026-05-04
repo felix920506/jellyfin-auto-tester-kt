@@ -123,11 +123,13 @@ cannot change prerequisites, Docker image, non-browser steps, roles, expected
 outcomes, or success criteria.
 
 ```bash
-.venv/bin/python main.py --stage analysis \
-  https://github.com/jellyfin/jellyfin/issues/XXXX 10.9.7 \
-  --out debug/stage1
+.venv/bin/python main.py --stage analysis URL VERSION --out debug/stage1
 
 .venv/bin/python main.py --stage execution \
+  --input debug/stage1 \
+  --out debug/stage2
+
+.venv/bin/python main.py --stage web-client \
   --input debug/stage1 \
   --out debug/stage2
 
@@ -138,6 +140,7 @@ outcomes, or success criteria.
 
 - **Stage 1 (Analysis)** writes `transcript.json` and `reproduction_plan.json`.
 - **Stage 2 (Execution)** reads `reproduction_plan.json` and writes `execution_result.json`.
+- **Stage 2 (Web Client)** is a peer to Execution for pure Jellyfin Web bugs; it reads `reproduction_plan.json` and writes `execution_result.json`.
 - **Stage 3 (Report)** reads `execution_result.json` and writes `report.md` plus `verification_plan.json`.
 
 To debug the verification pass, feed that plan back through Stage 2 and then finalize the report:

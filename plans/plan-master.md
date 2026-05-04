@@ -16,17 +16,18 @@ A 3-stage KohakuTerrarium pipeline that automates reproduction of Jellyfin GitHu
 │  Stage 1: Analysis Agent                        │
 │  - Reads issue + fetches context                │
 │  - Outputs structured ReproductionPlan JSON     │
-└───────────────────┬─────────────────────────────┘
-                    │ channel: plan_ready (queue)
-                    ▼
-┌─────────────────────────────────────────────────┐
-│  Stage 2: Execution Agent                       │
-│  - Pulls Docker container (version from input)  │
-│  - Executes steps, captures logs + screenshots  │
-│  - Outputs ExecutionResult JSON + artifacts     │
-└───────────────────┬─────────────────────────────┘
-                    │ channel: execution_done (queue)
-                    ▼
+└───────┬───────────────────────────────┬─────────┘
+        │ channel: plan_ready           │ channel: web_client_plan_ready
+        ▼                               ▼
+┌───────────────────────────┐   ┌───────────────────────────┐
+│  Stage 2: Execution Agent │   │  Stage 2: Web Client Agent│
+│  - Pulls Docker container │   │  - Pure browser execution │
+│  - Executes steps         │   │  - Demo server or Tasks   │
+└───────┬───────────────────┘   └───────┬───────────────────┘
+        │                               │
+        │ channel: execution_done (queue)│
+        └───────────────┬───────────────┘
+                        ▼
 ┌─────────────────────────────────────────────────┐
 │  Stage 3: Report Agent                          │
 │  - Writes clean ReproductionReport              │
@@ -48,37 +49,61 @@ version: "1.0"
 
 creatures:
   - name: "analysis_agent"
-    config: "creatures/analysis/config.yaml"
-    can_send:
-      - "plan_ready"
+    base_config: "creatures/analysis"
+    channels:
+      can_send:
+        - "plan_ready"
+        - "web_client_plan_ready"
 
   - name: "execution_agent"
-    config: "creatures/execution/config.yaml"
-    listen:
-      - channel: "plan_ready"
-      - channel: "verification_request"
-    can_send:
-      - "execution_done"
+    base_config: "creatures/execution"
+    channels:
+      listen:
+        - "plan_ready"
+        - "verification_request"
+      can_send:
+        - "execution_done"
+
+  - name: "web_client_agent"
+    base_config: "creatures/web_client"
+    channels:
+      listen:
+        - "web_client_plan_ready"
+        - "web_client_verification_request"
+        - "web_client_task"
+      can_send:
+        - "execution_done"
+        - "web_client_done"
 
   - name: "report_agent"
-    config: "creatures/report/config.yaml"
-    listen:
-      - channel: "execution_done"
-    can_send:
-      - "verification_request"
-      - "final_report"
-      - "human_review_queue"
+    base_config: "creatures/report"
+    channels:
+      listen:
+        - "execution_done"
+      can_send:
+        - "verification_request"
+        - "web_client_verification_request"
+        - "final_report"
+        - "human_review_queue"
 
 channels:
-  - name: "plan_ready"
+  plan_ready:
     type: "queue"
-  - name: "execution_done"
+  web_client_plan_ready:
     type: "queue"
-  - name: "verification_request"
+  web_client_verification_request:
     type: "queue"
-  - name: "final_report"
+  execution_done:
+    type: "queue"
+  web_client_task:
+    type: "queue"
+  web_client_done:
+    type: "queue"
+  verification_request:
+    type: "queue"
+  final_report:
     type: "broadcast"
-  - name: "human_review_queue"
+  human_review_queue:
     type: "queue"
 
 root_agent: "analysis_agent"
@@ -311,6 +336,59 @@ Resolution rules: variables are scoped to the run; later steps overwrite earlier
 - Stage 2 echoes both fields verbatim from the incoming plan into the `ExecutionResult` it emits.
 - The Report Agent reads `is_verification` from the `ExecutionResult`—there is no separate channel-level flag or session variable. This ensures the state marker travels with the data and is present even if the Report Agent is restarted mid-run.
 
+### WebClientTask (Execution Agent → Web Client Agent)
+
+Used for interactive browser delegation during a standard execution run.
+
+```json
+{
+  "command": "start | action | finalize",
+  "request_id": "string",
+  "session_id": "string | null",
+  "run_id": "string | null",
+  "base_url": "string | null",
+  "artifacts_root": "string | null",
+  "browser_input": {
+    "path": "string",
+    "auth": "auto | none | object",
+    "label": "string",
+    "timeout_s": 30,
+    "viewport": { "width": 1280, "height": 720 }
+  },
+  "action": {
+    "type": "goto | click | fill | ...",
+    "selector": "string",
+    "value": "any",
+    "label": "string"
+  },
+  "selector_assertions": [
+    { "selector": ".element", "state": "visible" }
+  ],
+  "capture": {
+    "var_name": { "from": "browser_text" }
+  }
+}
+```
+
+### WebClientResult (Web Client Agent → Execution Agent)
+
+```json
+{
+  "request_id": "string",
+  "status": "pass | fail | error",
+  "browser": {
+    "url": "string",
+    "text": "string",
+    "console": []
+  },
+  "screenshot_path": "string | null",
+  "browser_screenshots": { "label": "path" },
+  "selector_states": { ".element": { "visible": true } },
+  "capture_values": { "var_name": "value" },
+  "error": "string | null"
+}
+```
+
 **`overall_result` derivation (Stage 2 responsibility):**
 - `reproduced`: the `trigger` step's outcome is `pass` — its `success_criteria` (the bug symptom) was observed
 - `not_reproduced`: the `trigger` step's outcome is `fail` — the bug symptom was not observed
@@ -346,19 +424,31 @@ jellyfin-auto-tester-kt/
 │   │   ├── config.yaml
 │   │   ├── prompts/
 │   │   │   └── system.md
-│   │   └── tools/
-│   │       ├── docker_manager.py
-│   │       ├── jellyfin_http.py
-│   │       └── screenshot.py
+│   ├── web_client/
+│   │   ├── config.yaml
+│   │   ├── README.md
+│   │   └── prompts/
+│   │       └── system.md
 │   └── report/
 │       ├── config.yaml
 │       ├── prompts/
 │       │   └── system.md
-│       └── tools/
-│           └── report_writer.py
+├── tools/
+│   ├── docker_manager.py
+│   ├── jellyfin_http.py
+│   ├── screenshot.py
+│   ├── browser.py
+│   ├── criteria.py
+│   ├── execution_runner.py
+│   ├── github_search.py
+│   ├── report_writer.py
+│   ├── web_client_delegate.py
+│   └── web_client_runner.py
 ├── schemas/
 │   ├── reproduction_plan.json
-│   └── execution_result.json
+│   ├── execution_result.json
+│   ├── web_client_task.json
+│   └── web_client_result.json
 ├── artifacts/                       # Runtime: per-run subdirs created here
 └── plans/
     ├── plan-master.md               # This file
@@ -396,7 +486,11 @@ jellyfin-auto-tester-kt/
 | Channel | Producer | Consumer |
 |---|---|---|
 | `plan_ready` | analysis_agent | execution_agent (auto-trigger) |
-| `execution_done` | execution_agent | report_agent (auto-trigger) |
+| `web_client_plan_ready` | analysis_agent | web_client_agent (auto-trigger) |
+| `execution_done` | execution_agent, web_client_agent | report_agent (auto-trigger) |
 | `verification_request` | report_agent | execution_agent (auto-trigger) |
+| `web_client_verification_request` | report_agent | web_client_agent (auto-trigger) |
+| `web_client_task` | execution_agent | web_client_agent (auto-trigger) |
+| `web_client_done` | web_client_agent | execution_agent (auto-trigger) |
 | `final_report` | report_agent | `main.py` CLI prints the report path; no agent listens |
-| `human_review_queue` | report_agent | **No automated consumer.** Inspect manually with `kt channel inspect human_review_queue` (or read the appended JSONL at `artifacts/human_review_queue.jsonl`). v1 keeps the human in the loop deliberately. |
+| `human_review_queue` | report_agent | **No automated consumer.** Inspect manually with `kt channel inspect human_review_queue`. |
