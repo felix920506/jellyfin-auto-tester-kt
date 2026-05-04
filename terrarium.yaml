@@ -6,6 +6,7 @@ creatures:
     channels:
       can_send:
         - "plan_ready"
+        - "web_client_plan_ready"
 
   - name: "execution_agent"
     base_config: "creatures/execution"
@@ -15,6 +16,16 @@ creatures:
         - "verification_request"
       can_send:
         - "execution_done"
+
+  - name: "web_client_agent"
+    base_config: "creatures/web_client"
+    channels:
+      listen:
+        - "web_client_plan_ready"
+        - "web_client_task"
+      can_send:
+        - "execution_done"
+        - "web_client_done"
 
   - name: "report_agent"
     base_config: "creatures/report"
@@ -29,7 +40,13 @@ creatures:
 channels:
   plan_ready:
     type: "queue"
+  web_client_plan_ready:
+    type: "queue"
   execution_done:
+    type: "queue"
+  web_client_task:
+    type: "queue"
+  web_client_done:
     type: "queue"
   verification_request:
     type: "queue"

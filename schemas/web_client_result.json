@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jellyfin-auto-tester.local/schemas/web_client_result.json",
+  "title": "WebClientResult",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "request_id",
+    "status",
+    "browser",
+    "screenshot_path",
+    "browser_screenshots",
+    "selector_states",
+    "capture_values",
+    "error"
+  ],
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "pass",
+        "fail",
+        "error"
+      ]
+    },
+    "browser": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "screenshot_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "browser_screenshots": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "selector_states": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "capture_values": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

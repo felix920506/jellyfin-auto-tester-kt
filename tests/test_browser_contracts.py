@@ -61,8 +61,64 @@ def minimal_plan():
 class BrowserContractTests(unittest.TestCase):
     def test_reproduction_plan_schema_accepts_minimal_browser_step(self):
         validator = Draft202012Validator(load_schema("reproduction_plan.json"))
+        plan = minimal_plan()
+        plan["execution_target"] = "web_client"
 
-        errors = sorted(validator.iter_errors(minimal_plan()), key=lambda error: error.path)
+        errors = sorted(validator.iter_errors(plan), key=lambda error: error.path)
+
+        self.assertEqual(errors, [])
+
+    def test_plan_normalization_defaults_execution_target_to_standard(self):
+        normalized = _normalize_reproduction_plan(minimal_plan())
+
+        self.assertEqual(normalized["execution_target"], "standard")
+
+    def test_web_client_task_schema_accepts_browser_request(self):
+        task = {
+            "request_id": "request-1",
+            "run_id": "run-1",
+            "base_url": "http://localhost:8096",
+            "artifacts_root": "/tmp/artifacts",
+            "step_id": 1,
+            "browser_input": {
+                "path": "/web",
+                "auth": "auto",
+                "actions": [
+                    {"type": "goto"},
+                    {"type": "screenshot", "label": "home"},
+                ],
+            },
+            "selector_assertions": [{"selector": "body", "state": "visible"}],
+            "capture": {"url": {"from": "browser_url"}},
+            "repair_policy": {
+                "enabled": True,
+                "max_attempts": 1,
+                "browser_input": {"actions": [{"type": "refresh"}]},
+            },
+        }
+        validator = Draft202012Validator(load_schema("web_client_task.json"))
+
+        errors = sorted(validator.iter_errors(task), key=lambda error: error.path)
+
+        self.assertEqual(errors, [])
+
+    def test_web_client_result_schema_accepts_browser_result(self):
+        result = {
+            "request_id": "request-1",
+            "status": "pass",
+            "browser": {
+                "status": "pass",
+                "actions": [{"type": "goto", "status": "pass"}],
+            },
+            "screenshot_path": "/tmp/home.png",
+            "browser_screenshots": {"home": "/tmp/home.png"},
+            "selector_states": {"body": {"attached": True, "visible": True}},
+            "capture_values": {"url": "http://localhost:8096/web"},
+            "error": None,
+        }
+        validator = Draft202012Validator(load_schema("web_client_result.json"))
+
+        errors = sorted(validator.iter_errors(result), key=lambda error: error.path)
 
         self.assertEqual(errors, [])
 

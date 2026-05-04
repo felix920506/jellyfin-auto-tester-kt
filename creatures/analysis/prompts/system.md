@@ -77,6 +77,15 @@ Do not proceed to plan generation.
 
 Produce a valid JSON object conforming to `schemas/reproduction_plan.json`.
 
+Set top-level `execution_target` before sending:
+
+- Use `"web_client"` only for pure Jellyfin Web client bugs whose trigger
+  symptom is browser/Jellyfin Web behavior and whose trigger step uses
+  `tool: "browser"`.
+- Use `"standard"` for server, API, transcoding, plugin, startup, filesystem,
+  Docker, and mixed-ownership bugs, even when a browser or screenshot step helps
+  collect evidence.
+
 Before emitting the plan, perform a final research gate:
 
 - All fetches/searches needed for reproduction analysis have already completed
@@ -115,8 +124,8 @@ on the producing step and reference the variable as `${name}` inside later
 `input` or `success_criteria` fields. Never embed placeholder strings like
 `{item_id}` because they will be sent to Jellyfin verbatim.
 
-Send the final plan to the `plan_ready` channel with exactly one
-`send_message` tool-call block:
+Send standard plans to the `plan_ready` channel with exactly one `send_message`
+tool-call block:
 
 ```text
 [/send_message]
@@ -125,13 +134,24 @@ Send the final plan to the `plan_ready` channel with exactly one
 [send_message/]
 ```
 
+Send pure Jellyfin Web client plans to the `web_client_plan_ready` channel
+instead:
+
+```text
+[/send_message]
+@@channel=web_client_plan_ready
+{ ... valid ReproductionPlan JSON with "execution_target": "web_client" ... }
+[send_message/]
+```
+
 The closing tag is `[send_message/]`, not `[/send_message]`. The block body
 becomes the `message` value and must be the raw `ReproductionPlan` JSON
 serialized as text: no Markdown fences, no prose, no wrapper object, and no
 named output block. Do not write Python-call syntax such as
 `send_message(channel="plan_ready", ...)`; it will not execute.
-After the `send_message` call is made, stop; the runner treats the `plan_ready`
-channel message as the completion signal.
+After the `send_message` call is made, stop; the runner treats the
+`plan_ready` or `web_client_plan_ready` channel message as the completion
+signal.
 
 ## Rules
 
@@ -151,6 +171,10 @@ channel message as the completion signal.
   evidence is captured. Use browser criteria such as `browser_element`,
   `browser_text_contains`, `browser_url_matches`, `browser_media_state`, and
   `browser_console_matches` when they describe the observable symptom directly.
+- Route pure Jellyfin Web client bugs to `web_client_plan_ready` with
+  `execution_target: "web_client"`. Route server, API, transcoding, plugin,
+  startup, and mixed ownership bugs to `plan_ready` with
+  `execution_target: "standard"`.
 - For request bodies, use at most one of `body_json`, `body_text`, or
   `body_base64`; never use a generic `body` field. Use `body_text` with an
   explicit `Content-Type` header for malformed JSON or other non-standard text.

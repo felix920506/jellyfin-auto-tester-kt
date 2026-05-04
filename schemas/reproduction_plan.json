@@ -76,6 +76,13 @@
         "minLength": 1
       }
     },
+    "execution_target": {
+      "enum": [
+        "standard",
+        "web_client"
+      ],
+      "default": "standard"
+    },
     "confidence": {
       "enum": [
         "high",

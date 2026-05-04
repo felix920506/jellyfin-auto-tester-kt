@@ -1,0 +1,40 @@
+name: "web_client_agent"
+version: "1.0"
+
+controller:
+  llm: "openrouter/claude-opus-4.7"
+  temperature: 0.1
+
+system_prompt_file: "prompts/system.md"
+
+max_iterations: 60
+skill_mode: "dynamic"
+
+tools:
+  - name: "web_client_runner"
+    type: "package"
+    module: "tools.web_client_runner"
+  - name: "send_message"
+    type: "builtin"
+
+triggers:
+  - type: "channel"
+    channel: "web_client_plan_ready"
+    task: "execute_plan"
+  - type: "channel"
+    channel: "web_client_task"
+    task: "run_task"
+
+memory:
+  provider: "model2vec"
+
+compact:
+  threshold_tokens: 250000
+  strategy: "summarize"
+  pin:
+    - "browser"
+    - "selector_states"
+
+termination:
+  keywords: ["WEB_CLIENT_COMPLETE"]
+  max_turns: 70

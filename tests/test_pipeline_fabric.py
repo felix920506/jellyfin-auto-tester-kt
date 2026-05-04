@@ -35,6 +35,7 @@ from main import (
     load_env_file,
     run_analysis_stage,
     run_execution_stage,
+    run_web_client_stage,
     run_issue,
     run_report_stage,
 )
@@ -387,11 +388,39 @@ def _sample_plan():
         ],
         "reproduction_goal": "Observe the reported behavior.",
         "failure_indicators": ["Health endpoint response"],
+        "execution_target": "standard",
         "confidence": "high",
         "ambiguities": [],
         "is_verification": False,
         "original_run_id": None,
     }
+
+
+def _sample_web_client_plan():
+    plan = _sample_plan()
+    plan["execution_target"] = "web_client"
+    plan["reproduction_steps"] = [
+        {
+            "step_id": 1,
+            "role": "trigger",
+            "action": "Open Jellyfin Web",
+            "tool": "browser",
+            "input": {
+                "path": "/web",
+                "auth": "auto",
+                "label": "web_home",
+                "actions": [
+                    {"type": "goto"},
+                    {"type": "screenshot", "label": "web_home"},
+                ],
+            },
+            "expected_outcome": "The Web UI is visible.",
+            "success_criteria": {
+                "all_of": [{"type": "browser_action_run"}]
+            },
+        }
+    ]
+    return plan
 
 
 def _sample_legacy_printed_plan():
@@ -772,6 +801,36 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "complete")
         self.assertTrue(analysis_agent.cancelled)
 
+    async def test_run_issue_treats_web_client_plan_ready_as_analysis_completion(self):
+        plan_channel = FakeOnSendChannel("web_client_plan_ready")
+        payload = {"report_path": "/tmp/artifacts/run-1/report.md"}
+        analysis_agent = SendMessagePlanReadyAnalysisAgent(
+            plan_channel,
+            _sample_web_client_plan(),
+        )
+        engine = FakeEngine(
+            [],
+            channels={
+                "web_client_plan_ready": plan_channel,
+                "final_report": FakeChannel({"content": payload}),
+            },
+            analysis_agent=analysis_agent,
+        )
+
+        result = await asyncio.wait_for(
+            run_issue(
+                "https://github.com/jellyfin/jellyfin/issues/1",
+                "10.9.7",
+                stream=None,
+                engine_factory=lambda recipe: engine,
+                issue_fetcher=_sample_issue_fetcher,
+            ),
+            timeout=1,
+        )
+
+        self.assertEqual(result.status, "complete")
+        self.assertTrue(analysis_agent.cancelled)
+
     async def test_run_issue_retries_after_hallucinated_plan_ready(self):
         plan_channel = FakeOnSendChannel("plan_ready")
         payload = {"report_path": "/tmp/artifacts/run-1/report.md"}
@@ -834,6 +893,37 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.metadata["source"], "channel")
         self.assertEqual(written_plan, plan)
         self.assertTrue(analysis_agent.cancelled)
+
+    async def test_run_analysis_stage_writes_routed_web_client_plan(self):
+        plan = _sample_web_client_plan()
+        plan_channel = FakeOnSendChannel("web_client_plan_ready")
+        analysis_agent = SendMessagePlanReadyAnalysisAgent(plan_channel, plan)
+        engine = FakeEngine(
+            [],
+            channels={"web_client_plan_ready": plan_channel},
+            analysis_agent=analysis_agent,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/1",
+                    "10.9.7",
+                    temp_dir,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
+            )
+
+            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+
+        self.assertEqual(result.status, "web_client_plan_ready")
+        self.assertEqual(result.metadata["source"], "channel")
+        self.assertEqual(result.metadata["channel"], "web_client_plan_ready")
+        self.assertEqual(written_plan["execution_target"], "web_client")
+        self.assertEqual(written_plan["reproduction_steps"][0]["tool"], "browser")
 
     async def test_run_issue_stops_on_insufficient_information(self):
         engine = FakeEngine(["INSUFFICIENT_INFORMATION\nmissing steps\n"])
@@ -1351,6 +1441,30 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["run_id"], "run-1")
             self.assertEqual(payload["plan"], plan)
 
+    def test_run_web_client_stage_reads_plan_and_writes_execution_result(self):
+        plan = _sample_web_client_plan()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            result = run_web_client_stage(
+                input_dir,
+                temp_path / "web-client",
+                run_id="web-run-1",
+                runner_factory=lambda artifacts_root: FakeStage2Runner(artifacts_root),
+            )
+
+            result_path = temp_path / "web-client" / "execution_result.json"
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result.stage, "web-client")
+            self.assertEqual(result.status, "reproduced")
+            self.assertEqual(result.output_file, "execution_result.json")
+            self.assertEqual(payload["run_id"], "web-run-1")
+            self.assertEqual(payload["plan"], plan)
+            self.assertTrue((temp_path / "web-client" / "result.json").is_file())
+
     def test_run_report_stage_writes_report_and_verification_plan(self):
         plan = _sample_plan()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1404,6 +1518,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             _parse_stage_choice(["--stage=report", "--input", "x", "--out", "y"]),
             "report",
+        )
+        self.assertEqual(
+            _parse_stage_choice(["--stage=web-client", "--input", "x", "--out", "y"]),
+            "web-client",
         )
 
     def test_cli_parsers_accept_logging_controls(self):

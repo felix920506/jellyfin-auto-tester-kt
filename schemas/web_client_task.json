@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jellyfin-auto-tester.local/schemas/web_client_task.json",
+  "title": "WebClientTask",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "request_id",
+    "run_id",
+    "base_url",
+    "artifacts_root",
+    "step_id",
+    "browser_input"
+  ],
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base_url": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifacts_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "step_id": {
+      "oneOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    },
+    "browser_input": {
+      "$ref": "#/$defs/browser_input"
+    },
+    "selector_assertions": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/selector_assertion"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/selector_state"
+              },
+              {
+                "$ref": "#/$defs/selector_assertion_value"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "repair_policy": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "browser_input": {
+          "$ref": "#/$defs/browser_input_patch"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "browser_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actions"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "auth": {
+          "enum": [
+            "auto",
+            "none"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_s": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "viewport": {
+          "$ref": "#/$defs/browser_viewport"
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/browser_action"
+          }
+        }
+      }
+    },
+    "browser_viewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height"
+      ],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "browser_input_patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_s": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "viewport": {
+          "$ref": "#/$defs/browser_viewport"
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/browser_action"
+          }
+        }
+      }
+    },
+    "browser_action": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "goto",
+            "refresh",
+            "click",
+            "fill",
+            "press",
+            "select_option",
+            "check",
+            "uncheck",
+            "wait_for",
+            "wait_for_text",
+            "wait_for_url",
+            "wait_for_media",
+            "evaluate",
+            "screenshot"
+          ]
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": true,
+        "text": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "visible",
+            "hidden",
+            "attached",
+            "detached"
+          ]
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string"
+        },
+        "expression": {
+          "type": "string"
+        },
+        "args": true,
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_s": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "wait_until": {
+          "enum": [
+            "load",
+            "domcontentloaded",
+            "networkidle",
+            "commit"
+          ]
+        },
+        "full_page": {
+          "type": "boolean"
+        }
+      }
+    },
+    "selector_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selector",
+        "state"
+      ],
+      "properties": {
+        "selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "$ref": "#/$defs/selector_state"
+        }
+      }
+    },
+    "selector_state": {
+      "enum": [
+        "exists",
+        "visible",
+        "hidden",
+        "attached",
+        "detached"
+      ]
+    },
+    "selector_assertion_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "$ref": "#/$defs/selector_state"
+        }
+      }
+    }
+  }
+}

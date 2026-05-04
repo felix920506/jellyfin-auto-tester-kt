@@ -24,7 +24,8 @@ DEFAULT_RECIPE_PATH = REPO_ROOT / "terrarium.yaml"
 DEFAULT_DOTENV_PATH = REPO_ROOT / ".env"
 DEFAULT_ANALYSIS_CONFIG_PATH = REPO_ROOT / "creatures" / "analysis" / "config.yaml"
 TERMINAL_CHANNELS = ("final_report", "human_review_queue")
-STAGE_CHOICES = ("analysis", "execution", "report")
+ANALYSIS_PLAN_CHANNELS = ("plan_ready", "web_client_plan_ready")
+STAGE_CHOICES = ("analysis", "execution", "web-client", "report")
 STAGE_CHANNEL_GRACE_S = 2.0
 ANALYSIS_TRANSCRIPT_FILE = "transcript.json"
 INSUFFICIENT_INFORMATION_SUMMARY_FILE = "insufficient_information.md"
@@ -36,6 +37,7 @@ ANALYSIS_PLAN_MAX_ATTEMPTS = 3
 STAGE_HANDOFF_FILES = {
     "analysis": ("plan.json", "reproduction_plan.json"),
     "execution": ("result.json", "execution_result.json"),
+    "web-client": ("result.json", "execution_result.json"),
     "report": ("result.json", "execution_result.json"),
 }
 PROVIDER_AUTH_ENV_VARS = frozenset(
@@ -587,7 +589,10 @@ async def run_issue(
     _apply_default_execution_budget(engine)
 
     terminal_task = asyncio.create_task(_wait_for_terminal_message(engine))
-    plan_observer_task = _create_channel_observer_task(engine, "plan_ready")
+    plan_observer_task = _create_first_channel_observer_task(
+        engine,
+        ANALYSIS_PLAN_CHANNELS,
+    )
     if plan_observer_task is not None:
         await asyncio.sleep(0)
     analysis_output: list[str] = []
@@ -621,13 +626,17 @@ async def run_issue(
                 try:
                     plan_observer_task.result()
                 except Exception as exc:
-                    _logger().debug("plan_ready observer failed: %s", exc)
+                    _logger().debug("analysis plan observer failed: %s", exc)
                     observer_failed = True
                     if not chat_task.done():
                         await chat_task
                     break
 
-                _logger().info("Observed plan_ready; stopping Stage 1 analysis")
+                route_channel, _route_message = plan_observer_task.result()
+                _logger().info(
+                    "Observed %s; stopping Stage 1 analysis",
+                    route_channel,
+                )
                 await _stop_analysis_agent(analysis_agent)
                 if not chat_task.done():
                     chat_task.cancel()
@@ -652,7 +661,7 @@ async def run_issue(
                 try:
                     plan_observer_task.result()
                 except Exception as exc:
-                    _logger().debug("plan_ready observer failed: %s", exc)
+                    _logger().debug("analysis plan observer failed: %s", exc)
                     observer_failed = True
                 else:
                     plan_ready_observed = True
@@ -773,7 +782,7 @@ async def run_analysis_stage(
     )
 
     engine = await _load_stage_engine("analysis", engine_factory=engine_factory)
-    plan_task = asyncio.create_task(_receive_channel_message(engine, "plan_ready"))
+    plan_task = _create_first_channel_receive_task(engine, ANALYSIS_PLAN_CHANNELS)
     await asyncio.sleep(0)
     transcript_parts: list[str] = []
     chat_task: asyncio.Task[None] | None = None
@@ -802,6 +811,7 @@ async def run_analysis_stage(
         channel_plan: dict[str, Any] | None = None
         plan: dict[str, Any] | None = None
         plan_source: str | None = None
+        plan_channel: str | None = None
         transcript = ""
         transcript_sources: list[dict[str, str]] = []
         current_prompt = prompt
@@ -827,12 +837,18 @@ async def run_analysis_stage(
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if plan_task in done:
-                    channel_plan, _channel_error = _completed_channel_plan(
+                    (
+                        channel_plan,
+                        _channel_error,
+                        channel_name,
+                    ) = _completed_channel_plan_with_channel(
                         plan_task,
                         issue_url=issue_url,
                         container_version=container_version,
                         issue_thread=issue_thread,
                     )
+                    if channel_plan is not None:
+                        plan_channel = channel_name
                     await _stop_analysis_agent(analysis_agent)
                     if not chat_task.done():
                         chat_task.cancel()
@@ -896,7 +912,7 @@ async def run_analysis_stage(
                 plan = channel_plan
                 plan_source = "channel" if channel_plan is not None else None
                 if plan is None:
-                    plan, plan_source = await _resolve_analysis_stage_plan(
+                    plan, plan_source, resolved_channel = await _resolve_analysis_stage_plan(
                         plan_task,
                         transcript,
                         issue_url=issue_url,
@@ -904,6 +920,8 @@ async def run_analysis_stage(
                         issue_thread=issue_thread,
                         timeout_s=timeout_s,
                     )
+                    if plan is not None:
+                        plan_channel = resolved_channel
                 if plan is not None:
                     break
 
@@ -916,7 +934,11 @@ async def run_analysis_stage(
                     ANALYSIS_PLAN_MAX_ATTEMPTS,
                 )
                 if plan_task.done():
-                    channel_plan, _channel_error = _completed_channel_plan(
+                    (
+                        channel_plan,
+                        _channel_error,
+                        channel_name,
+                    ) = _completed_channel_plan_with_channel(
                         plan_task,
                         issue_url=issue_url,
                         container_version=container_version,
@@ -925,9 +947,11 @@ async def run_analysis_stage(
                     if channel_plan is not None:
                         plan = channel_plan
                         plan_source = "channel"
+                        plan_channel = channel_name
                         break
-                    plan_task = asyncio.create_task(
-                        _receive_channel_message(engine, "plan_ready")
+                    plan_task = _create_first_channel_receive_task(
+                        engine,
+                        ANALYSIS_PLAN_CHANNELS,
                     )
                     await asyncio.sleep(0)
                 current_prompt = _analysis_plan_retry_prompt(
@@ -956,17 +980,24 @@ async def run_analysis_stage(
         transcript_writer.write_snapshot(
             assistant_output=transcript,
             output_sources=transcript_sources,
-            status="plan_ready",
+            status=plan_channel or "plan_ready",
         )
         _write_json_file(output_dir / "plan.json", plan)
-        logger.info("Stage 1 debug run wrote plan.json from %s", plan_source)
+        logger.info(
+            "Stage 1 debug run wrote plan.json from %s",
+            plan_channel or plan_source,
+        )
         return _write_stage_result(
             StageDebugResult(
                 stage="analysis",
-                status="plan_ready",
+                status=plan_channel or "plan_ready",
                 output_dir=str(output_dir),
                 output_file="plan.json",
-                metadata={"transcript": ANALYSIS_TRANSCRIPT_FILE, "source": plan_source},
+                metadata={
+                    "transcript": ANALYSIS_TRANSCRIPT_FILE,
+                    "source": plan_source,
+                    "channel": plan_channel or "plan_ready",
+                },
             )
         )
     except BaseException:
@@ -1008,6 +1039,49 @@ def run_execution_stage(
             status=str(result.get("overall_result", "complete")),
             output_dir=str(output_dir),
             output_file="result.json",
+            metadata={
+                "input": str(plan_path),
+                "run_id": result.get("run_id"),
+                "artifacts_dir": result.get("artifacts_dir"),
+            },
+        )
+    )
+
+
+def run_web_client_stage(
+    input_path: str | Path,
+    out_dir: str | Path,
+    *,
+    run_id: str | None = None,
+    runner_factory: Callable[[Path], Any] | None = None,
+) -> StageDebugResult:
+    """Run the web-client Stage 2 peer from a ReproductionPlan handoff."""
+
+    load_env_file()
+    logger = _logger()
+    logger.info("Starting web-client Stage 2 debug run from %s", input_path)
+    output_dir = _prepare_output_dir(out_dir)
+    plan_path = _resolve_stage_input_file(input_path, "analysis")
+    plan = _read_json_file(plan_path)
+    _write_json_file(output_dir / "plan.json", plan)
+
+    if runner_factory is None:
+        from tools.web_client_runner import WebClientRunner
+
+        runner = WebClientRunner(artifacts_root=output_dir)
+    else:
+        runner = runner_factory(output_dir)
+
+    result = runner.execute_plan(plan=plan, run_id=run_id)
+    _write_json_file(output_dir / "execution_result.json", result)
+    _write_json_file(output_dir / "result.json", result)
+    logger.info("Web-client Stage 2 debug run wrote execution_result.json")
+    return _write_stage_result(
+        StageDebugResult(
+            stage="web-client",
+            status=str(result.get("overall_result", "complete")),
+            output_dir=str(output_dir),
+            output_file="execution_result.json",
             metadata={
                 "input": str(plan_path),
                 "run_id": result.get("run_id"),
@@ -1160,10 +1234,13 @@ async def _load_stage_engine(
                     "base_config": "creatures/analysis",
                 },
                 base_dir=REPO_ROOT,
-                send_channels=["plan_ready"],
+                send_channels=list(ANALYSIS_PLAN_CHANNELS),
             )
         ],
-        channels=[ChannelConfig(name="plan_ready", channel_type="queue")],
+        channels=[
+            ChannelConfig(name=channel, channel_type="queue")
+            for channel in ANALYSIS_PLAN_CHANNELS
+        ],
     )
     return await _maybe_await(Terrarium.from_recipe(recipe))
 
@@ -1362,9 +1439,10 @@ def _analysis_prompt(
 def _analysis_plan_retry_prompt(attempt: int, max_attempts: int) -> str:
     return (
         "REJECTED: Your previous Stage 1 response did not deliver a valid "
-        "`ReproductionPlan` to the `plan_ready` channel. You may have claimed "
+        "`ReproductionPlan` to either `plan_ready` or `web_client_plan_ready`. "
+        "You may have claimed "
         "that the plan was sent, but the runner did not observe a real "
-        "`send_message` delivery to `plan_ready` with the JSON payload.\n\n"
+        "`send_message` delivery to an allowed plan channel with the JSON payload.\n\n"
         f"This is attempt {attempt} of {max_attempts}. Send no prose and no "
         "summary. Your entire response must be exactly one `send_message` "
         "tool-call block in this KohakuTerrarium bracket format:\n\n"
@@ -1372,6 +1450,8 @@ def _analysis_plan_retry_prompt(attempt: int, max_attempts: int) -> str:
         "@@channel=plan_ready\n"
         "{ ... valid ReproductionPlan JSON ... }\n"
         "[send_message/]\n\n"
+        "Use `@@channel=web_client_plan_ready` instead when the plan is a pure "
+        "Jellyfin Web client bug and has `execution_target: \"web_client\"`.\n\n"
         "The closing tag is `[send_message/]`, not `[/send_message]`. The block "
         "body must be the raw JSON object serialized as text, not Markdown, not "
         "a named output block, not Python-call syntax, and not a description. "
@@ -1388,7 +1468,7 @@ async def _resolve_analysis_stage_plan(
     container_version: str | None = None,
     issue_thread: dict[str, Any] | None = None,
     timeout_s: float | None,
-) -> tuple[dict[str, Any] | None, str | None]:
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
     channel_error: BaseException | None = None
     grace_s = _analysis_channel_grace(timeout_s)
 
@@ -1400,11 +1480,16 @@ async def _resolve_analysis_stage_plan(
             issue_thread=issue_thread,
         )
         if plan is not None:
-            return plan, "channel"
+            channel_name = None
+            try:
+                channel_name, _message = plan_task.result()
+            except Exception:
+                pass
+            return plan, "channel", channel_name
 
     if not plan_task.done():
         try:
-            _, message = await asyncio.wait_for(
+            channel_name, message = await asyncio.wait_for(
                 asyncio.shield(plan_task),
                 timeout=grace_s,
             )
@@ -1415,7 +1500,7 @@ async def _resolve_analysis_stage_plan(
                 issue_thread=issue_thread,
             )
             if plan is not None:
-                return plan, "channel"
+                return plan, "channel", channel_name
         except asyncio.TimeoutError:
             pass
         except Exception as exc:
@@ -1424,7 +1509,7 @@ async def _resolve_analysis_stage_plan(
     if channel_error is not None and not plan_task.done():
         plan_task.cancel()
         await _cancel_task(plan_task)
-    return None, None
+    return None, None, None
 
 
 def _analysis_channel_grace(timeout_s: float | None) -> float:
@@ -1445,7 +1530,8 @@ def _raise_analysis_plan_protocol_error(
         )
     raise AnalysisAgentProtocolError(
         f"analysis agent failed to send plan_ready after {attempts} attempts; "
-        "final Stage 1 output must use a send_message tool-call block: "
+        "final Stage 1 output must use a send_message tool-call block targeting "
+        "`plan_ready` or `web_client_plan_ready`: "
         "[/send_message]@@channel=plan_ready... [send_message/]"
     )
 
@@ -1457,10 +1543,26 @@ def _completed_channel_plan(
     container_version: str | None = None,
     issue_thread: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, BaseException | None]:
+    plan, error, _channel = _completed_channel_plan_with_channel(
+        plan_task,
+        issue_url=issue_url,
+        container_version=container_version,
+        issue_thread=issue_thread,
+    )
+    return plan, error
+
+
+def _completed_channel_plan_with_channel(
+    plan_task: asyncio.Task[tuple[str, Any]],
+    *,
+    issue_url: str | None = None,
+    container_version: str | None = None,
+    issue_thread: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, BaseException | None, str | None]:
     try:
-        _, message = plan_task.result()
+        channel_name, message = plan_task.result()
     except Exception as exc:
-        return None, exc
+        return None, exc, None
     return (
         _coerce_reproduction_plan(
             message,
@@ -1469,6 +1571,7 @@ def _completed_channel_plan(
             issue_thread=issue_thread,
         ),
         None,
+        channel_name,
     )
 
 
@@ -1593,6 +1696,8 @@ def _normalize_reproduction_plan(
     plan.setdefault("failure_indicators", [])
     plan.setdefault("confidence", "medium")
     plan.setdefault("ambiguities", [])
+    if plan.get("execution_target") not in {"standard", "web_client"}:
+        plan["execution_target"] = "standard"
     plan.setdefault("is_verification", False)
     plan.setdefault("original_run_id", None)
     plan["environment"] = _normalize_plan_environment(plan.get("environment"))
@@ -1964,6 +2069,61 @@ def _create_channel_observer_task(
         _logger().debug("Channel %s cannot be observed without consuming it", channel_name)
         return None
     return asyncio.create_task(_first_observed_channel_message(channel_name, source))
+
+
+def _create_first_channel_observer_task(
+    engine: Any,
+    channel_names: Iterable[str],
+) -> asyncio.Task[tuple[str, Any]] | None:
+    tasks = [
+        task
+        for channel_name in channel_names
+        if (task := _create_channel_observer_task(engine, channel_name)) is not None
+    ]
+    if not tasks:
+        return None
+    if len(tasks) == 1:
+        return tasks[0]
+    return asyncio.create_task(_first_completed_channel_message(tasks))
+
+
+def _create_first_channel_receive_task(
+    engine: Any,
+    channel_names: Iterable[str],
+) -> asyncio.Task[tuple[str, Any]]:
+    tasks = [
+        asyncio.create_task(_receive_channel_message(engine, channel_name))
+        for channel_name in channel_names
+    ]
+    return asyncio.create_task(_first_completed_channel_message(tasks))
+
+
+async def _first_completed_channel_message(
+    tasks: list[asyncio.Task[tuple[str, Any]]],
+) -> tuple[str, Any]:
+    pending = set(tasks)
+    errors: list[BaseException] = []
+    try:
+        while pending:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            result: tuple[str, Any] | None = None
+            for task in done:
+                try:
+                    result = task.result()
+                except BaseException as exc:
+                    errors.append(exc)
+            if result is not None:
+                return result
+        messages = "; ".join(str(error) for error in errors) or "no channel listeners"
+        raise RuntimeError(f"no analysis plan channel emitted a message: {messages}")
+    finally:
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def _first_observed_channel_message(
@@ -2887,7 +3047,7 @@ def _build_stage_parser(stage: str) -> argparse.ArgumentParser:
             action="store_true",
             help="Do not stream analysis-agent output",
         )
-    elif stage == "execution":
+    elif stage in {"execution", "web-client"}:
         parser.add_argument(
             "--input",
             required=True,
@@ -2980,6 +3140,8 @@ async def _async_stage_main(argv: list[str]) -> int:
         )
     elif args.stage == "execution":
         result = run_execution_stage(args.input, args.out, run_id=args.run_id)
+    elif args.stage == "web-client":
+        result = run_web_client_stage(args.input, args.out, run_id=args.run_id)
     elif args.stage == "report":
         result = run_report_stage(
             args.input,
