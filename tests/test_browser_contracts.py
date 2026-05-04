@@ -278,6 +278,44 @@ class BrowserContractTests(unittest.TestCase):
             {"all_of": [{"type": "browser_action_run"}]},
         )
 
+    def test_plan_normalization_accepts_legacy_browser_criteria_shape(self):
+        plan = minimal_plan()
+        plan["reproduction_steps"][0]["input"]["actions"].append(
+            {"type": "wait_for_media", "state": "stopped"}
+        )
+        plan["reproduction_steps"][0]["success_criteria"] = {
+            "all_of": [
+                {"browser_text_contains": {"text": "Songs"}},
+                {
+                    "browser_element": {
+                        "selector": "[role='row']",
+                        "exists": True,
+                    }
+                },
+                {"browser_media_state": {"state": "stopped"}},
+            ]
+        }
+
+        normalized = _normalize_reproduction_plan(plan)
+
+        self.assertEqual(
+            normalized["reproduction_steps"][0]["success_criteria"],
+            {
+                "all_of": [
+                    {"type": "browser_text_contains", "value": "Songs"},
+                    {
+                        "type": "browser_element",
+                        "selector": "[role='row']",
+                        "state": "exists",
+                    },
+                    {"type": "browser_media_state", "state": "stopped"},
+                ]
+            },
+        )
+        validator = Draft202012Validator(load_schema("reproduction_plan.json"))
+        errors = sorted(validator.iter_errors(normalized), key=lambda error: error.path)
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,14 @@ from typing import Any, Mapping
 
 
 VARIABLE_RE = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}")
+BROWSER_ASSERTION_TYPES = {
+    "browser_action_run",
+    "browser_element",
+    "browser_text_contains",
+    "browser_url_matches",
+    "browser_media_state",
+    "browser_console_matches",
+}
 
 
 @dataclass(frozen=True)
@@ -85,7 +93,12 @@ def evaluate_criteria(
     if not isinstance(assertions, list) or not assertions:
         return _invalid_criteria(f"{operator} must be a non-empty list")
 
-    results = [_evaluate_assertion(assertion, context) for assertion in assertions]
+    normalized_assertions = [
+        normalize_criteria_assertion(assertion) for assertion in assertions
+    ]
+    results = [
+        _evaluate_assertion(assertion, context) for assertion in normalized_assertions
+    ]
     passed = (
         all(result["passed"] for result in results)
         if operator == "all_of"
@@ -151,6 +164,61 @@ def _resolve_string(value: str, variables: Mapping[str, Any]) -> str:
         return str(variables[name])
 
     return VARIABLE_RE.sub(replace, value)
+
+
+def normalize_criteria_assertion(assertion: Any) -> Any:
+    """Normalize legacy one-key browser assertions into the criteria DSL."""
+
+    if not isinstance(assertion, Mapping):
+        return assertion
+    normalized = dict(assertion)
+    if "type" not in normalized and len(normalized) == 1:
+        key, payload = next(iter(normalized.items()))
+        if key in BROWSER_ASSERTION_TYPES:
+            normalized = _normalize_legacy_browser_assertion(key, payload)
+    return _normalize_browser_assertion_fields(normalized)
+
+
+def _normalize_legacy_browser_assertion(key: str, payload: Any) -> dict[str, Any]:
+    if key == "browser_action_run":
+        return {"type": "browser_action_run"}
+    assertion = {"type": key}
+    if isinstance(payload, Mapping):
+        assertion.update(payload)
+    elif key in {"browser_text_contains", "browser_media_state"}:
+        field = "value" if key == "browser_text_contains" else "state"
+        assertion[field] = str(payload)
+    elif key in {"browser_url_matches", "browser_console_matches"}:
+        assertion["pattern"] = str(payload)
+    elif key == "browser_element":
+        assertion["selector"] = str(payload)
+    return assertion
+
+
+def _normalize_browser_assertion_fields(assertion: dict[str, Any]) -> dict[str, Any]:
+    assertion_type = assertion.get("type")
+    if (
+        assertion_type == "browser_text_contains"
+        and "value" not in assertion
+        and "text" in assertion
+    ):
+        assertion["value"] = assertion.pop("text")
+    if assertion_type == "browser_element":
+        exists = assertion.pop("exists", None)
+        visible = assertion.pop("visible", None)
+        hidden = assertion.pop("hidden", None)
+        if "state" not in assertion:
+            if exists is True:
+                assertion["state"] = "exists"
+            elif visible is True:
+                assertion["state"] = "visible"
+            elif hidden is True:
+                assertion["state"] = "hidden"
+            elif exists is False:
+                assertion["state"] = "detached"
+            else:
+                assertion["state"] = "visible"
+    return assertion
 
 
 def _evaluate_assertion(assertion: Any, context: Mapping[str, Any]) -> dict[str, Any]:
@@ -477,7 +545,9 @@ def _evaluate_browser_media_state(
         return _not_applicable("browser_media_state", assertion, context)
     actual = media.get("state")
     expected = str(assertion.get("state") or "")
-    passed = actual == expected
+    passed = actual == expected or (
+        expected == "stopped" and actual in {"none", "paused", "ended"}
+    )
     return _assertion_result(
         assertion_type="browser_media_state",
         passed=passed,

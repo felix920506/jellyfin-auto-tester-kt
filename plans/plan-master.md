@@ -207,7 +207,9 @@ interaction bugs that require a real Chromium client.
 Supported browser actions are `goto`, `refresh`, `click`, `fill`, `press`,
 `select_option`, `check`, `uncheck`, `wait_for`, `wait_for_text`,
 `wait_for_url`, `wait_for_media`, `evaluate`, and `screenshot`. `refresh`
-reloads the current page and waits for app idle.
+reloads the current page and waits for app idle. `click` accepts either a CSS
+`selector` or visible `text`; `wait_for_media` accepts `playing`, `paused`,
+`ended`, `errored`, `none`, or `stopped`.
 
 **`success_criteria` evaluation (deterministic, no LLM):**
 
@@ -230,7 +232,7 @@ Supported assertion types:
 | `browser_element` | `selector: string`, `state: exists\|visible\|hidden\|attached\|detached` | Browser selector state |
 | `browser_text_contains` | `value: string`        | Browser page text contains a string |
 | `browser_url_matches` | `pattern: string`        | Regex against final browser URL |
-| `browser_media_state` | `state: playing\|paused\|ended\|errored\|none` | Aggregated media state |
+| `browser_media_state` | `state: playing\|paused\|ended\|errored\|none\|stopped` | Aggregated media state |
 | `browser_console_matches` | `pattern: string`    | Regex against captured console warnings/errors |
 
 A step passes iff its `success_criteria` evaluates to true under this DSL. There is no LLM-based judgment in the loop; the agent's job is to dispatch the tool call, not to interpret the result. The top-level `reproduction_goal` is human-readable context only and must not be used by Stage 2 for pass/fail decisions.

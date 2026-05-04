@@ -632,13 +632,15 @@ class ExecutionRunnerTests(unittest.TestCase):
                         "success_criteria": {
                             "all_of": [
                                 {
-                                    "type": "browser_element",
-                                    "selector": ".poster",
-                                    "state": "visible",
+                                    "browser_element": {
+                                        "selector": ".poster",
+                                        "visible": True,
+                                    }
                                 },
                                 {
-                                    "type": "browser_text_contains",
-                                    "value": "Jellyfin",
+                                    "browser_text_contains": {
+                                        "text": "Jellyfin",
+                                    }
                                 },
                             ]
                         },
@@ -757,8 +759,8 @@ class ExecutionRunnerTests(unittest.TestCase):
             result = runner.retry_browser_step(
                 1,
                 {
-                    "locale": "fr-FR",
                     "label": "fixed",
+                    "locale": "fr-FR",
                     "actions": [
                         {"type": "refresh"},
                         {"type": "click", "selector": "#new"},
@@ -776,8 +778,8 @@ class ExecutionRunnerTests(unittest.TestCase):
                 [entry["browser"]["status"] for entry in result["execution_log"]],
                 ["fail", "pass"],
             )
-            self.assertEqual(browser_driver.runs[1]["browser_input"]["locale"], "fr-FR")
             self.assertEqual(browser_driver.runs[1]["browser_input"]["label"], "fixed")
+            self.assertEqual(browser_driver.runs[1]["browser_input"]["locale"], "fr-FR")
 
             rejected = runner.retry_browser_step(1, {"actions": []})
             self.assertEqual(rejected["status"], "repair_rejected")
@@ -841,6 +843,55 @@ class ExecutionRunnerTests(unittest.TestCase):
             self.assertIn("forbidden", rejected["reason"])
             self.assertEqual(result["overall_result"], "not_reproduced")
             self.assertEqual(len(result["execution_log"]), 1)
+
+    def test_browser_infrastructure_failure_is_inconclusive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    {
+                        "status": "fail",
+                        "actions": [],
+                        "screenshot_paths": [],
+                        "final_url": None,
+                        "title": None,
+                        "console": [],
+                        "failed_network": [],
+                        "dom_summary": None,
+                        "dom_path": None,
+                        "page_text": None,
+                        "media_state": {"state": "none", "elements": []},
+                        "error": "Playwright not available",
+                    }
+                ],
+            )
+            runner = ExecutionRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            plan = base_plan(
+                [
+                    {
+                        "step_id": 1,
+                        "role": "trigger",
+                        "action": "Open Jellyfin Web",
+                        "tool": "browser",
+                        "input": {
+                            "path": "/web",
+                            "actions": [{"type": "goto"}],
+                        },
+                        "expected_outcome": "Browser action succeeds",
+                        "success_criteria": {"all_of": [{"type": "browser_action_run"}]},
+                    }
+                ]
+            )
+
+            result = runner.execute_plan(plan, run_id="run-browser-infra")
+
+            self.assertEqual(result["overall_result"], "inconclusive")
 
     def test_synthetic_browser_reproduction_records_media_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:

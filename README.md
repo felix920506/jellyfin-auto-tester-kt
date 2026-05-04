@@ -106,6 +106,8 @@ Supported action types are `goto`, `refresh`, `click`, `fill`, `press`,
 `select_option`, `check`, `uncheck`, `wait_for`, `wait_for_text`,
 `wait_for_url`, `wait_for_media`, `evaluate`, and `screenshot`. `refresh` is an
 explicit action that reloads the current page and then waits for app idle.
+`click` accepts either a CSS `selector` or visible `text`. `wait_for_media`
+accepts `playing`, `paused`, `ended`, `errored`, `none`, or `stopped`.
 Screenshots from browser steps are written under the run's `screenshots/`
 artifact directory and can satisfy `screenshot_present`.
 

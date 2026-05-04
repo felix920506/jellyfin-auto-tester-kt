@@ -65,6 +65,11 @@ DOM_SUMMARY_SCRIPT = """() => {
 
 MEDIA_WAIT_SCRIPT = """(expected) => {
   const elements = Array.from(document.querySelectorAll('audio, video'));
+  if (expected === 'stopped') {
+    return elements.length === 0 || elements.every((el) =>
+      !el.error && !el.ended && el.paused && el.currentTime < 0.25
+    );
+  }
   return elements.some((el) => {
     if (expected === 'playing') return !el.paused && !el.ended && !el.error;
     if (expected === 'paused') return el.paused && !el.ended && !el.error;
@@ -201,8 +206,8 @@ class BrowserDriver:
             except Exception:
                 pass
             self._context = None
-            self._locale = None
             self._page = None
+            self._locale = None
 
         if self._playwright is None:
             factory = self._playwright_factory or _load_sync_playwright()
@@ -255,7 +260,7 @@ class BrowserDriver:
             elif action_type == "refresh":
                 self._action_refresh(page, action, timeout_ms)
             elif action_type == "click":
-                page.locator(_required_selector(action)).click(timeout=timeout_ms)
+                self._action_click(page, action, timeout_ms)
                 self._wait_for_app_idle(page, timeout_ms)
             elif action_type == "fill":
                 page.locator(_required_selector(action)).fill(
@@ -343,6 +348,24 @@ class BrowserDriver:
             page.locator(str(action["selector"])).press(key, timeout=timeout_ms)
         else:
             page.keyboard.press(key)
+
+    def _action_click(
+        self,
+        page: Any,
+        action: Mapping[str, Any],
+        timeout_ms: int,
+    ) -> None:
+        if action.get("selector"):
+            page.locator(str(action["selector"])).click(timeout=timeout_ms)
+            return
+        text = str(action.get("text") or action.get("value") or "")
+        if not text:
+            raise ValueError("click action requires selector or text")
+        if hasattr(page, "get_by_text"):
+            exact = bool(action.get("exact", True))
+            page.get_by_text(text, exact=exact).click(timeout=timeout_ms)
+            return
+        page.locator(f"text={text}").click(timeout=timeout_ms)
 
     def _action_wait_for_text(
         self,
@@ -741,6 +764,13 @@ def _aggregate_media_state(elements: list[Any]) -> str:
         return "ended"
     if any(isinstance(item, Mapping) and not item.get("paused") for item in elements):
         return "playing"
+    if all(
+        isinstance(item, Mapping)
+        and item.get("paused")
+        and float(item.get("currentTime") or 0) < 0.25
+        for item in elements
+    ):
+        return "stopped"
     return "paused"
 
 

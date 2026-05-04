@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable, TextIO
 from urllib.parse import urlparse
 
 from stage1_model_blacklist import is_stage1_model_blacklisted
+from tools.async_compat import run_sync_away_from_loop
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -1024,6 +1025,22 @@ def run_execution_stage(
 ) -> StageDebugResult:
     """Run Stage 2 only from a ReproductionPlan file or folder."""
 
+    return run_sync_away_from_loop(
+        _run_execution_stage_impl,
+        input_path,
+        out_dir,
+        run_id=run_id,
+        runner_factory=runner_factory,
+    )
+
+
+def _run_execution_stage_impl(
+    input_path: str | Path,
+    out_dir: str | Path,
+    *,
+    run_id: str | None = None,
+    runner_factory: Callable[[Path], Any] | None = None,
+) -> StageDebugResult:
     load_env_file()
     logger = _logger()
     logger.info("Starting Stage 2 debug run from %s", input_path)
@@ -1066,6 +1083,22 @@ def run_web_client_stage(
 ) -> StageDebugResult:
     """Run the web-client Stage 2 peer from a ReproductionPlan handoff."""
 
+    return run_sync_away_from_loop(
+        _run_web_client_stage_impl,
+        input_path,
+        out_dir,
+        run_id=run_id,
+        runner_factory=runner_factory,
+    )
+
+
+def _run_web_client_stage_impl(
+    input_path: str | Path,
+    out_dir: str | Path,
+    *,
+    run_id: str | None = None,
+    runner_factory: Callable[[Path], Any] | None = None,
+) -> StageDebugResult:
     load_env_file()
     logger = _logger()
     logger.info("Starting web-client Stage 2 debug run from %s", input_path)
@@ -2022,6 +2055,15 @@ def _normalize_json_path(path: Any) -> str:
 
 def _normalize_legacy_criteria_assertion(value: dict[str, Any]) -> dict[str, Any] | None:
     key, payload = next(iter(value.items()))
+    if key in {
+        "browser_action_run",
+        "browser_element",
+        "browser_text_contains",
+        "browser_url_matches",
+        "browser_media_state",
+        "browser_console_matches",
+    }:
+        return _normalize_legacy_browser_assertion(key, payload)
     if key == "http_status":
         assertion_type = "status_code"
     elif key in {"exit_code", "body_contains", "stdout_contains", "stderr_contains"}:
@@ -2037,6 +2079,46 @@ def _normalize_legacy_criteria_assertion(value: dict[str, Any]) -> dict[str, Any
         if "in" in payload:
             return {"type": assertion_type, "in": payload["in"]}
     return {"type": assertion_type, "equals": payload}
+
+
+def _normalize_legacy_browser_assertion(key: str, payload: Any) -> dict[str, Any]:
+    if key == "browser_action_run":
+        return {"type": "browser_action_run"}
+    assertion = {"type": key}
+    if isinstance(payload, dict):
+        assertion.update(payload)
+    elif key in {"browser_text_contains", "browser_media_state"}:
+        field = "value" if key == "browser_text_contains" else "state"
+        assertion[field] = str(payload)
+    elif key == "browser_url_matches":
+        assertion["pattern"] = str(payload)
+    elif key == "browser_console_matches":
+        assertion["pattern"] = str(payload)
+    elif key == "browser_element":
+        assertion["selector"] = str(payload)
+
+    if (
+        key == "browser_text_contains"
+        and "value" not in assertion
+        and "text" in assertion
+    ):
+        assertion["value"] = assertion.pop("text")
+    if key == "browser_element":
+        exists = assertion.pop("exists", None)
+        visible = assertion.pop("visible", None)
+        hidden = assertion.pop("hidden", None)
+        if "state" not in assertion:
+            if exists is True:
+                assertion["state"] = "exists"
+            elif visible is True:
+                assertion["state"] = "visible"
+            elif hidden is True:
+                assertion["state"] = "hidden"
+            elif exists is False:
+                assertion["state"] = "detached"
+            else:
+                assertion["state"] = "visible"
+    return assertion
 
 
 def _json_path_existence_pattern(path: Any) -> str:

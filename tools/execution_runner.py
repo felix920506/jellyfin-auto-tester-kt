@@ -15,11 +15,14 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlretrieve
 
+from tools.async_compat import run_sync_away_from_loop
+from tools.browser_errors import browser_infrastructure_error
 from tools.criteria import (
     CaptureError,
     UnboundVariableError,
     evaluate_criteria,
     extract_captures,
+    normalize_criteria_assertion,
     resolve_references,
 )
 from tools.browser import BrowserDriver
@@ -803,6 +806,8 @@ class ExecutionRunner:
             return "inconclusive"
         if trigger.get("reason") == "timeout":
             return "inconclusive"
+        if trigger.get("outcome") == "fail" and browser_infrastructure_error(trigger):
+            return "inconclusive"
         if trigger.get("outcome") == "pass":
             return "reproduced"
         if trigger.get("outcome") == "fail":
@@ -814,6 +819,7 @@ class ExecutionRunner:
             step.get("tool") == "browser"
             and entry.get("outcome") == "fail"
             and isinstance(entry.get("browser"), dict)
+            and browser_infrastructure_error(entry) is None
         )
 
     def _container_running(self, container_id: str) -> bool:
@@ -916,7 +922,9 @@ def execute_plan(
     plan: dict[str, Any],
     run_id: str | None = None,
 ) -> dict[str, Any]:
-    return ExecutionRunner().execute_plan(plan=plan, run_id=run_id)
+    return run_sync_away_from_loop(
+        lambda: ExecutionRunner().execute_plan(plan=plan, run_id=run_id)
+    )
 
 
 def _command_from_source(source: str) -> str | None:
@@ -965,6 +973,7 @@ def _browser_element_selectors(criteria: Any) -> list[str]:
     assertions = criteria.get("all_of") or criteria.get("any_of") or []
     selectors = []
     for assertion in assertions:
+        assertion = normalize_criteria_assertion(assertion)
         if (
             isinstance(assertion, dict)
             and assertion.get("type") == "browser_element"

@@ -224,6 +224,43 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(result["overall_result"], "inconclusive")
             self.assertIn("demo browser flow could not complete", result["error_summary"])
 
+    def test_demo_plan_browser_infrastructure_failure_is_inconclusive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    {
+                        "status": "fail",
+                        "actions": [],
+                        "screenshot_paths": [],
+                        "final_url": None,
+                        "title": None,
+                        "console": [],
+                        "failed_network": [],
+                        "dom_summary": None,
+                        "dom_path": None,
+                        "page_text": None,
+                        "media_state": {"state": "none", "elements": []},
+                        "error": (
+                            "It looks like you are using Playwright Sync API "
+                            "inside the asyncio loop. Please use the Async API instead."
+                        ),
+                    }
+                ],
+            )
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+
+            result = runner.execute_plan(demo_browser_plan(), run_id="demo-infra-fail")
+
+            self.assertEqual(result["overall_result"], "inconclusive")
+            self.assertIn("demo browser flow could not complete", result["error_summary"])
+
     def test_demo_plan_resolves_unstable_track_url(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = FakeBrowserDriver(temp_dir)

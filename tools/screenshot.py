@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tools.async_compat import run_sync_away_from_loop
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACTS_ROOT = Path(
@@ -107,13 +109,15 @@ def capture(
     wait_ms: int = 2000,
     locale: str | None = None,
 ) -> dict[str, Any]:
-    return Screenshotter().capture(
-        url=url,
-        run_id=run_id,
-        label=label,
-        wait_selector=wait_selector,
-        wait_ms=wait_ms,
-        locale=locale,
+    return run_sync_away_from_loop(
+        lambda: Screenshotter().capture(
+            url=url,
+            run_id=run_id,
+            label=label,
+            wait_selector=wait_selector,
+            wait_ms=wait_ms,
+            locale=locale,
+        )
     )
 
 

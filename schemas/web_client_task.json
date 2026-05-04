@@ -273,7 +273,13 @@
             "visible",
             "hidden",
             "attached",
-            "detached"
+            "detached",
+            "playing",
+            "paused",
+            "ended",
+            "errored",
+            "none",
+            "stopped"
           ]
         },
         "pattern": {

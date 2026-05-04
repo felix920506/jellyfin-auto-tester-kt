@@ -645,7 +645,13 @@
             "visible",
             "hidden",
             "attached",
-            "detached"
+            "detached",
+            "playing",
+            "paused",
+            "ended",
+            "errored",
+            "none",
+            "stopped"
           ]
         },
         "pattern": {
@@ -1053,7 +1059,8 @@
             "paused",
             "ended",
             "errored",
-            "none"
+            "none",
+            "stopped"
           ]
         }
       }

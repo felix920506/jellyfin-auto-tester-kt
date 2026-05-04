@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -1487,6 +1488,38 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["run_id"], "web-run-1")
             self.assertEqual(payload["plan"], plan)
             self.assertTrue((temp_path / "web-client" / "result.json").is_file())
+
+    def test_web_client_stage_offloads_sync_runner_inside_active_event_loop(self):
+        plan = _sample_web_client_plan()
+        main_thread = threading.get_ident()
+        runner_thread: dict[str, int] = {}
+
+        class ThreadRecordingRunner(FakeStage2Runner):
+            def execute_plan(self, plan, run_id=None):
+                runner_thread["id"] = threading.get_ident()
+                return super().execute_plan(plan, run_id=run_id)
+
+        async def call_stage(input_dir, output_dir):
+            return run_web_client_stage(
+                input_dir,
+                output_dir,
+                run_id="web-run-threaded",
+                runner_factory=lambda artifacts_root: ThreadRecordingRunner(
+                    artifacts_root
+                ),
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            result = asyncio.run(call_stage(input_dir, temp_path / "web-client"))
+
+            self.assertEqual(result.status, "reproduced")
+            self.assertIn("id", runner_thread)
+            self.assertNotEqual(runner_thread["id"], main_thread)
 
     def test_run_report_stage_writes_report_and_verification_plan(self):
         plan = _sample_plan()

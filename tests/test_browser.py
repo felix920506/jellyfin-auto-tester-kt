@@ -3,7 +3,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tools.browser import BrowserDriver, DOM_SUMMARY_SCRIPT, MEDIA_STATE_SCRIPT
+from tools.browser import (
+    BrowserDriver,
+    DOM_SUMMARY_SCRIPT,
+    MEDIA_STATE_SCRIPT,
+    MEDIA_WAIT_SCRIPT,
+)
 from tools.screenshot import BROWSER_HEADLESS_ENV
 
 
@@ -119,6 +124,12 @@ class FakePage:
     def locator(self, selector):
         self.calls.append(("locator", selector))
         locator = FakeLocator(self, selector)
+        self.locator_instances.append(locator)
+        return locator
+
+    def get_by_text(self, text, exact=True):
+        self.calls.append(("get_by_text", text, exact))
+        locator = FakeLocator(self, f"text={text}")
         self.locator_instances.append(locator)
         return locator
 
@@ -279,6 +290,52 @@ class BrowserDriverTests(unittest.TestCase):
             )
             self.assertIn(("reload", "networkidle", 30000), page.calls)
             self.assertIn(("wait_for_load_state", "networkidle", 5000), page.calls)
+
+    def test_click_can_target_visible_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            driver, _ = self.make_driver(temp_dir, page)
+
+            result = driver.run(
+                {
+                    "actions": [
+                        {"type": "click", "text": "Songs"},
+                    ],
+                }
+            )
+
+            self.assertEqual(result["status"], "pass")
+            self.assertIn(("get_by_text", "Songs", True), page.calls)
+            self.assertIn(("click", "text=Songs", 30000), page.calls)
+
+    def test_wait_for_media_supports_stopped_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            page.media = [
+                {
+                    "tag": "audio",
+                    "paused": True,
+                    "ended": False,
+                    "error": None,
+                    "currentTime": 0,
+                }
+            ]
+            driver, _ = self.make_driver(temp_dir, page)
+
+            result = driver.run(
+                {
+                    "actions": [
+                        {"type": "wait_for_media", "state": "stopped"},
+                    ],
+                }
+            )
+
+            self.assertEqual(result["status"], "pass")
+            self.assertIn(
+                ("wait_for_function", MEDIA_WAIT_SCRIPT, "stopped", 30000),
+                page.calls,
+            )
+            self.assertEqual(result["media_state"]["state"], "stopped")
 
     def test_goto_auth_object_uses_supplied_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:

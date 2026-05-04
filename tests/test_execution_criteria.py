@@ -178,6 +178,36 @@ class ExecutionCriteriaTests(unittest.TestCase):
 
         self.assertTrue(result["passed"])
 
+    def test_evaluate_legacy_browser_criteria_shape(self):
+        result = evaluate_criteria(
+            {
+                "all_of": [
+                    {"browser_text_contains": {"text": "Songs"}},
+                    {
+                        "browser_element": {
+                            "selector": "[role='row']",
+                            "exists": True,
+                        }
+                    },
+                    {"browser_media_state": {"state": "stopped"}},
+                ]
+            },
+            {
+                "tool": "browser",
+                "browser": {
+                    "status": "pass",
+                    "actions": [],
+                    "page_text": "Home Songs",
+                    "media_state": {"state": "paused"},
+                },
+                "browser_elements": {
+                    "[role='row']": {"attached": True, "visible": True},
+                },
+            },
+        )
+
+        self.assertTrue(result["passed"])
+
     def test_browser_action_run_fails_when_an_action_failed(self):
         result = evaluate_criteria(
             {"all_of": [{"type": "browser_action_run"}]},

@@ -15,12 +15,15 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 from urllib.request import urlretrieve
 
+from tools.async_compat import run_sync_away_from_loop
 from tools.browser import BrowserDriver
+from tools.browser_errors import browser_infrastructure_error
 from tools.criteria import (
     CaptureError,
     UnboundVariableError,
     evaluate_criteria,
     extract_captures,
+    normalize_criteria_assertion,
     resolve_references,
 )
 from tools.docker_manager import DockerManager
@@ -302,8 +305,9 @@ class WebClientRunner:
             container_crashed=False,
         )
         demo_blocker = _demo_browser_blocker(execution_log)
-        if overall_result == "not_reproduced" and demo_blocker:
-            overall_result = "inconclusive"
+        if demo_blocker and overall_result in {"not_reproduced", "inconclusive"}:
+            if overall_result == "not_reproduced":
+                overall_result = "inconclusive"
             error_summary = error_summary or demo_blocker
 
         result = {
@@ -886,6 +890,8 @@ class WebClientRunner:
             return "inconclusive"
         if trigger.get("reason") == "timeout":
             return "inconclusive"
+        if trigger.get("outcome") == "fail" and browser_infrastructure_error(trigger):
+            return "inconclusive"
         if trigger.get("outcome") == "pass":
             return "reproduced"
         if trigger.get("outcome") == "fail":
@@ -989,14 +995,18 @@ def execute_plan(
     plan: dict[str, Any],
     run_id: str | None = None,
 ) -> dict[str, Any]:
-    return WebClientRunner().execute_plan(plan=plan, run_id=run_id)
+    return run_sync_away_from_loop(
+        lambda: WebClientRunner().execute_plan(plan=plan, run_id=run_id)
+    )
 
 
 def run_task(
     task: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    return WebClientRunner().run_task(task=task, **kwargs)
+    return run_sync_away_from_loop(
+        lambda: WebClientRunner().run_task(task=task, **kwargs)
+    )
 
 
 def _trigger_tool(plan: dict[str, Any]) -> str | None:
@@ -1068,6 +1078,9 @@ def _demo_browser_blocker(execution_log: list[dict[str, Any]]) -> str | None:
     for entry in execution_log:
         if not isinstance(entry, Mapping) or entry.get("outcome") != "fail":
             continue
+        infrastructure_error = browser_infrastructure_error(entry)
+        if infrastructure_error:
+            return f"demo browser flow could not complete: {infrastructure_error}"
         browser = entry.get("browser")
         if not isinstance(browser, Mapping) or browser.get("status") != "fail":
             continue
@@ -1122,6 +1135,7 @@ def _browser_element_selectors(criteria: Any) -> list[str]:
     assertions = criteria.get("all_of") or criteria.get("any_of") or []
     selectors = []
     for assertion in assertions:
+        assertion = normalize_criteria_assertion(assertion)
         if (
             isinstance(assertion, dict)
             and assertion.get("type") == "browser_element"
