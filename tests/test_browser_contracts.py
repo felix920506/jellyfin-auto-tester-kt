@@ -204,39 +204,52 @@ class BrowserContractTests(unittest.TestCase):
         self.assertTrue(list(validator.iter_errors(top_level_multi_action)))
         self.assertTrue(list(validator.iter_errors(top_level_actions)))
 
-    def test_web_client_plan_session_schema_accepts_session_commands(self):
-        start_request = {
+    def test_web_client_session_schema_accepts_session_commands(self):
+        start_plan_request = {
             "command": "start",
             "request_id": "request-1",
             "run_id": "run-1",
-            "plan": minimal_plan(),
+            "artifacts_root": "/tmp/artifacts",
+            "plan_path": "/tmp/artifacts/plan.json",
         }
-        next_request = {
-            "command": "next_action",
+        start_task_request = {
+            "command": "start",
             "request_id": "request-2",
-            "session_id": "session-1",
+            "run_id": "run-2",
+            "artifacts_root": "/tmp/artifacts",
+            "base_url": "http://localhost:8096",
         }
         action_request = {
             "command": "action",
             "request_id": "request-3",
             "session_id": "session-1",
             "action": {"type": "screenshot", "label": "home"},
+            "step_id": 1,
+            "role": "trigger",
+            "action_label": "Capture home",
+            "selector_assertions": [{"selector": "body", "state": "visible"}],
         }
         finalize_request = {
             "command": "finalize",
             "request_id": "request-4",
             "session_id": "session-1",
+            "overall_result": "inconclusive",
         }
-        validator = Draft202012Validator(load_schema("web_client_plan_session.json"))
+        validator = Draft202012Validator(load_schema("web_client_session.json"))
 
         errors = []
-        for request in (start_request, next_request, action_request, finalize_request):
+        for request in (
+            start_plan_request,
+            start_task_request,
+            action_request,
+            finalize_request,
+        ):
             errors.extend(validator.iter_errors(request))
 
         self.assertEqual(sorted(errors, key=lambda error: error.path), [])
 
-    def test_web_client_plan_session_schema_rejects_multi_action_payloads(self):
-        validator = Draft202012Validator(load_schema("web_client_plan_session.json"))
+    def test_web_client_session_schema_rejects_multi_action_payloads(self):
+        validator = Draft202012Validator(load_schema("web_client_session.json"))
         browser_input_actions = {
             "command": "action",
             "request_id": "request-1",
@@ -248,9 +261,10 @@ class BrowserContractTests(unittest.TestCase):
             "action": {"type": "screenshot", "label": "home"},
         }
         top_level_actions = {
-            "command": "next_action",
+            "command": "action",
             "request_id": "request-2",
             "session_id": "session-1",
+            "action": {"type": "goto"},
             "actions": [{"type": "goto"}],
         }
         action_array = {
@@ -370,7 +384,7 @@ class BrowserContractTests(unittest.TestCase):
 
         self.assertIn("web_client_verification_request", web_client_prompt)
         self.assertIn("server_target.mode: \"demo\"", web_client_prompt)
-        self.assertIn("does not own server lifecycle", web_client_prompt)
+        self.assertIn("does not own\nserver lifecycle", web_client_prompt)
         self.assertIn("web_client_verification_request", report_prompt)
         self.assertIn('execution_target: "web_client"', report_prompt)
 
@@ -379,10 +393,10 @@ class BrowserContractTests(unittest.TestCase):
             REPO_ROOT / "creatures" / "web_client" / "prompts" / "system.md"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("web_client_plan_session", web_client_prompt)
-        self.assertIn('command: "next_action"', web_client_prompt)
-        self.assertIn("one action per browser task", web_client_prompt)
-        self.assertIn("Wait for `web_client_done`", web_client_prompt)
+        self.assertIn("web_client_session", web_client_prompt)
+        self.assertIn('command: "action"', web_client_prompt)
+        self.assertIn("exactly one top-level `action` object", web_client_prompt)
+        self.assertIn("Do not echo the plan JSON into a tool call", web_client_prompt)
         self.assertIn('command: "finalize"', web_client_prompt)
 
     def test_web_client_tool_contract_uses_valid_tool_names(self):
@@ -402,15 +416,12 @@ class BrowserContractTests(unittest.TestCase):
 
         self.assertNotIn("web_client_execute_plan", package_tools)
         self.assertEqual(
-            package_tools["web_client_plan_session"]["class_name"],
-            "WebClientPlanSessionTool",
+            package_tools["web_client_session"]["class_name"],
+            "WebClientSessionTool",
         )
-        self.assertEqual(
-            package_tools["web_client_run_task"]["class_name"],
-            "WebClientRunTaskTool",
-        )
-        self.assertIn("web_client_plan_session", prompt)
-        self.assertIn("web_client_run_task", prompt)
+        self.assertIn("web_client_session", prompt)
+        self.assertNotIn("web_client_plan_session", prompt)
+        self.assertNotIn("web_client_run_task", prompt)
         self.assertNotIn("web_client_execute_plan", prompt)
         self.assertNotIn("web_client_runner.execute_plan", prompt)
         self.assertNotIn("web_client_runner.run_task", prompt)

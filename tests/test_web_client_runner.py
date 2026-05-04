@@ -11,9 +11,8 @@ import tools.web_client_runner as web_client_runner_module
 from tools.async_compat import shutdown_sync_workers
 from tools.web_client_runner import (
     WebClientExecutePlanTool,
-    WebClientPlanSessionTool,
-    WebClientRunTaskTool,
     WebClientRunner,
+    WebClientSessionTool,
 )
 
 from tests.test_execution_runner import (
@@ -353,10 +352,12 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(docker.pulled, [])
             self.assertEqual(docker.started, [])
 
-    def test_plan_session_start_prepares_without_running_browser_action(self):
+    def test_session_start_with_plan_path_prepares_without_running_browser_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             docker = FakeDocker()
             browser_driver = FakeBrowserDriver(temp_dir)
+            plan_path = Path(temp_dir) / "plan.json"
+            plan_path.write_text(json.dumps(browser_plan()), encoding="utf-8")
             runner = WebClientRunner(
                 artifacts_root=temp_dir,
                 docker=docker,
@@ -366,34 +367,37 @@ class WebClientRunnerTests(unittest.TestCase):
                 uuid_factory=lambda: "plan-session-1",
             )
 
-            start = runner.plan_session(
+            start = runner.session(
                 {
                     "command": "start",
                     "request_id": "start-1",
                     "run_id": "plan-run",
-                    "plan": browser_plan(),
+                    "artifacts_root": temp_dir,
+                    "plan_path": str(plan_path),
                 }
             )
 
             self.assertEqual(start["status"], "pass")
             self.assertEqual(start["session_id"], "plan-session-1")
-            self.assertFalse(start["done"])
-            self.assertEqual(start["remaining_actions"], 1)
+            self.assertTrue(start["plan_loaded"])
             self.assertEqual(browser_driver.runs, [])
             self.assertEqual(docker.pulled, [("jellyfin/jellyfin:10.9.7", "plan-run")])
             self.assertEqual(len(docker.started), 1)
 
-            runner.plan_session(
+            runner.session(
                 {
                     "command": "finalize",
                     "request_id": "finalize-1",
                     "session_id": start["session_id"],
+                    "overall_result": "inconclusive",
                 }
             )
 
-    def test_plan_session_next_action_runs_exactly_one_action(self):
+    def test_session_action_runs_exactly_one_plan_backed_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = FakeBrowserDriver(temp_dir)
+            plan_path = Path(temp_dir) / "plan.json"
+            plan_path.write_text(json.dumps(browser_plan()), encoding="utf-8")
             runner = WebClientRunner(
                 artifacts_root=temp_dir,
                 docker=FakeDocker(),
@@ -402,42 +406,47 @@ class WebClientRunnerTests(unittest.TestCase):
                 browser_driver=browser_driver,
                 uuid_factory=lambda: "plan-session-1",
             )
-            start = runner.plan_session(
+            start = runner.session(
                 {
                     "command": "start",
                     "request_id": "start-1",
                     "run_id": "plan-run",
-                    "plan": browser_plan(),
+                    "artifacts_root": temp_dir,
+                    "plan_path": str(plan_path),
                 }
             )
 
-            action = runner.plan_session(
+            action = runner.session(
                 {
-                    "command": "next_action",
+                    "command": "action",
                     "request_id": "next-1",
                     "session_id": start["session_id"],
+                    "step_id": 1,
+                    "role": "trigger",
+                    "action_label": "Capture home",
+                    "action": {"type": "screenshot", "label": "web_home"},
                 }
             )
 
             self.assertEqual(action["status"], "pass")
-            self.assertTrue(action["done"])
-            self.assertEqual(action["remaining_actions"], 0)
             self.assertEqual(action["criteria_evaluation"]["passed"], True)
+            self.assertEqual(action["execution_entry"]["step_id"], 1)
             self.assertEqual(len(browser_driver.runs), 1)
             self.assertEqual(
                 browser_driver.runs[0]["browser_input"]["actions"],
                 [{"type": "screenshot", "label": "web_home"}],
             )
 
-            runner.plan_session(
+            runner.session(
                 {
                     "command": "finalize",
                     "request_id": "finalize-1",
                     "session_id": start["session_id"],
+                    "overall_result": "reproduced",
                 }
             )
 
-    def test_plan_session_splits_legacy_multi_action_steps(self):
+    def test_session_requires_llm_to_send_each_plan_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = FakeBrowserDriver(temp_dir)
             runner = WebClientRunner(
@@ -449,47 +458,46 @@ class WebClientRunnerTests(unittest.TestCase):
                 uuid_factory=lambda: "plan-session-1",
             )
             plan = browser_plan()
-            plan["reproduction_steps"][0]["input"]["actions"] = [
-                {"type": "goto"},
-                {"type": "wait_for", "selector": "body"},
-                {"type": "screenshot", "label": "web_home"},
-            ]
-            start = runner.plan_session(
+            plan_path = Path(temp_dir) / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            start = runner.session(
                 {
                     "command": "start",
                     "request_id": "start-1",
                     "run_id": "legacy-run",
-                    "plan": plan,
+                    "artifacts_root": temp_dir,
+                    "plan_path": str(plan_path),
                 }
             )
 
-            first = runner.plan_session(
+            first = runner.session(
                 {
-                    "command": "next_action",
+                    "command": "action",
                     "request_id": "next-1",
                     "session_id": start["session_id"],
+                    "action": {"type": "goto"},
                 }
             )
-            second = runner.plan_session(
+            second = runner.session(
                 {
-                    "command": "next_action",
+                    "command": "action",
                     "request_id": "next-2",
                     "session_id": start["session_id"],
+                    "action": {"type": "wait_for", "selector": "body"},
                 }
             )
-            third = runner.plan_session(
+            third = runner.session(
                 {
-                    "command": "next_action",
+                    "command": "action",
                     "request_id": "next-3",
                     "session_id": start["session_id"],
+                    "action": {"type": "screenshot", "label": "web_home"},
                 }
             )
 
-            self.assertEqual(start["remaining_actions"], 3)
-            self.assertEqual(first["execution_entry"]["split_action_index"], 1)
-            self.assertEqual(second["execution_entry"]["split_action_index"], 2)
-            self.assertEqual(third["execution_entry"]["split_action_index"], 3)
-            self.assertTrue(third["done"])
+            self.assertEqual(first["status"], "pass")
+            self.assertEqual(second["status"], "pass")
+            self.assertEqual(third["status"], "pass")
             self.assertEqual(
                 [
                     run["browser_input"]["actions"]
@@ -502,18 +510,21 @@ class WebClientRunnerTests(unittest.TestCase):
                 ],
             )
 
-            runner.plan_session(
+            runner.session(
                 {
                     "command": "finalize",
                     "request_id": "finalize-1",
                     "session_id": start["session_id"],
+                    "overall_result": "reproduced",
                 }
             )
 
-    def test_plan_session_finalize_returns_execution_result(self):
+    def test_session_finalize_returns_execution_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             docker = FakeDocker()
             browser_driver = FakeBrowserDriver(temp_dir)
+            plan_path = Path(temp_dir) / "plan.json"
+            plan_path.write_text(json.dumps(browser_plan()), encoding="utf-8")
             runner = WebClientRunner(
                 artifacts_root=temp_dir,
                 docker=docker,
@@ -522,27 +533,32 @@ class WebClientRunnerTests(unittest.TestCase):
                 browser_driver=browser_driver,
                 uuid_factory=lambda: "plan-session-1",
             )
-            start = runner.plan_session(
+            start = runner.session(
                 {
                     "command": "start",
                     "request_id": "start-1",
                     "run_id": "plan-run",
-                    "plan": browser_plan(),
+                    "artifacts_root": temp_dir,
+                    "plan_path": str(plan_path),
                 }
             )
-            runner.plan_session(
+            runner.session(
                 {
-                    "command": "next_action",
+                    "command": "action",
                     "request_id": "next-1",
                     "session_id": start["session_id"],
+                    "step_id": 1,
+                    "role": "trigger",
+                    "action": {"type": "screenshot", "label": "web_home"},
                 }
             )
 
-            final = runner.plan_session(
+            final = runner.session(
                 {
                     "command": "finalize",
                     "request_id": "finalize-1",
                     "session_id": start["session_id"],
+                    "overall_result": "reproduced",
                 }
             )
 
@@ -553,7 +569,7 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertTrue(browser_driver.closed)
             self.assertEqual(docker.stopped, [("container-1", "plan-run")])
 
-    def test_plan_session_rejects_multi_action_payloads(self):
+    def test_session_rejects_multi_action_payloads(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = FakeBrowserDriver(temp_dir)
             runner = WebClientRunner(
@@ -564,7 +580,7 @@ class WebClientRunnerTests(unittest.TestCase):
                 browser_driver=browser_driver,
             )
 
-            result = runner.plan_session(
+            result = runner.session(
                 {
                     "command": "action",
                     "request_id": "bad-action",
@@ -794,7 +810,7 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertIn("legacy browser_input.actions", result["error"])
             self.assertEqual(browser_driver.runs, [])
 
-    def test_module_level_run_task_preserves_sessions_across_calls(self):
+    def test_module_level_session_preserves_task_sessions_across_calls(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = FakeBrowserDriver(temp_dir)
             runner = WebClientRunner(
@@ -805,10 +821,10 @@ class WebClientRunnerTests(unittest.TestCase):
                 browser_driver=browser_driver,
                 uuid_factory=lambda: "module-session",
             )
-            previous = web_client_runner_module._DEFAULT_TASK_RUNNER
-            web_client_runner_module._DEFAULT_TASK_RUNNER = runner
+            previous = web_client_runner_module._DEFAULT_SESSION_RUNNER
+            web_client_runner_module._DEFAULT_SESSION_RUNNER = runner
             try:
-                start = web_client_runner_module.run_task(
+                start = web_client_runner_module.session(
                     {
                         "command": "start",
                         "request_id": "module-start",
@@ -818,7 +834,7 @@ class WebClientRunnerTests(unittest.TestCase):
                         "browser_input": {"path": "/web"},
                     }
                 )
-                action = web_client_runner_module.run_task(
+                action = web_client_runner_module.session(
                     {
                         "command": "action",
                         "request_id": "module-action",
@@ -827,13 +843,13 @@ class WebClientRunnerTests(unittest.TestCase):
                     }
                 )
             finally:
-                web_client_runner_module._DEFAULT_TASK_RUNNER = previous
+                web_client_runner_module._DEFAULT_SESSION_RUNNER = previous
 
             self.assertEqual(start["session_id"], "module-session")
             self.assertEqual(action["status"], "pass")
             self.assertEqual(len(browser_driver.runs), 1)
 
-    def test_module_level_run_task_uses_same_worker_thread_inside_event_loop(self):
+    def test_module_level_session_task_mode_uses_same_worker_thread_inside_event_loop(self):
         main_thread = threading.get_ident()
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = ThreadTrackingBrowserDriver(temp_dir)
@@ -845,11 +861,11 @@ class WebClientRunnerTests(unittest.TestCase):
                 browser_driver=browser_driver,
                 uuid_factory=lambda: "module-session",
             )
-            previous = web_client_runner_module._DEFAULT_TASK_RUNNER
-            web_client_runner_module._DEFAULT_TASK_RUNNER = runner
+            previous = web_client_runner_module._DEFAULT_SESSION_RUNNER
+            web_client_runner_module._DEFAULT_SESSION_RUNNER = runner
 
             async def exercise():
-                start = web_client_runner_module.run_task(
+                start = web_client_runner_module.session(
                     {
                         "command": "start",
                         "request_id": "worker-start",
@@ -859,7 +875,7 @@ class WebClientRunnerTests(unittest.TestCase):
                         "browser_input": {"path": "/web"},
                     }
                 )
-                action = web_client_runner_module.run_task(
+                action = web_client_runner_module.session(
                     {
                         "command": "action",
                         "request_id": "worker-action",
@@ -867,7 +883,7 @@ class WebClientRunnerTests(unittest.TestCase):
                         "action": {"type": "goto"},
                     }
                 )
-                final = web_client_runner_module.run_task(
+                final = web_client_runner_module.session(
                     {
                         "command": "finalize",
                         "request_id": "worker-finalize",
@@ -879,7 +895,7 @@ class WebClientRunnerTests(unittest.TestCase):
             try:
                 start, action, final = asyncio.run(exercise())
             finally:
-                web_client_runner_module._DEFAULT_TASK_RUNNER = previous
+                web_client_runner_module._DEFAULT_SESSION_RUNNER = previous
                 shutdown_sync_workers()
 
             thread_ids = {thread_id for _event, thread_id in browser_driver.thread_events}
@@ -889,7 +905,7 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(len(thread_ids), 1)
             self.assertNotEqual(next(iter(thread_ids)), main_thread)
 
-    def test_module_level_plan_session_uses_same_worker_thread_inside_event_loop(self):
+    def test_module_level_session_uses_same_worker_thread_inside_event_loop(self):
         main_thread = threading.get_ident()
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = ThreadTrackingBrowserDriver(temp_dir)
@@ -901,30 +917,37 @@ class WebClientRunnerTests(unittest.TestCase):
                 browser_driver=browser_driver,
                 uuid_factory=lambda: "module-plan-session",
             )
-            previous = web_client_runner_module._DEFAULT_PLAN_SESSION_RUNNER
-            web_client_runner_module._DEFAULT_PLAN_SESSION_RUNNER = runner
+            plan_path = Path(temp_dir) / "plan.json"
+            plan_path.write_text(json.dumps(demo_browser_plan()), encoding="utf-8")
+            previous = web_client_runner_module._DEFAULT_SESSION_RUNNER
+            web_client_runner_module._DEFAULT_SESSION_RUNNER = runner
 
             async def exercise():
-                start = web_client_runner_module.plan_session(
+                start = web_client_runner_module.session(
                     {
                         "command": "start",
                         "request_id": "worker-start",
                         "run_id": "worker-plan-run",
-                        "plan": demo_browser_plan(),
+                        "artifacts_root": temp_dir,
+                        "plan_path": str(plan_path),
                     }
                 )
-                action = web_client_runner_module.plan_session(
+                action = web_client_runner_module.session(
                     {
-                        "command": "next_action",
+                        "command": "action",
                         "request_id": "worker-next",
                         "session_id": start["session_id"],
+                        "step_id": 1,
+                        "role": "trigger",
+                        "action": {"type": "screenshot", "label": "home"},
                     }
                 )
-                final = web_client_runner_module.plan_session(
+                final = web_client_runner_module.session(
                     {
                         "command": "finalize",
                         "request_id": "worker-finalize",
                         "session_id": start["session_id"],
+                        "overall_result": "reproduced",
                     }
                 )
                 return start, action, final
@@ -932,7 +955,7 @@ class WebClientRunnerTests(unittest.TestCase):
             try:
                 start, action, final = asyncio.run(exercise())
             finally:
-                web_client_runner_module._DEFAULT_PLAN_SESSION_RUNNER = previous
+                web_client_runner_module._DEFAULT_SESSION_RUNNER = previous
                 shutdown_sync_workers()
 
             thread_ids = {thread_id for _event, thread_id in browser_driver.thread_events}
@@ -944,12 +967,13 @@ class WebClientRunnerTests(unittest.TestCase):
 
 
 class WebClientRunnerToolTests(unittest.TestCase):
-    def test_plan_session_tool_accepts_wrapped_and_raw_payloads(self):
+    def test_session_tool_accepts_wrapped_and_raw_payloads(self):
         request = {
             "command": "start",
             "request_id": "start-1",
             "run_id": "tool-run",
-            "plan": browser_plan(),
+            "artifacts_root": "/tmp/artifacts",
+            "plan_path": "/tmp/artifacts/plan.json",
         }
         expected = {
             "request_id": "start-1",
@@ -959,22 +983,22 @@ class WebClientRunnerToolTests(unittest.TestCase):
 
         with patch.object(
             web_client_runner_module,
-            "plan_session",
+            "session",
             return_value=expected,
-        ) as plan_session_tool:
+        ) as session_tool:
             wrapped = asyncio.run(
-                WebClientPlanSessionTool()._execute(
+                WebClientSessionTool()._execute(
                     {"content": json.dumps({"request": request})}
                 )
             )
-            raw = asyncio.run(WebClientPlanSessionTool()._execute(request))
+            raw = asyncio.run(WebClientSessionTool()._execute(request))
 
         self.assertIsNone(wrapped.error)
         self.assertEqual(json.loads(wrapped.output), expected)
         self.assertIsNone(raw.error)
         self.assertEqual(json.loads(raw.output), expected)
         self.assertEqual(
-            plan_session_tool.call_args_list,
+            session_tool.call_args_list,
             [
                 call(request=request),
                 call(request=request),
@@ -1015,40 +1039,6 @@ class WebClientRunnerToolTests(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertEqual(json.loads(result.output), expected)
         execute_plan.assert_called_once_with(plan=plan, run_id=None)
-
-    def test_run_task_tool_accepts_wrapped_and_raw_payloads(self):
-        task = {
-            "command": "start",
-            "request_id": "task-1",
-            "run_id": "task-run",
-            "base_url": "http://localhost:9000",
-            "artifacts_root": "/tmp/artifacts",
-        }
-        expected = {"request_id": "task-1", "status": "pass"}
-
-        with patch.object(
-            web_client_runner_module,
-            "run_task",
-            return_value=expected,
-        ) as run_task_tool:
-            wrapped = asyncio.run(
-                WebClientRunTaskTool()._execute(
-                    {"content": json.dumps({"task": task})}
-                )
-            )
-            raw = asyncio.run(WebClientRunTaskTool()._execute(task))
-
-        self.assertIsNone(wrapped.error)
-        self.assertEqual(json.loads(wrapped.output), expected)
-        self.assertIsNone(raw.error)
-        self.assertEqual(json.loads(raw.output), expected)
-        self.assertEqual(
-            run_task_tool.call_args_list,
-            [
-                call(task=task),
-                call(task=task),
-            ],
-        )
 
     def test_tool_malformed_json_returns_error(self):
         with patch.object(

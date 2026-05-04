@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://jellyfin-auto-tester.local/schemas/web_client_plan_session.json",
-  "title": "WebClientPlanSession",
+  "$id": "https://jellyfin-auto-tester.local/schemas/web_client_session.json",
+  "title": "WebClientSession",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -12,7 +12,6 @@
     "command": {
       "enum": [
         "start",
-        "next_action",
         "action",
         "finalize"
       ]
@@ -29,17 +28,40 @@
       "type": "string",
       "minLength": 1
     },
-    "plan": {
-      "type": "object",
-      "additionalProperties": true,
-      "required": [
-        "reproduction_steps"
-      ],
-      "properties": {
-        "reproduction_steps": {
-          "type": "array"
+    "artifacts_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plan_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base_url": {
+      "type": "string",
+      "minLength": 1
+    },
+    "step_id": {
+      "oneOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string",
+          "minLength": 1
         }
-      }
+      ]
+    },
+    "role": {
+      "enum": [
+        "setup",
+        "trigger",
+        "verify",
+        null
+      ]
+    },
+    "action_label": {
+      "type": "string",
+      "minLength": 1
     },
     "browser_input": {
       "$ref": "#/$defs/browser_input"
@@ -48,6 +70,10 @@
       "$ref": "#/$defs/browser_action"
     },
     "actions": false,
+    "success_criteria": {
+      "type": "object",
+      "additionalProperties": true
+    },
     "selector_assertions": {
       "oneOf": [
         {
@@ -77,6 +103,19 @@
         "type": "object",
         "additionalProperties": true
       }
+    },
+    "overall_result": {
+      "enum": [
+        "reproduced",
+        "not_reproduced",
+        "inconclusive"
+      ]
+    },
+    "error_summary": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "allOf": [
@@ -93,24 +132,20 @@
       },
       "then": {
         "required": [
-          "plan"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "command": {
-            "const": "next_action"
+          "run_id",
+          "artifacts_root"
+        ],
+        "oneOf": [
+          {
+            "required": [
+              "plan_path"
+            ]
+          },
+          {
+            "required": [
+              "base_url"
+            ]
           }
-        },
-        "required": [
-          "command"
-        ]
-      },
-      "then": {
-        "required": [
-          "session_id"
         ]
       }
     },

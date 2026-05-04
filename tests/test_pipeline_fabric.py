@@ -465,11 +465,11 @@ class ProviderWebClientStageEngine(FakeWebClientStageEngine):
             response_parts.append(chunk)
         assistant_response = "".join(response_parts)
         conversation.append("assistant", assistant_response)
-        if "[/web_client_plan_session]" in assistant_response:
+        if "[/web_client_session]" in assistant_response:
             conversation.append(
                 "tool",
                 json.dumps(result),
-                name="web_client_plan_session",
+                name="web_client_session",
             )
         await self.channels["execution_done"].send(
             types.SimpleNamespace(
@@ -1973,17 +1973,18 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
     def test_run_web_client_stage_writes_provider_transcript(self):
         plan = _sample_web_client_plan()
         tool_call = (
-            "[/web_client_plan_session]\n"
+            "[/web_client_session]\n"
             + json.dumps(
                 {
                     "command": "start",
                     "request_id": "start-1",
-                    "plan": plan,
                     "run_id": "web-run-transcript",
+                    "artifacts_root": "/tmp/artifacts",
+                    "plan_path": "/tmp/artifacts/plan.json",
                 }
             )
             + "\n"
-            + "[web_client_plan_session/]\n"
+            + "[web_client_session/]\n"
         )
         llm = FakeProviderLLM(
             [
@@ -2029,12 +2030,16 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             ["user", "assistant", "tool"],
         )
         self.assertIn(
-            "[/web_client_plan_session]",
+            "[/web_client_session]",
+            transcript_payload["messages"][1]["content"],
+        )
+        self.assertNotIn(
+            json.dumps(plan, sort_keys=True),
             transcript_payload["messages"][1]["content"],
         )
         self.assertEqual(
             transcript_payload["messages"][2]["name"],
-            "web_client_plan_session",
+            "web_client_session",
         )
         self.assertIn(
             "WEB_CLIENT_COMPLETE",

@@ -11,16 +11,11 @@ max_iterations: 60
 skill_mode: "dynamic"
 
 tools:
-  - name: "web_client_plan_session"
+  - name: "web_client_session"
     type: "package"
     module: "tools.web_client_runner"
-    class: "WebClientPlanSessionTool"
-    class_name: "WebClientPlanSessionTool"
-  - name: "web_client_run_task"
-    type: "package"
-    module: "tools.web_client_runner"
-    class: "WebClientRunTaskTool"
-    class_name: "WebClientRunTaskTool"
+    class: "WebClientSessionTool"
+    class_name: "WebClientSessionTool"
   - name: "send_message"
     type: "builtin"
 

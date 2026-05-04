@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import sys
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -1217,10 +1218,14 @@ async def _run_web_client_stage_impl(
 
     engine = await _load_stage_engine("web-client", engine_factory=engine_factory)
     route_channel = _web_client_stage_plan_channel(plan)
+    run_id_value = run_id or f"web-client-{uuid.uuid4()}"
     message_plan = dict(plan)
-    message: Any = message_plan
-    if run_id:
-        message = {"plan": message_plan, "run_id": run_id}
+    message: Any = {
+        "plan": message_plan,
+        "plan_path": str(output_dir / "plan.json"),
+        "artifacts_root": str(output_dir),
+        "run_id": run_id_value,
+    }
     prompt = _web_client_stage_prompt(route_channel, message)
     web_client_agent = _optional_agent(engine, "web_client_agent")
     system_prompt = (
@@ -1242,7 +1247,9 @@ async def _run_web_client_stage_impl(
             "channel": route_channel,
             "input_path": str(plan_path),
             "plan": plan,
-            "run_id": run_id,
+            "run_id": run_id_value,
+            "plan_path": str(output_dir / "plan.json"),
+            "artifacts_root": str(output_dir),
         },
     )
     transcript_writer.initialize()

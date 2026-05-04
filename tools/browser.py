@@ -330,7 +330,7 @@ class BrowserDriver:
         url = self._resolve_url(action.get("url") or action.get("path") or browser_input.get("url") or browser_input.get("path") or "/web")
         page.goto(
             url,
-            wait_until=str(action.get("wait_until") or "networkidle"),
+            wait_until=str(action.get("wait_until") or "domcontentloaded"),
             timeout=timeout_ms,
         )
         self._maybe_authenticate(page, browser_input, timeout_ms)
@@ -343,7 +343,7 @@ class BrowserDriver:
         timeout_ms: int,
     ) -> None:
         page.reload(
-            wait_until=str(action.get("wait_until") or "networkidle"),
+            wait_until=str(action.get("wait_until") or "domcontentloaded"),
             timeout=timeout_ms,
         )
         self._wait_for_app_idle(page, timeout_ms)
@@ -568,10 +568,30 @@ class BrowserDriver:
         if mode != "auto":
             return
         try:
-            password_locator = page.locator("input[type='password']")
+            user_card = page.locator(
+                f"[data-username='{_css_string_value(username)}']"
+            )
+            if hasattr(user_card, "count") and user_card.count() > 0:
+                user_card.click(timeout=min(timeout_ms, 5000))
+                self._wait_for_app_idle(page, timeout_ms)
+                if page.locator("input[type='password']:visible").count() < 1:
+                    return
+        except Exception:
+            pass
+        try:
+            try:
+                page.get_by_text("Manual Login", exact=True).click(
+                    timeout=min(timeout_ms, 3000)
+                )
+                self._wait_for_app_idle(page, timeout_ms)
+            except Exception:
+                pass
+            password_locator = page.locator(
+                "#txtManualPassword, input[type='password']:visible"
+            )
             if hasattr(password_locator, "count") and password_locator.count() < 1:
                 return
-            page.locator("input[name='Username'], input[autocomplete='username'], input[type='text']").fill(
+            page.locator("#txtManualName, input[autocomplete='username']:visible, input[type='text']:visible").fill(
                 username,
                 timeout=min(timeout_ms, 5000),
             )
@@ -709,6 +729,10 @@ def _required_selector(action: Mapping[str, Any]) -> str:
 
 def _safe_label(label: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(label)).strip("_") or "browser"
+
+
+def _css_string_value(value: Any) -> str:
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _unique_path(path: Path) -> Path:

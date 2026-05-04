@@ -285,10 +285,10 @@ class BrowserDriverTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "pass")
             self.assertIn(
-                ("goto", "http://localhost:8096/web/index.html", "networkidle", 30000),
+                ("goto", "http://localhost:8096/web/index.html", "domcontentloaded", 30000),
                 page.calls,
             )
-            self.assertIn(("reload", "networkidle", 30000), page.calls)
+            self.assertIn(("reload", "domcontentloaded", 30000), page.calls)
             self.assertIn(("wait_for_load_state", "networkidle", 5000), page.calls)
 
     def test_run_single_action_wraps_one_action(self):
@@ -305,7 +305,7 @@ class BrowserDriverTests(unittest.TestCase):
             self.assertEqual(len(result["actions"]), 1)
             self.assertEqual(result["actions"][0]["type"], "goto")
             self.assertIn(
-                ("goto", "http://localhost:8096/web/index.html", "networkidle", 30000),
+                ("goto", "http://localhost:8096/web/index.html", "domcontentloaded", 30000),
                 page.calls,
             )
 
@@ -358,7 +358,7 @@ class BrowserDriverTests(unittest.TestCase):
     def test_goto_auth_object_uses_supplied_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             page = FakePage()
-            page.locator_counts["input[type='password']"] = 1
+            page.locator_counts["#txtManualPassword, input[type='password']:visible"] = 1
             driver, _ = self.make_driver(temp_dir, page)
 
             result = driver.run(
@@ -372,13 +372,16 @@ class BrowserDriverTests(unittest.TestCase):
             self.assertIn(
                 (
                     "fill",
-                    "input[name='Username'], input[autocomplete='username'], input[type='text']",
+                    "#txtManualName, input[autocomplete='username']:visible, input[type='text']:visible",
                     "demo",
                     5000,
                 ),
                 page.calls,
             )
-            self.assertIn(("fill", "input[type='password']", "", 5000), page.calls)
+            self.assertIn(
+                ("fill", "#txtManualPassword, input[type='password']:visible", "", 5000),
+                page.calls,
+            )
             self.assertEqual(result["auth"], {"mode": "auto"})
 
     def test_screenshot_action_writes_artifact(self):
