@@ -391,6 +391,81 @@ class FakeWebClientStageEngine(FakeStage2AgentEngine):
         )
 
 
+class FakeStartedTerrariumStageEngine:
+    def __init__(
+        self,
+        plan_channels=("web_client_plan_ready", "web_client_verification_request"),
+        *,
+        agent_sender="web_client_agent",
+        default_run_id="started-agent-run",
+    ):
+        self.plan_channels = tuple(plan_channels)
+        self.agent_sender = agent_sender
+        self.default_run_id = default_run_id
+        self.channels = {
+            channel: FakeAsyncChannel()
+            for channel in (*self.plan_channels, "execution_done")
+        }
+        self.received_channel = None
+        self.received_payload = None
+        self.start_called = False
+        self.stop_called = False
+        self.shutdown_called = False
+
+        for channel in self.plan_channels:
+            self.channels[channel].on_send(self._plan_callback(channel))
+
+    async def start(self, creature):
+        self.start_called = True
+        raise AssertionError("per-creature start should not be used as engine start")
+
+    async def stop(self, creature):
+        self.stop_called = True
+        raise AssertionError("per-creature stop should not be used as engine stop")
+
+    async def shutdown(self):
+        self.shutdown_called = True
+
+    def _plan_callback(self, channel):
+        def callback(_channel_name, message):
+            asyncio.create_task(self._emit_execution_done(channel, message))
+
+        return callback
+
+    async def _emit_execution_done(self, channel, message):
+        self.received_channel = channel
+        self.received_payload = json.loads(message.content)
+        plan = self.received_payload.get("plan", self.received_payload)
+        run_id = self.received_payload.get("run_id") or self.default_run_id
+        artifacts_root = self.received_payload.get("artifacts_root")
+        result = {
+            "plan": plan,
+            "run_id": run_id,
+            "is_verification": bool(plan.get("is_verification", False)),
+            "original_run_id": plan.get("original_run_id"),
+            "container_id": None,
+            "execution_log": [_sample_execution_entry(plan)],
+            "overall_result": "reproduced",
+            "artifacts_dir": (
+                str(Path(artifacts_root) / run_id)
+                if artifacts_root
+                else "agent-artifacts"
+            ),
+            "jellyfin_logs": "",
+            "error_summary": None,
+        }
+        await self.channels["execution_done"].send(
+            types.SimpleNamespace(
+                sender=self.agent_sender,
+                content=json.dumps(result),
+                metadata={},
+                message_id="execution-done",
+                reply_to=None,
+                channel="execution_done",
+            )
+        )
+
+
 class FakeReportStageEngine:
     def __init__(
         self,
@@ -1802,6 +1877,29 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(engine.received_payload["run_id"], "web-run-1")
             self.assertEqual(engine.received_payload["plan"], plan)
             self.assertTrue(engine.stopped)
+
+    def test_run_web_client_stage_supports_started_terrarium_engine_lifecycle(self):
+        plan = _sample_web_client_plan()
+        engine = FakeStartedTerrariumStageEngine()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            result = run_web_client_stage(
+                input_dir,
+                temp_path / "web-client",
+                run_id="web-run-started",
+                engine_factory=lambda stage: engine,
+            )
+
+            self.assertEqual(result.status, "reproduced")
+            self.assertEqual(engine.received_channel, "web_client_plan_ready")
+            self.assertEqual(engine.received_payload["run_id"], "web-run-started")
+            self.assertFalse(engine.start_called)
+            self.assertFalse(engine.stop_called)
+            self.assertTrue(engine.shutdown_called)
 
     def test_run_web_client_stage_emits_debug_logging(self):
         plan = _sample_web_client_plan()

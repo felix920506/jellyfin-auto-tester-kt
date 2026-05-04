@@ -1353,21 +1353,43 @@ async def _run_stage_agent_handoff(
 
 async def _run_stage_engine(engine: Any) -> None:
     run = getattr(engine, "run", None)
-    if callable(run):
+    if callable(run) and _callable_accepts_no_arguments(run):
         await _maybe_await(run())
         return
     start = getattr(engine, "start", None)
-    if callable(start):
+    if callable(start) and _callable_accepts_no_arguments(start):
         await _maybe_await(start())
+        return
+
+    await asyncio.Event().wait()
 
 
 async def _stop_stage_engine(engine: Any) -> None:
-    stop = getattr(engine, "stop", None)
-    if callable(stop):
+    for method_name in ("shutdown", "stop"):
+        stop = getattr(engine, method_name, None)
+        if not callable(stop) or not _callable_accepts_no_arguments(stop):
+            continue
         try:
             await _maybe_await(stop())
         except Exception as exc:
             _logger().debug("Failed to stop stage engine: %s", exc)
+        return
+
+
+def _callable_accepts_no_arguments(callback: Callable[..., Any]) -> bool:
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return True
+
+    for parameter in signature.parameters.values():
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ) and parameter.default is inspect.Parameter.empty:
+            return False
+    return True
 
 
 async def _wait_for_engine_channel(
