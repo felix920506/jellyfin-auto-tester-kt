@@ -35,6 +35,9 @@ Important constraints from `plans/plan-master.md`:
   form/UI interactions, client-side media controls, browser console evidence,
   or screenshots after user interaction. Prefer `http_request` for API-level
   bugs and the standard path for mixed client/server ownership.
+- Put exactly one Playwright action in each browser step's `input.actions`.
+  Navigation, waits, clicks, fills, screenshots, and evaluations are separate
+  browser steps/actions.
 - Use only structured success criteria with top-level `all_of` or `any_of`.
 - Use captures for values discovered at runtime, then reference them as
   `${variable_name}` in later steps.

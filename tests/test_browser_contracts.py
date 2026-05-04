@@ -39,8 +39,6 @@ def minimal_plan():
                     "label": "web_home",
                     "viewport": {"width": 1280, "height": 720},
                     "actions": [
-                        {"type": "goto"},
-                        {"type": "wait_for", "selector": "body"},
                         {"type": "screenshot", "label": "web_home"},
                     ],
                 },
@@ -78,6 +76,19 @@ class BrowserContractTests(unittest.TestCase):
         errors = sorted(validator.iter_errors(plan), key=lambda error: error.path)
 
         self.assertEqual(errors, [])
+
+    def test_reproduction_plan_schema_rejects_multi_action_browser_step(self):
+        validator = Draft202012Validator(load_schema("reproduction_plan.json"))
+        plan = minimal_plan()
+        plan["execution_target"] = "web_client"
+        plan["reproduction_steps"][0]["input"]["actions"] = [
+            {"type": "goto"},
+            {"type": "screenshot", "label": "web_home"},
+        ]
+
+        errors = sorted(validator.iter_errors(plan), key=lambda error: error.path)
+
+        self.assertTrue(errors)
 
     def test_reproduction_plan_schema_accepts_demo_without_docker_image(self):
         validator = Draft202012Validator(load_schema("reproduction_plan.json"))
@@ -192,6 +203,66 @@ class BrowserContractTests(unittest.TestCase):
         self.assertTrue(list(validator.iter_errors(legacy_task)))
         self.assertTrue(list(validator.iter_errors(top_level_multi_action)))
         self.assertTrue(list(validator.iter_errors(top_level_actions)))
+
+    def test_web_client_plan_session_schema_accepts_session_commands(self):
+        start_request = {
+            "command": "start",
+            "request_id": "request-1",
+            "run_id": "run-1",
+            "plan": minimal_plan(),
+        }
+        next_request = {
+            "command": "next_action",
+            "request_id": "request-2",
+            "session_id": "session-1",
+        }
+        action_request = {
+            "command": "action",
+            "request_id": "request-3",
+            "session_id": "session-1",
+            "action": {"type": "screenshot", "label": "home"},
+        }
+        finalize_request = {
+            "command": "finalize",
+            "request_id": "request-4",
+            "session_id": "session-1",
+        }
+        validator = Draft202012Validator(load_schema("web_client_plan_session.json"))
+
+        errors = []
+        for request in (start_request, next_request, action_request, finalize_request):
+            errors.extend(validator.iter_errors(request))
+
+        self.assertEqual(sorted(errors, key=lambda error: error.path), [])
+
+    def test_web_client_plan_session_schema_rejects_multi_action_payloads(self):
+        validator = Draft202012Validator(load_schema("web_client_plan_session.json"))
+        browser_input_actions = {
+            "command": "action",
+            "request_id": "request-1",
+            "session_id": "session-1",
+            "browser_input": {
+                "path": "/web",
+                "actions": [{"type": "goto"}],
+            },
+            "action": {"type": "screenshot", "label": "home"},
+        }
+        top_level_actions = {
+            "command": "next_action",
+            "request_id": "request-2",
+            "session_id": "session-1",
+            "actions": [{"type": "goto"}],
+        }
+        action_array = {
+            "command": "action",
+            "request_id": "request-3",
+            "session_id": "session-1",
+            "action": [{"type": "goto"}],
+        }
+
+        self.assertTrue(list(validator.iter_errors(browser_input_actions)))
+        self.assertTrue(list(validator.iter_errors(top_level_actions)))
+        self.assertTrue(list(validator.iter_errors(action_array)))
 
     def test_web_client_result_schema_accepts_browser_result(self):
         result = {
@@ -308,6 +379,8 @@ class BrowserContractTests(unittest.TestCase):
             REPO_ROOT / "creatures" / "web_client" / "prompts" / "system.md"
         ).read_text(encoding="utf-8")
 
+        self.assertIn("web_client_plan_session", web_client_prompt)
+        self.assertIn('command: "next_action"', web_client_prompt)
         self.assertIn("one action per browser task", web_client_prompt)
         self.assertIn("Wait for `web_client_done`", web_client_prompt)
         self.assertIn('command: "finalize"', web_client_prompt)
@@ -327,16 +400,18 @@ class BrowserContractTests(unittest.TestCase):
             REPO_ROOT / "creatures" / "web_client" / "prompts" / "system.md"
         ).read_text(encoding="utf-8")
 
+        self.assertNotIn("web_client_execute_plan", package_tools)
         self.assertEqual(
-            package_tools["web_client_execute_plan"]["class_name"],
-            "WebClientExecutePlanTool",
+            package_tools["web_client_plan_session"]["class_name"],
+            "WebClientPlanSessionTool",
         )
         self.assertEqual(
             package_tools["web_client_run_task"]["class_name"],
             "WebClientRunTaskTool",
         )
-        self.assertIn("web_client_execute_plan", prompt)
+        self.assertIn("web_client_plan_session", prompt)
         self.assertIn("web_client_run_task", prompt)
+        self.assertNotIn("web_client_execute_plan", prompt)
         self.assertNotIn("web_client_runner.execute_plan", prompt)
         self.assertNotIn("web_client_runner.run_task", prompt)
 
@@ -353,9 +428,6 @@ class BrowserContractTests(unittest.TestCase):
 
     def test_plan_normalization_accepts_legacy_browser_criteria_shape(self):
         plan = minimal_plan()
-        plan["reproduction_steps"][0]["input"]["actions"].append(
-            {"type": "wait_for_media", "state": "stopped"}
-        )
         plan["reproduction_steps"][0]["success_criteria"] = {
             "all_of": [
                 {"browser_text_contains": {"text": "Songs"}},

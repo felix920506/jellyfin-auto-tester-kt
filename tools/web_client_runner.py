@@ -89,6 +89,28 @@ class _TaskBrowserSession:
     browser_driver: Any
 
 
+@dataclass
+class _PlanBrowserSession:
+    session_id: str
+    request_id: str
+    run_id: str
+    plan: dict[str, Any]
+    artifacts_dir: Path
+    server_target: dict[str, Any]
+    queued_steps: list[dict[str, Any]]
+    next_index: int
+    execution_log: list[dict[str, Any]]
+    variables: dict[str, Any]
+    screenshots: dict[str, str | None]
+    browser_driver: Any
+    browser_auth: dict[str, Any] | None = None
+    container_id: str | None = None
+    jellyfin_logs: str = ""
+    error_summary: str | None = None
+    setup_failed: bool = False
+    container_crashed: bool = False
+
+
 class WebClientRunner:
     """Run pure Jellyfin Web plans or delegated browser tasks."""
 
@@ -115,6 +137,7 @@ class WebClientRunner:
         self.command_runner = command_runner or self._run_bash
         self.uuid_factory = uuid_factory
         self._task_sessions: dict[str, _TaskBrowserSession] = {}
+        self._plan_sessions: dict[str, _PlanBrowserSession] = {}
 
     def execute_plan(
         self,
@@ -524,6 +547,619 @@ class WebClientRunner:
             self._write_task_result_if_possible(payload, result)
             return result
 
+    def plan_session(
+        self,
+        request: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Run one command in an agent-facing one-action full-plan session."""
+
+        payload = dict(request or kwargs)
+        request_id_value = payload.get("request_id")
+        request_id = str(request_id_value or "unknown")
+        session_id = str(payload.get("session_id") or "")
+        command = str(payload.get("command") or "").strip().lower()
+
+        if not request_id_value:
+            return _plan_session_error(request_id, "request_id is required", session_id)
+
+        legacy_error = _legacy_plan_session_payload_error(payload)
+        if legacy_error:
+            return _plan_session_error(request_id, legacy_error, session_id)
+
+        if not command:
+            return _plan_session_error(
+                request_id,
+                (
+                    "web_client_plan_session command is required; use start, "
+                    "next_action, action, or finalize"
+                ),
+                session_id,
+            )
+
+        try:
+            if command == "start":
+                return self._start_plan_session(
+                    request_id=request_id,
+                    payload=payload,
+                )
+            if command == "next_action":
+                return self._run_plan_session_next_action(
+                    request_id=request_id,
+                    session_id=session_id,
+                    payload=payload,
+                )
+            if command == "action":
+                return self._run_plan_session_ad_hoc_action(
+                    request_id=request_id,
+                    session_id=session_id,
+                    payload=payload,
+                )
+            if command == "finalize":
+                return self._finalize_plan_session(
+                    request_id=request_id,
+                    session_id=session_id,
+                    payload=payload,
+                )
+            return _plan_session_error(
+                request_id,
+                f"unsupported web_client_plan_session command: {command}",
+                session_id,
+            )
+        except Exception as exc:
+            return _plan_session_error(request_id, str(exc), session_id)
+
+    def _start_plan_session(
+        self,
+        *,
+        request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        plan, plan_error = _plan_session_start_plan(payload)
+        if plan_error:
+            return _plan_session_error(request_id, plan_error)
+
+        run_id = str(payload.get("run_id") or self.uuid_factory())
+        session_id = str(payload.get("session_id") or self.uuid_factory())
+        artifacts_dir = self.artifacts_root / run_id
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(artifacts_dir / "plan.json", plan)
+        self._debug_event(
+            run_id,
+            "plan_session_start",
+            _plan_debug_payload(plan),
+        )
+
+        existing = self._plan_sessions.pop(session_id, None)
+        if existing is not None:
+            self._close_plan_session_resources(existing)
+
+        session = _PlanBrowserSession(
+            session_id=session_id,
+            request_id=request_id,
+            run_id=run_id,
+            plan=plan,
+            artifacts_dir=artifacts_dir,
+            server_target=_server_target(plan),
+            queued_steps=[],
+            next_index=0,
+            execution_log=[],
+            variables={},
+            screenshots={},
+            browser_driver=self.browser_driver,
+        )
+
+        try:
+            if session.server_target.get("mode") == "demo":
+                self._prepare_demo_plan_session(session)
+            else:
+                self._prepare_docker_plan_session(session)
+        except Exception as exc:
+            session.setup_failed = True
+            session.error_summary = str(exc)
+            if not session.execution_log:
+                session.execution_log = self._skip_all_steps(
+                    plan,
+                    reason=session.error_summary,
+                )
+            session.queued_steps = []
+            session.next_index = 0
+            self._debug_event(
+                run_id,
+                "plan_session_start_error",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+            )
+
+        self._plan_sessions[session_id] = session
+        result = _plan_session_command_result(
+            request_id=request_id,
+            session=session,
+            status="pass" if not session.setup_failed else "error",
+            error=session.error_summary if session.setup_failed else None,
+        )
+        _write_json(
+            artifacts_dir / f"web_client_plan_session_{_safe_label(request_id)}.json",
+            result,
+        )
+        return result
+
+    def _prepare_demo_plan_session(self, session: _PlanBrowserSession) -> None:
+        plan = session.plan
+        if plan.get("execution_target") != "web_client":
+            self._mark_plan_session_unsupported(
+                session,
+                "demo server mode requires execution_target: web_client",
+            )
+            return
+        if bool(session.server_target.get("requires_admin")):
+            self._mark_plan_session_unsupported(
+                session,
+                "demo server mode cannot satisfy admin-only reproduction plans",
+            )
+            return
+        non_browser_tools = _non_browser_step_tools(plan)
+        if non_browser_tools:
+            self._mark_plan_session_unsupported(
+                session,
+                (
+                    "demo server mode only supports browser reproduction steps; "
+                    f"found non-browser tool(s): {', '.join(non_browser_tools)}"
+                ),
+            )
+            return
+
+        base_url = _demo_base_url(session.server_target, plan)
+        session.browser_auth = _demo_browser_auth(session.server_target)
+        self._debug_event(
+            session.run_id,
+            "plan_session_demo_ready",
+            {
+                "base_url": base_url,
+                "release_track": session.server_target.get("release_track"),
+            },
+        )
+        if hasattr(self.api, "configure"):
+            self.api.configure(base_url=base_url, run_id=session.run_id)
+        if hasattr(session.browser_driver, "configure"):
+            session.browser_driver.configure(base_url=base_url, run_id=session.run_id)
+        session.queued_steps = _flatten_plan_browser_steps(plan)
+
+    def _prepare_docker_plan_session(self, session: _PlanBrowserSession) -> None:
+        plan = session.plan
+        if _trigger_tool(plan) != "browser":
+            self._mark_plan_session_unsupported(
+                session,
+                "web_client_runner only accepts plans whose trigger uses tool: browser",
+            )
+            return
+
+        self._debug_event(
+            session.run_id,
+            "plan_session_docker_setup_start",
+            {"docker_image": plan.get("docker_image")},
+        )
+        prepared = self._prepare_environment(plan, session.run_id)
+        self.docker.pull(plan["docker_image"], run_id=session.run_id)
+        start_result = self.docker.start(
+            image=plan["docker_image"],
+            ports=prepared["environment"].get("ports"),
+            volumes=prepared["environment"].get("volumes"),
+            env_vars=prepared["environment"].get("env_vars"),
+            run_id=session.run_id,
+        )
+        session.container_id = start_result.get("container_id")
+        self._debug_event(
+            session.run_id,
+            "plan_session_container_started",
+            {
+                "container_id": session.container_id,
+                "base_url": start_result.get("base_url"),
+                "host_port": start_result.get("host_port"),
+            },
+        )
+        if hasattr(self.api, "configure"):
+            self.api.configure(base_url=start_result.get("base_url"), run_id=session.run_id)
+        if hasattr(session.browser_driver, "configure"):
+            session.browser_driver.configure(
+                base_url=start_result.get("base_url"),
+                run_id=session.run_id,
+            )
+
+        health = self.api.wait_healthy(timeout_s=60)
+        self._debug_event(
+            session.run_id,
+            "plan_session_health_checked",
+            {"healthy": health.get("healthy"), "error": health.get("error")},
+        )
+        if not health.get("healthy"):
+            session.setup_failed = True
+            session.error_summary = f"Jellyfin did not become healthy: {health.get('error')}"
+        else:
+            self.api.complete_startup_wizard()
+            auth = self.api.authenticate()
+            self._debug_event(
+                session.run_id,
+                "plan_session_auth_checked",
+                {"success": auth.get("success")},
+            )
+            if not auth.get("success"):
+                session.setup_failed = True
+                session.error_summary = "authentication failed"
+
+        if session.setup_failed:
+            session.execution_log = self._skip_all_steps(
+                plan,
+                reason=session.error_summary or "setup failed",
+            )
+            session.queued_steps = []
+        else:
+            session.queued_steps = _flatten_plan_browser_steps(plan)
+
+    def _run_plan_session_next_action(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        session, error = self._get_plan_session(request_id, session_id)
+        if error:
+            return error
+        assert session is not None
+
+        if session.next_index >= len(session.queued_steps):
+            result = _plan_session_command_result(
+                request_id=request_id,
+                session=session,
+                status="done",
+            )
+            _write_json(
+                session.artifacts_dir
+                / f"web_client_plan_session_{_safe_label(request_id)}.json",
+                result,
+            )
+            return result
+
+        if session.container_id and not self._container_running(session.container_id):
+            session.container_crashed = True
+            remaining = session.queued_steps[session.next_index :]
+            session.execution_log.extend(
+                self._skip_steps(remaining, reason="container exited unexpectedly")
+            )
+            session.next_index = len(session.queued_steps)
+            result = _plan_session_command_result(
+                request_id=request_id,
+                session=session,
+                status="error",
+                error="container exited unexpectedly",
+            )
+            _write_json(
+                session.artifacts_dir
+                / f"web_client_plan_session_{_safe_label(request_id)}.json",
+                result,
+            )
+            return result
+
+        step = session.queued_steps[session.next_index]
+        self._debug_event(session.run_id, "plan_session_step_start", _step_debug_payload(step))
+        entry = self._execute_step(
+            step=step,
+            run_id=session.run_id,
+            container_id=session.container_id,
+            variables=session.variables,
+            screenshots=session.screenshots,
+            browser_auth=session.browser_auth,
+        )
+        if "_split_action_index" in step:
+            entry["split_action_index"] = step.get("_split_action_index")
+            entry["split_action_count"] = step.get("_split_action_count")
+        session.execution_log.append(entry)
+        session.next_index += 1
+        self._debug_event(session.run_id, "plan_session_step_done", _entry_debug_payload(entry))
+
+        result = _plan_session_command_result(
+            request_id=request_id,
+            session=session,
+            status=str(entry.get("outcome") or "fail"),
+            entry=entry,
+            error=entry.get("reason") if entry.get("outcome") == "fail" else None,
+        )
+        _write_json(
+            session.artifacts_dir / f"web_client_plan_session_{_safe_label(request_id)}.json",
+            result,
+        )
+        return result
+
+    def _run_plan_session_ad_hoc_action(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        session, error = self._get_plan_session(request_id, session_id)
+        if error:
+            return error
+        assert session is not None
+
+        action = payload.get("action")
+        if isinstance(action, list):
+            result = _plan_session_error(
+                request_id,
+                "action must be a single browser action object, not an array",
+                session_id,
+            )
+            _write_json(
+                session.artifacts_dir
+                / f"web_client_plan_session_{_safe_label(request_id)}.json",
+                result,
+            )
+            return result
+        if not isinstance(action, dict):
+            result = _plan_session_error(
+                request_id,
+                "action is required for action command and must be an object",
+                session_id,
+            )
+            _write_json(
+                session.artifacts_dir
+                / f"web_client_plan_session_{_safe_label(request_id)}.json",
+                result,
+            )
+            return result
+
+        browser_input, metadata_error = _task_browser_metadata(payload.get("browser_input"))
+        if metadata_error:
+            result = _plan_session_error(request_id, metadata_error, session_id)
+            _write_json(
+                session.artifacts_dir
+                / f"web_client_plan_session_{_safe_label(request_id)}.json",
+                result,
+            )
+            return result
+        if session.browser_auth is not None:
+            browser_input = _inject_browser_auth(browser_input, session.browser_auth)
+
+        result = self._run_browser_action_attempt(
+            request_id=request_id,
+            session=session,
+            browser_input=browser_input,
+            action=action,
+            step_id=payload.get("step_id"),
+            payload=payload,
+        )
+        result["session_id"] = session_id
+        result["run_id"] = session.run_id
+        result["done"] = session.next_index >= len(session.queued_steps)
+        result["remaining_actions"] = len(session.queued_steps) - session.next_index
+        result["next_action"] = _next_plan_action_summary(session)
+        _write_json(
+            session.artifacts_dir / f"web_client_plan_session_{_safe_label(request_id)}.json",
+            result,
+        )
+        return result
+
+    def _finalize_plan_session(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not session_id:
+            return _plan_session_error(request_id, "session_id is required for finalize")
+        session = self._plan_sessions.pop(session_id, None)
+        if session is None:
+            return _plan_session_error(
+                request_id,
+                f"browser plan session not found: {session_id}",
+                session_id,
+            )
+
+        remaining = session.queued_steps[session.next_index :]
+        if remaining:
+            session.execution_log.extend(
+                self._skip_steps(remaining, reason="not executed before finalize")
+            )
+            session.next_index = len(session.queued_steps)
+
+        close_error = self._close_plan_session_resources(session)
+        if close_error:
+            session.error_summary = session.error_summary or close_error
+
+        if session.jellyfin_logs:
+            (session.artifacts_dir / "jellyfin_server.log").write_text(
+                session.jellyfin_logs,
+                encoding="utf-8",
+            )
+
+        overall_result = self._overall_result(
+            session.execution_log,
+            setup_failed=session.setup_failed,
+            container_crashed=session.container_crashed,
+        )
+        if session.server_target.get("mode") == "demo":
+            demo_blocker = _demo_browser_blocker(session.execution_log)
+            if demo_blocker and overall_result in {"not_reproduced", "inconclusive"}:
+                if overall_result == "not_reproduced":
+                    overall_result = "inconclusive"
+                session.error_summary = session.error_summary or demo_blocker
+
+        result = {
+            "plan": session.plan,
+            "run_id": session.run_id,
+            "is_verification": bool(session.plan.get("is_verification", False)),
+            "original_run_id": session.plan.get("original_run_id"),
+            "container_id": session.container_id,
+            "execution_log": session.execution_log,
+            "overall_result": overall_result,
+            "artifacts_dir": str(session.artifacts_dir),
+            "jellyfin_logs": session.jellyfin_logs,
+            "error_summary": session.error_summary,
+        }
+        self._debug_event(
+            session.run_id,
+            "plan_session_finalize",
+            {
+                "overall_result": overall_result,
+                "error_summary": session.error_summary,
+                "execution_log_count": len(session.execution_log),
+            },
+        )
+        _write_json(session.artifacts_dir / "result.json", result)
+        _write_json(
+            session.artifacts_dir / f"web_client_plan_session_{_safe_label(request_id)}.json",
+            result,
+        )
+        return result
+
+    def _run_browser_action_attempt(
+        self,
+        *,
+        request_id: str,
+        session: Any,
+        browser_input: dict[str, Any],
+        action: dict[str, Any],
+        step_id: Any,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        browser_driver = session.browser_driver
+        if hasattr(browser_driver, "run_single_action"):
+            browser = browser_driver.run_single_action(
+                browser_input,
+                action,
+                run_id=session.run_id,
+                step_id=step_id,
+            )
+        else:
+            action_input = dict(browser_input)
+            action_input["actions"] = [action]
+            browser = browser_driver.run(
+                action_input,
+                run_id=session.run_id,
+                step_id=step_id,
+            )
+        selector_states = _inspect_selector_states(
+            browser_driver,
+            payload.get("selector_assertions"),
+        )
+        selector_error = _selector_assertion_error(
+            selector_states,
+            payload.get("selector_assertions"),
+        )
+        capture_values, capture_error = _capture_task_values(
+            browser_driver,
+            payload.get("capture"),
+            browser,
+        )
+        screenshot_paths = [
+            str(path)
+            for path in browser.get("screenshot_paths", [])
+            if path
+        ]
+        browser_screenshots = _browser_screenshot_map(browser_input, browser)
+        error = (
+            str(browser.get("error"))
+            if browser.get("status") != "pass" and browser.get("error")
+            else None
+        )
+        if selector_error:
+            error = selector_error
+        if capture_error:
+            error = capture_error
+        return {
+            "request_id": request_id,
+            "status": (
+                "pass"
+                if browser.get("status") == "pass" and error is None
+                else "fail"
+            ),
+            "browser": browser,
+            "screenshot_path": screenshot_paths[0] if screenshot_paths else None,
+            "browser_screenshots": browser_screenshots,
+            "selector_states": selector_states,
+            "capture_values": capture_values,
+            "error": error,
+        }
+
+    def _get_plan_session(
+        self,
+        request_id: str,
+        session_id: str,
+    ) -> tuple[_PlanBrowserSession | None, dict[str, Any] | None]:
+        if not session_id:
+            return None, _plan_session_error(
+                request_id,
+                "session_id is required",
+            )
+        session = self._plan_sessions.get(session_id)
+        if session is None:
+            return (
+                None,
+                _plan_session_error(
+                    request_id,
+                    f"browser plan session not found: {session_id}",
+                    session_id,
+                ),
+            )
+        return session, None
+
+    def _mark_plan_session_unsupported(
+        self,
+        session: _PlanBrowserSession,
+        reason: str,
+    ) -> None:
+        session.setup_failed = True
+        session.error_summary = reason
+        session.execution_log = self._skip_all_steps(session.plan, reason=reason)
+        session.queued_steps = []
+        self._debug_event(
+            session.run_id,
+            "plan_session_unsupported",
+            {"reason": reason, **_plan_debug_payload(session.plan)},
+        )
+
+    def _close_plan_session_resources(self, session: _PlanBrowserSession) -> str | None:
+        error_summary: str | None = None
+        try:
+            session.browser_driver.close()
+        except Exception as exc:
+            error_summary = f"failed to close browser: {exc}"
+            self._debug_event(
+                session.run_id,
+                "plan_session_browser_close_failed",
+                {"error": str(exc)},
+            )
+        if session.container_id:
+            try:
+                try:
+                    session.jellyfin_logs = self.docker.logs(
+                        session.container_id,
+                        tail="all",
+                        run_id=session.run_id,
+                    ).get("logs", "")
+                except Exception as exc:
+                    error_summary = error_summary or f"failed to collect logs: {exc}"
+                    self._debug_event(
+                        session.run_id,
+                        "plan_session_logs_failed",
+                        {"container_id": session.container_id, "error": str(exc)},
+                    )
+                self.docker.stop(session.container_id, run_id=session.run_id)
+                self._debug_event(
+                    session.run_id,
+                    "plan_session_container_stopped",
+                    {"container_id": session.container_id},
+                )
+            except Exception as exc:
+                error_summary = error_summary or f"failed to stop container: {exc}"
+                self._debug_event(
+                    session.run_id,
+                    "plan_session_stop_failed",
+                    {"container_id": session.container_id, "error": str(exc)},
+                )
+        return error_summary
+
     def _start_task_session(
         self,
         *,
@@ -716,64 +1352,14 @@ class WebClientRunner:
         step_id: Any,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        browser_driver = session.browser_driver
-        if hasattr(browser_driver, "run_single_action"):
-            browser = browser_driver.run_single_action(
-                browser_input,
-                action,
-                run_id=session.run_id,
-                step_id=step_id,
-            )
-        else:
-            action_input = dict(browser_input)
-            action_input["actions"] = [action]
-            browser = browser_driver.run(
-                action_input,
-                run_id=session.run_id,
-                step_id=step_id,
-            )
-        selector_states = _inspect_selector_states(
-            browser_driver,
-            payload.get("selector_assertions"),
+        return self._run_browser_action_attempt(
+            request_id=request_id,
+            session=session,
+            browser_input=browser_input,
+            action=action,
+            step_id=step_id,
+            payload=payload,
         )
-        selector_error = _selector_assertion_error(
-            selector_states,
-            payload.get("selector_assertions"),
-        )
-        capture_values, capture_error = _capture_task_values(
-            browser_driver,
-            payload.get("capture"),
-            browser,
-        )
-        screenshot_paths = [
-            str(path)
-            for path in browser.get("screenshot_paths", [])
-            if path
-        ]
-        browser_screenshots = _browser_screenshot_map(browser_input, browser)
-        error = (
-            str(browser.get("error"))
-            if browser.get("status") != "pass" and browser.get("error")
-            else None
-        )
-        if selector_error:
-            error = selector_error
-        if capture_error:
-            error = capture_error
-        return {
-            "request_id": request_id,
-            "status": (
-                "pass"
-                if browser.get("status") == "pass" and error is None
-                else "fail"
-            ),
-            "browser": browser,
-            "screenshot_path": screenshot_paths[0] if screenshot_paths else None,
-            "browser_screenshots": browser_screenshots,
-            "selector_states": selector_states,
-            "capture_values": capture_values,
-            "error": error,
-        }
 
     def _write_task_result_if_possible(
         self,
@@ -1382,7 +1968,87 @@ def run_task(
     )
 
 
+def plan_session(
+    request: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    global _DEFAULT_PLAN_SESSION_RUNNER
+    if _DEFAULT_PLAN_SESSION_RUNNER is None:
+        _DEFAULT_PLAN_SESSION_RUNNER = WebClientRunner()
+    return run_sync_away_from_loop(
+        lambda: _DEFAULT_PLAN_SESSION_RUNNER.plan_session(request=request, **kwargs)
+    )
+
+
 _DEFAULT_TASK_RUNNER: WebClientRunner | None = None
+_DEFAULT_PLAN_SESSION_RUNNER: WebClientRunner | None = None
+
+
+class WebClientPlanSessionTool(BaseTool):
+    """KT tool wrapper for one-action full-plan browser sessions."""
+
+    is_concurrency_safe = False
+
+    def __init__(self, config: Any | None = None, **_unused: Any) -> None:
+        super().__init__(config=config)
+
+    @property
+    def tool_name(self) -> str:
+        return "web_client_plan_session"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Run one command in a Jellyfin Web ReproductionPlan browser "
+            "session. start prepares the server/browser without executing a "
+            "browser action; next_action executes one queued browser action; "
+            "finalize returns the raw ExecutionResult JSON."
+        )
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        return ExecutionMode.DIRECT
+
+    def get_parameters_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": True,
+            "properties": {
+                "request": {
+                    "type": "object",
+                    "description": (
+                        "A WebClientPlanSession request. If omitted, the "
+                        "whole tool payload is treated as the request."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Bracket-call JSON body.",
+                },
+            },
+        }
+
+    def prompt_contribution(self) -> str | None:
+        return (
+            "Call `web_client_plan_session` with bracket-body JSON: "
+            "`command=start` with a ReproductionPlan, then one "
+            "`command=next_action` call per browser action, then "
+            "`command=finalize`. Never submit `actions` arrays or an `action` "
+            "array."
+        )
+
+    async def _execute(self, args: dict[str, Any], **_kwargs: Any) -> ToolResult:
+        request, error = _plan_session_tool_args(args)
+        if error:
+            return ToolResult(error=error)
+        try:
+            result = plan_session(request=request)
+        except Exception as exc:
+            return ToolResult(error=f"web_client_plan_session failed: {exc}")
+        return ToolResult(
+            output=json.dumps(result, ensure_ascii=False, indent=2),
+            exit_code=0,
+        )
 
 
 class WebClientExecutePlanTool(BaseTool):
@@ -1400,8 +2066,9 @@ class WebClientExecutePlanTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Execute a Jellyfin Web ReproductionPlan and return the raw "
-            "ExecutionResult JSON."
+            "Internal compatibility helper for batch Jellyfin Web "
+            "ReproductionPlan execution. Do not expose this to the "
+            "web-client agent."
         )
 
     @property
@@ -1432,12 +2099,7 @@ class WebClientExecutePlanTool(BaseTool):
         }
 
     def prompt_contribution(self) -> str | None:
-        return (
-            "Call `web_client_execute_plan` with bracket-body JSON: either "
-            "`{\"plan\": {...}, \"run_id\": \"...\"}` or a raw "
-            "ReproductionPlan object. Send its returned JSON unchanged to "
-            "`execution_done`."
-        )
+        return None
 
     async def _execute(self, args: dict[str, Any], **_kwargs: Any) -> ToolResult:
         plan, run_id, error = _execute_plan_tool_args(args)
@@ -1586,6 +2248,36 @@ def _run_task_tool_args(
     return task, None
 
 
+def _plan_session_tool_args(
+    args: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    payload, _raw_args, error = _tool_payload_object(
+        args,
+        tool_name="web_client_plan_session",
+    )
+    if error:
+        return None, error
+
+    if "request" in payload:
+        request, request_error = _json_object_value(payload["request"], "request")
+        if request_error:
+            return None, request_error
+        if not _looks_like_web_client_plan_session_request(request):
+            return None, "request must be a WebClientPlanSession command object"
+        return request, None
+
+    request = _without_tool_only_keys(payload)
+    if not _looks_like_web_client_plan_session_request(request):
+        return (
+            None,
+            (
+                "web_client_plan_session missing command: expected "
+                "{\"request\": {...}} or raw command JSON"
+            ),
+        )
+    return request, None
+
+
 def _tool_payload_object(
     args: Mapping[str, Any] | None,
     *,
@@ -1658,6 +2350,12 @@ def _looks_like_reproduction_plan(value: Any) -> bool:
 
 
 def _looks_like_web_client_task(value: Any) -> bool:
+    return isinstance(value, Mapping) and (
+        "command" in value or "request_id" in value
+    )
+
+
+def _looks_like_web_client_plan_session_request(value: Any) -> bool:
     return isinstance(value, Mapping) and (
         "command" in value or "request_id" in value
     )
@@ -1879,6 +2577,148 @@ def _capture_task_values(
         return {}, f"capture failed: {exc}"
 
 
+def _plan_session_start_plan(
+    payload: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    if "plan" not in payload:
+        return None, "plan is required for start"
+    plan, plan_error = _json_object_value(payload["plan"], "plan")
+    if plan_error:
+        return None, plan_error
+    if not _looks_like_reproduction_plan(plan):
+        return None, "plan must be a ReproductionPlan object with reproduction_steps"
+    return plan, None
+
+
+def _flatten_plan_browser_steps(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    for step in plan.get("reproduction_steps", []):
+        if not isinstance(step, Mapping):
+            continue
+        step_copy = deepcopy(dict(step))
+        if step_copy.get("tool") != "browser":
+            flattened.append(step_copy)
+            continue
+
+        step_input = step_copy.get("input")
+        actions = step_input.get("actions") if isinstance(step_input, Mapping) else None
+        if not isinstance(actions, list) or len(actions) <= 1:
+            flattened.append(step_copy)
+            continue
+
+        action_count = len(actions)
+        for index, action in enumerate(actions, start=1):
+            split_step = deepcopy(step_copy)
+            split_input = deepcopy(dict(step_input))
+            split_input["actions"] = [deepcopy(action)]
+            split_step["input"] = split_input
+            split_step["_split_action_index"] = index
+            split_step["_split_action_count"] = action_count
+            if index < action_count:
+                split_step["success_criteria"] = {
+                    "all_of": [{"type": "browser_action_run"}]
+                }
+                split_step.pop("capture", None)
+            flattened.append(split_step)
+    return flattened
+
+
+def _legacy_plan_session_payload_error(payload: Mapping[str, Any]) -> str | None:
+    browser_input = payload.get("browser_input")
+    if isinstance(browser_input, Mapping) and "actions" in browser_input:
+        return (
+            "browser_input.actions arrays are not supported in "
+            "web_client_plan_session; use command=next_action for queued plan "
+            "actions or submit exactly one top-level action object with "
+            "command=action"
+        )
+    if "actions" in payload:
+        return (
+            "top-level actions arrays are not supported in "
+            "web_client_plan_session; submit exactly one action object as action"
+        )
+    if isinstance(payload.get("action"), list):
+        return "action must be a single browser action object, not an array"
+    return None
+
+
+def _plan_session_command_result(
+    *,
+    request_id: str,
+    session: _PlanBrowserSession,
+    status: str,
+    entry: Mapping[str, Any] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    browser = entry.get("browser") if isinstance(entry, Mapping) else None
+    screenshot_path = entry.get("screenshot_path") if isinstance(entry, Mapping) else None
+    result = {
+        "request_id": request_id,
+        "status": status,
+        "session_id": session.session_id,
+        "run_id": session.run_id,
+        "browser": browser,
+        "screenshot_path": screenshot_path,
+        "browser_screenshots": (
+            _browser_screenshot_map({}, browser)
+            if isinstance(browser, Mapping)
+            else {}
+        ),
+        "criteria_evaluation": (
+            entry.get("criteria_evaluation") if isinstance(entry, Mapping) else None
+        ),
+        "execution_entry": dict(entry) if isinstance(entry, Mapping) else None,
+        "done": session.next_index >= len(session.queued_steps),
+        "remaining_actions": len(session.queued_steps) - session.next_index,
+        "next_action": _next_plan_action_summary(session),
+        "error": error,
+    }
+    return result
+
+
+def _plan_session_error(
+    request_id: str,
+    error: str | None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    result = {
+        "request_id": request_id,
+        "status": "error",
+        "session_id": session_id or None,
+        "browser": None,
+        "screenshot_path": None,
+        "browser_screenshots": {},
+        "criteria_evaluation": None,
+        "execution_entry": None,
+        "done": False,
+        "remaining_actions": 0,
+        "next_action": None,
+        "error": error,
+    }
+    if not session_id:
+        result.pop("session_id")
+    return result
+
+
+def _next_plan_action_summary(session: _PlanBrowserSession) -> dict[str, Any] | None:
+    if session.next_index >= len(session.queued_steps):
+        return None
+    step = session.queued_steps[session.next_index]
+    step_input = step.get("input") if isinstance(step.get("input"), Mapping) else {}
+    actions = step_input.get("actions") if isinstance(step_input, Mapping) else []
+    browser_action = actions[0] if isinstance(actions, list) and actions else None
+    return {
+        "queue_index": session.next_index + 1,
+        "queue_count": len(session.queued_steps),
+        "step_id": step.get("step_id"),
+        "role": step.get("role"),
+        "action": step.get("action"),
+        "browser_action": browser_action,
+        "split_action_index": step.get("_split_action_index"),
+        "split_action_count": step.get("_split_action_count"),
+    }
+
+
 def _legacy_task_payload_error(payload: Mapping[str, Any]) -> str | None:
     browser_input = payload.get("browser_input")
     if isinstance(browser_input, Mapping) and "actions" in browser_input:
@@ -1887,7 +2727,7 @@ def _legacy_task_payload_error(payload: Mapping[str, Any]) -> str | None:
             "use command=start, then submit exactly one top-level action per "
             "command=action call"
         )
-    if isinstance(payload.get("actions"), list):
+    if "actions" in payload:
         return (
             "top-level actions arrays are not supported in web_client_task; "
             "submit exactly one action object as action"

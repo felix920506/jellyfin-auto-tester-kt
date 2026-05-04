@@ -186,8 +186,12 @@ Each step must have a `tool` field specifying how Stage 2 should execute it:
 Prefer `browser` when the issue depends on Jellyfin Web behavior, React-style UI
 state, media playback controls/state, or client/server interaction that cannot
 be represented as a raw API call. A browser step input must contain ordered
-`actions`; supported action types are `goto`, `refresh`, `click`, `fill`,
-`press`, `select_option`, `check`, `uncheck`, `wait_for`, `wait_for_text`,
+`actions` with exactly one action. Navigation, waits, clicks, fills,
+screenshots, refreshes, key presses, selector waits, text waits, URL waits,
+media waits, and evaluations each count as separate browser steps/actions; the
+web-client agent must wait for the returned result before another browser call.
+Supported action types are `goto`, `refresh`, `click`, `fill`, `press`,
+`select_option`, `check`, `uncheck`, `wait_for`, `wait_for_text`,
 `wait_for_url`, `wait_for_media`, `evaluate`, and `screenshot`.
 
 When a step needs a value produced by an earlier step, declare a `capture` block

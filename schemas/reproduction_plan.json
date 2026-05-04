@@ -567,6 +567,7 @@
         "actions": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 1,
           "items": {
             "$ref": "#/$defs/browser_action"
           }

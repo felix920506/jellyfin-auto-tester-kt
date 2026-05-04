@@ -3,8 +3,8 @@
 Stage 2 peer for pure Jellyfin Web client issues and delegated browser tasks.
 
 Full-plan mode listens on `web_client_plan_ready`, runs
-`web_client_execute_plan`, and sends the returned standard
-`ExecutionResult` unchanged to `execution_done`.
+`web_client_plan_session` as a stateful one-action loop, and sends the final
+standard `ExecutionResult` unchanged to `execution_done`.
 
 Task mode listens on `web_client_task` and runs the interactive browser session
 protocol: `start` creates a session, each `action` message executes exactly one

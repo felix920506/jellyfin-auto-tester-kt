@@ -9,6 +9,7 @@ from unittest.mock import call, patch
 import tools.web_client_runner as web_client_runner_module
 from tools.web_client_runner import (
     WebClientExecutePlanTool,
+    WebClientPlanSessionTool,
     WebClientRunTaskTool,
     WebClientRunner,
 )
@@ -332,6 +333,233 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(docker.pulled, [])
             self.assertEqual(docker.started, [])
 
+    def test_plan_session_start_prepares_without_running_browser_action(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            docker = FakeDocker()
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=docker,
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "plan-session-1",
+            )
+
+            start = runner.plan_session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "plan-run",
+                    "plan": browser_plan(),
+                }
+            )
+
+            self.assertEqual(start["status"], "pass")
+            self.assertEqual(start["session_id"], "plan-session-1")
+            self.assertFalse(start["done"])
+            self.assertEqual(start["remaining_actions"], 1)
+            self.assertEqual(browser_driver.runs, [])
+            self.assertEqual(docker.pulled, [("jellyfin/jellyfin:10.9.7", "plan-run")])
+            self.assertEqual(len(docker.started), 1)
+
+            runner.plan_session(
+                {
+                    "command": "finalize",
+                    "request_id": "finalize-1",
+                    "session_id": start["session_id"],
+                }
+            )
+
+    def test_plan_session_next_action_runs_exactly_one_action(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "plan-session-1",
+            )
+            start = runner.plan_session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "plan-run",
+                    "plan": browser_plan(),
+                }
+            )
+
+            action = runner.plan_session(
+                {
+                    "command": "next_action",
+                    "request_id": "next-1",
+                    "session_id": start["session_id"],
+                }
+            )
+
+            self.assertEqual(action["status"], "pass")
+            self.assertTrue(action["done"])
+            self.assertEqual(action["remaining_actions"], 0)
+            self.assertEqual(action["criteria_evaluation"]["passed"], True)
+            self.assertEqual(len(browser_driver.runs), 1)
+            self.assertEqual(
+                browser_driver.runs[0]["browser_input"]["actions"],
+                [{"type": "screenshot", "label": "web_home"}],
+            )
+
+            runner.plan_session(
+                {
+                    "command": "finalize",
+                    "request_id": "finalize-1",
+                    "session_id": start["session_id"],
+                }
+            )
+
+    def test_plan_session_splits_legacy_multi_action_steps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "plan-session-1",
+            )
+            plan = browser_plan()
+            plan["reproduction_steps"][0]["input"]["actions"] = [
+                {"type": "goto"},
+                {"type": "wait_for", "selector": "body"},
+                {"type": "screenshot", "label": "web_home"},
+            ]
+            start = runner.plan_session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "legacy-run",
+                    "plan": plan,
+                }
+            )
+
+            first = runner.plan_session(
+                {
+                    "command": "next_action",
+                    "request_id": "next-1",
+                    "session_id": start["session_id"],
+                }
+            )
+            second = runner.plan_session(
+                {
+                    "command": "next_action",
+                    "request_id": "next-2",
+                    "session_id": start["session_id"],
+                }
+            )
+            third = runner.plan_session(
+                {
+                    "command": "next_action",
+                    "request_id": "next-3",
+                    "session_id": start["session_id"],
+                }
+            )
+
+            self.assertEqual(start["remaining_actions"], 3)
+            self.assertEqual(first["execution_entry"]["split_action_index"], 1)
+            self.assertEqual(second["execution_entry"]["split_action_index"], 2)
+            self.assertEqual(third["execution_entry"]["split_action_index"], 3)
+            self.assertTrue(third["done"])
+            self.assertEqual(
+                [
+                    run["browser_input"]["actions"]
+                    for run in browser_driver.runs
+                ],
+                [
+                    [{"type": "goto"}],
+                    [{"type": "wait_for", "selector": "body"}],
+                    [{"type": "screenshot", "label": "web_home"}],
+                ],
+            )
+
+            runner.plan_session(
+                {
+                    "command": "finalize",
+                    "request_id": "finalize-1",
+                    "session_id": start["session_id"],
+                }
+            )
+
+    def test_plan_session_finalize_returns_execution_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            docker = FakeDocker()
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=docker,
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "plan-session-1",
+            )
+            start = runner.plan_session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "plan-run",
+                    "plan": browser_plan(),
+                }
+            )
+            runner.plan_session(
+                {
+                    "command": "next_action",
+                    "request_id": "next-1",
+                    "session_id": start["session_id"],
+                }
+            )
+
+            final = runner.plan_session(
+                {
+                    "command": "finalize",
+                    "request_id": "finalize-1",
+                    "session_id": start["session_id"],
+                }
+            )
+
+            self.assertEqual(final["overall_result"], "reproduced")
+            self.assertEqual(final["run_id"], "plan-run")
+            self.assertEqual(len(final["execution_log"]), 1)
+            self.assertTrue(Path(temp_dir, "plan-run", "result.json").is_file())
+            self.assertTrue(browser_driver.closed)
+            self.assertEqual(docker.stopped, [("container-1", "plan-run")])
+
+    def test_plan_session_rejects_multi_action_payloads(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+
+            result = runner.plan_session(
+                {
+                    "command": "action",
+                    "request_id": "bad-action",
+                    "session_id": "session-1",
+                    "action": [
+                        {"type": "goto"},
+                        {"type": "screenshot", "label": "home"},
+                    ],
+                }
+            )
+
+            self.assertEqual(result["status"], "error")
+            self.assertIn("single browser action object", result["error"])
+            self.assertEqual(browser_driver.runs, [])
+
     def test_task_start_returns_session_without_running_browser_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             docker = FakeDocker()
@@ -587,6 +815,43 @@ class WebClientRunnerTests(unittest.TestCase):
 
 
 class WebClientRunnerToolTests(unittest.TestCase):
+    def test_plan_session_tool_accepts_wrapped_and_raw_payloads(self):
+        request = {
+            "command": "start",
+            "request_id": "start-1",
+            "run_id": "tool-run",
+            "plan": browser_plan(),
+        }
+        expected = {
+            "request_id": "start-1",
+            "status": "pass",
+            "session_id": "session-1",
+        }
+
+        with patch.object(
+            web_client_runner_module,
+            "plan_session",
+            return_value=expected,
+        ) as plan_session_tool:
+            wrapped = asyncio.run(
+                WebClientPlanSessionTool()._execute(
+                    {"content": json.dumps({"request": request})}
+                )
+            )
+            raw = asyncio.run(WebClientPlanSessionTool()._execute(request))
+
+        self.assertIsNone(wrapped.error)
+        self.assertEqual(json.loads(wrapped.output), expected)
+        self.assertIsNone(raw.error)
+        self.assertEqual(json.loads(raw.output), expected)
+        self.assertEqual(
+            plan_session_tool.call_args_list,
+            [
+                call(request=request),
+                call(request=request),
+            ],
+        )
+
     def test_execute_plan_tool_accepts_wrapped_json_body(self):
         plan = browser_plan()
         payload = {"plan": plan, "run_id": "tool-run"}
