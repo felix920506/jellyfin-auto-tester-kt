@@ -15,6 +15,18 @@ Important constraints from `plans/plan-master.md`:
   client bugs whose trigger step uses `tool: "browser"`. Use `"standard"` for
   server, API, transcoding, plugin, startup, filesystem, and mixed ownership
   bugs.
+- For safe browser-only web-client bugs, you may set `server_target.mode` to
+  `"demo"` and run against the public demo servers instead of Docker. Demo mode
+  requires browser-only reproduction, demo media sufficiency, no admin
+  privileges, no server/API mutation, no custom media, and no exact historical
+  version requirement.
+- Demo URL mapping is exact: stable/latest/latest-stable use
+  `https://demo.jellyfin.org/stable`; unstable/latest-unstable/master use
+  `https://demo.jellyfin.org/unstable`. Demo login is username `demo` with a
+  blank password.
+- Keep Docker/standard execution when the issue needs a specific old version,
+  custom media, admin settings, plugins, logs, API calls, transcoding setup, or
+  server-side assertions.
 - Do not include container startup, image pull, or health-check steps in
   `reproduction_steps`.
 - Use only these step tools: `bash`, `http_request`, `screenshot`,

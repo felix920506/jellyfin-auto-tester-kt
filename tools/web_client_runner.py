@@ -33,6 +33,10 @@ DEFAULT_ARTIFACTS_ROOT = Path(
     os.environ.get("JF_AUTO_TESTER_ARTIFACTS_ROOT", REPO_ROOT / "artifacts")
 ).resolve()
 FORBIDDEN_DOCKER_OPS_RE = re.compile(r"\bdocker\s+(?:run|pull|start)\b")
+DEMO_SERVER_URLS = {
+    "stable": "https://demo.jellyfin.org/stable",
+    "unstable": "https://demo.jellyfin.org/unstable",
+}
 STEP_TIMEOUT_S = 120
 ALLOWED_BROWSER_REPAIR_FIELDS = {
     "actions",
@@ -88,6 +92,15 @@ class WebClientRunner:
         artifacts_dir = self.artifacts_root / run_id
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         _write_json(artifacts_dir / "plan.json", plan)
+
+        server_target = _server_target(plan)
+        if server_target.get("mode") == "demo":
+            return self._execute_demo_plan(
+                plan=plan,
+                run_id=run_id,
+                artifacts_dir=artifacts_dir,
+                server_target=server_target,
+            )
 
         if _trigger_tool(plan) != "browser":
             return self._unsupported_plan_result(
@@ -207,6 +220,101 @@ class WebClientRunner:
             ),
             "artifacts_dir": str(artifacts_dir),
             "jellyfin_logs": jellyfin_logs,
+            "error_summary": error_summary,
+        }
+        _write_json(artifacts_dir / "result.json", result)
+        return result
+
+    def _execute_demo_plan(
+        self,
+        *,
+        plan: dict[str, Any],
+        run_id: str,
+        artifacts_dir: Path,
+        server_target: dict[str, Any],
+    ) -> dict[str, Any]:
+        if plan.get("execution_target") != "web_client":
+            return self._unsupported_plan_result(
+                plan=plan,
+                run_id=run_id,
+                artifacts_dir=artifacts_dir,
+                reason="demo server mode requires execution_target: web_client",
+            )
+        if bool(server_target.get("requires_admin")):
+            return self._unsupported_plan_result(
+                plan=plan,
+                run_id=run_id,
+                artifacts_dir=artifacts_dir,
+                reason="demo server mode cannot satisfy admin-only reproduction plans",
+            )
+        non_browser_tools = _non_browser_step_tools(plan)
+        if non_browser_tools:
+            return self._unsupported_plan_result(
+                plan=plan,
+                run_id=run_id,
+                artifacts_dir=artifacts_dir,
+                reason=(
+                    "demo server mode only supports browser reproduction steps; "
+                    f"found non-browser tool(s): {', '.join(non_browser_tools)}"
+                ),
+            )
+
+        execution_log: list[dict[str, Any]] = []
+        variables: dict[str, Any] = {}
+        screenshots: dict[str, str | None] = {}
+        error_summary: str | None = None
+        setup_failed = False
+        base_url = _demo_base_url(server_target, plan)
+        browser_auth = _demo_browser_auth(server_target)
+
+        try:
+            if hasattr(self.api, "configure"):
+                self.api.configure(base_url=base_url, run_id=run_id)
+            if hasattr(self.browser_driver, "configure"):
+                self.browser_driver.configure(base_url=base_url, run_id=run_id)
+
+            for step in plan.get("reproduction_steps", []):
+                execution_log.append(
+                    self._execute_step(
+                        step=step,
+                        run_id=run_id,
+                        container_id=None,
+                        variables=variables,
+                        screenshots=screenshots,
+                        browser_auth=browser_auth,
+                    )
+                )
+        except Exception as exc:
+            setup_failed = True
+            error_summary = str(exc)
+            if not execution_log:
+                execution_log = self._skip_all_steps(plan, reason=error_summary)
+        finally:
+            try:
+                self.browser_driver.close()
+            except Exception as exc:
+                error_summary = error_summary or f"failed to close browser: {exc}"
+
+        overall_result = self._overall_result(
+            execution_log,
+            setup_failed=setup_failed,
+            container_crashed=False,
+        )
+        demo_blocker = _demo_browser_blocker(execution_log)
+        if overall_result == "not_reproduced" and demo_blocker:
+            overall_result = "inconclusive"
+            error_summary = error_summary or demo_blocker
+
+        result = {
+            "plan": plan,
+            "run_id": run_id,
+            "is_verification": bool(plan.get("is_verification", False)),
+            "original_run_id": plan.get("original_run_id"),
+            "container_id": None,
+            "execution_log": execution_log,
+            "overall_result": overall_result,
+            "artifacts_dir": str(artifacts_dir),
+            "jellyfin_logs": "",
             "error_summary": error_summary,
         }
         _write_json(artifacts_dir / "result.json", result)
@@ -457,6 +565,7 @@ class WebClientRunner:
         container_id: str | None,
         variables: dict[str, Any],
         screenshots: dict[str, str | None],
+        browser_auth: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         started = time.monotonic()
         started_at = datetime.now(timezone.utc)
@@ -469,6 +578,8 @@ class WebClientRunner:
         try:
             step_input = resolve_references(step.get("input", {}), variables)
             criteria = resolve_references(step.get("success_criteria"), variables)
+            if step.get("tool") == "browser" and browser_auth is not None:
+                step_input = _inject_browser_auth(step_input, browser_auth)
         except UnboundVariableError as exc:
             entry.update(
                 {
@@ -889,6 +1000,76 @@ def _trigger_tool(plan: dict[str, Any]) -> str | None:
     for step in plan.get("reproduction_steps", []):
         if isinstance(step, dict) and step.get("role") == "trigger":
             return str(step.get("tool") or "")
+    return None
+
+
+def _server_target(plan: Mapping[str, Any]) -> dict[str, Any]:
+    value = plan.get("server_target")
+    if not isinstance(value, Mapping):
+        return {"mode": "docker"}
+    server_target = dict(value)
+    mode = str(server_target.get("mode") or "docker").strip().lower()
+    server_target["mode"] = "demo" if mode == "demo" else "docker"
+    return server_target
+
+
+def _non_browser_step_tools(plan: Mapping[str, Any]) -> list[str]:
+    tools = []
+    for step in plan.get("reproduction_steps", []):
+        if not isinstance(step, Mapping):
+            continue
+        tool = str(step.get("tool") or "")
+        if tool and tool != "browser" and tool not in tools:
+            tools.append(tool)
+    return tools
+
+
+def _demo_base_url(
+    server_target: Mapping[str, Any],
+    plan: Mapping[str, Any],
+) -> str:
+    if server_target.get("base_url"):
+        return str(server_target["base_url"])
+    release_track = _demo_release_track(
+        server_target.get("release_track") or plan.get("target_version")
+    )
+    return DEMO_SERVER_URLS[release_track]
+
+
+def _demo_release_track(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"unstable", "latest-unstable", "master"}:
+        return "unstable"
+    return "stable"
+
+
+def _demo_browser_auth(server_target: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "mode": "auto",
+        "username": str(server_target.get("username", "demo")),
+        "password": str(server_target.get("password", "")),
+    }
+
+
+def _inject_browser_auth(
+    step_input: Mapping[str, Any],
+    browser_auth: dict[str, Any],
+) -> dict[str, Any]:
+    updated = dict(step_input)
+    if updated.get("auth") in (None, "auto"):
+        updated["auth"] = deepcopy(browser_auth)
+    return updated
+
+
+def _demo_browser_blocker(execution_log: list[dict[str, Any]]) -> str | None:
+    for entry in execution_log:
+        if not isinstance(entry, Mapping) or entry.get("outcome") != "fail":
+            continue
+        browser = entry.get("browser")
+        if not isinstance(browser, Mapping) or browser.get("status") != "fail":
+            continue
+        error = browser.get("error") or entry.get("reason") or "browser action failed"
+        return f"demo browser flow could not complete: {error}"
     return None
 
 

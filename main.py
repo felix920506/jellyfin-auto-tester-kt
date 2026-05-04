@@ -60,8 +60,11 @@ PIPELINE_PAYLOAD_KEYS = {
 }
 MINIMUM_REPRODUCTION_PLAN_KEYS = {
     "issue_url",
-    "docker_image",
     "reproduction_steps",
+}
+DEMO_SERVER_URLS = {
+    "stable": "https://demo.jellyfin.org/stable",
+    "unstable": "https://demo.jellyfin.org/unstable",
 }
 LOGGER_NAME = "kohakuterrarium.jellyfin_auto_tester"
 logging.getLogger(LOGGER_NAME).addHandler(logging.NullHandler())
@@ -1695,8 +1698,24 @@ def _normalize_reproduction_plan(
         plan["target_version"] = str(target_version)
 
     plan.setdefault("issue_url", issue_url)
-    if plan.get("target_version") and not plan.get("docker_image"):
+    raw_server_target = plan.get("server_target")
+    server_target = _normalize_plan_server_target(
+        plan.get("server_target"),
+        target_version=plan.get("target_version"),
+    )
+    if raw_server_target is not None or server_target.get("mode") == "demo":
+        plan["server_target"] = server_target
+    else:
+        plan.pop("server_target", None)
+    if (
+        plan.get("target_version")
+        and not plan.get("docker_image")
+        and server_target.get("mode") != "demo"
+    ):
         plan["docker_image"] = f"jellyfin/jellyfin:{plan['target_version']}"
+    if server_target.get("mode") == "demo":
+        plan.pop("docker_image", None)
+        plan["execution_target"] = "web_client"
     plan.setdefault("issue_title", _issue_title(plan.get("issue_url"), issue_thread))
     plan.setdefault("prerequisites", [])
     plan.setdefault("failure_indicators", [])
@@ -1741,6 +1760,41 @@ def _target_version_from_docker_image(value: Any) -> str | None:
         return None
     tag = value[len(prefix):].strip()
     return tag or None
+
+
+def _normalize_plan_server_target(
+    value: Any,
+    *,
+    target_version: Any = None,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"mode": "docker"}
+
+    server_target = dict(value)
+    mode = str(server_target.get("mode") or "docker").strip().lower()
+    if mode != "demo":
+        server_target["mode"] = "docker"
+        return server_target
+
+    release_track = _demo_release_track(
+        server_target.get("release_track") or target_version
+    )
+    server_target["mode"] = "demo"
+    server_target["release_track"] = release_track
+    server_target["base_url"] = str(
+        server_target.get("base_url") or DEMO_SERVER_URLS[release_track]
+    )
+    server_target.setdefault("username", "demo")
+    server_target.setdefault("password", "")
+    server_target.setdefault("requires_admin", False)
+    return server_target
+
+
+def _demo_release_track(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"unstable", "latest-unstable", "master"}:
+        return "unstable"
+    return "stable"
 
 
 def _issue_title(issue_url: Any, issue_thread: dict[str, Any] | None = None) -> str:

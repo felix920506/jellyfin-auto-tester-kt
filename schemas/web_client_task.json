@@ -108,10 +108,7 @@
           "minLength": 1
         },
         "auth": {
-          "enum": [
-            "auto",
-            "none"
-          ]
+          "$ref": "#/$defs/browser_auth"
         },
         "label": {
           "type": "string",
@@ -132,6 +129,37 @@
           }
         }
       }
+    },
+    "browser_auth": {
+      "oneOf": [
+        {
+          "enum": [
+            "auto",
+            "none"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "auto",
+                "none"
+              ]
+            },
+            "username": {
+              "type": "string"
+            },
+            "password": {
+              "type": "string"
+            }
+          }
+        }
+      ]
     },
     "browser_viewport": {
       "type": "object",

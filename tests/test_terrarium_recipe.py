@@ -24,6 +24,7 @@ class TerrariumRecipeTests(unittest.TestCase):
             {
                 "plan_ready": "queue",
                 "web_client_plan_ready": "queue",
+                "web_client_verification_request": "queue",
                 "execution_done": "queue",
                 "web_client_task": "queue",
                 "web_client_done": "queue",
@@ -43,7 +44,11 @@ class TerrariumRecipeTests(unittest.TestCase):
         self.assertEqual(creatures["execution_agent"].send_channels, ["execution_done"])
         self.assertEqual(
             creatures["web_client_agent"].listen_channels,
-            ["web_client_plan_ready", "web_client_task"],
+            [
+                "web_client_plan_ready",
+                "web_client_verification_request",
+                "web_client_task",
+            ],
         )
         self.assertEqual(
             creatures["web_client_agent"].send_channels,
@@ -52,7 +57,12 @@ class TerrariumRecipeTests(unittest.TestCase):
         self.assertEqual(creatures["report_agent"].listen_channels, ["execution_done"])
         self.assertEqual(
             creatures["report_agent"].send_channels,
-            ["verification_request", "final_report", "human_review_queue"],
+            [
+                "verification_request",
+                "web_client_verification_request",
+                "final_report",
+                "human_review_queue",
+            ],
         )
 
     def test_creature_llm_selectors_resolve_to_provider_profiles(self):

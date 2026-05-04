@@ -22,6 +22,9 @@ triggers:
     channel: "web_client_plan_ready"
     task: "execute_plan"
   - type: "channel"
+    channel: "web_client_verification_request"
+    task: "execute_plan"
+  - type: "channel"
     channel: "web_client_task"
     task: "run_task"
 

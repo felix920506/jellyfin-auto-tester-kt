@@ -8,7 +8,6 @@
     "issue_url",
     "issue_title",
     "target_version",
-    "docker_image",
     "prerequisites",
     "environment",
     "reproduction_steps",
@@ -18,6 +17,43 @@
     "ambiguities",
     "is_verification",
     "original_run_id"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "server_target": {
+            "type": "object",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "demo"
+              }
+            }
+          }
+        },
+        "required": [
+          "server_target"
+        ]
+      },
+      "then": {
+        "required": [
+          "execution_target"
+        ],
+        "properties": {
+          "execution_target": {
+            "const": "web_client"
+          }
+        }
+      },
+      "else": {
+        "required": [
+          "docker_image"
+        ]
+      }
+    }
   ],
   "properties": {
     "issue_url": {
@@ -83,6 +119,12 @@
       ],
       "default": "standard"
     },
+    "server_target": {
+      "$ref": "#/$defs/server_target",
+      "default": {
+        "mode": "docker"
+      }
+    },
     "confidence": {
       "enum": [
         "high",
@@ -108,6 +150,91 @@
     }
   },
   "$defs": {
+    "server_target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "const": "docker"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "mode",
+            "release_track",
+            "base_url"
+          ],
+          "properties": {
+            "mode": {
+              "const": "demo"
+            },
+            "release_track": {
+              "enum": [
+                "stable",
+                "unstable"
+              ]
+            },
+            "base_url": {
+              "enum": [
+                "https://demo.jellyfin.org/stable",
+                "https://demo.jellyfin.org/unstable"
+              ]
+            },
+            "username": {
+              "type": "string",
+              "default": "demo"
+            },
+            "password": {
+              "type": "string",
+              "default": ""
+            },
+            "requires_admin": {
+              "const": false,
+              "default": false
+            }
+          }
+        }
+      ]
+    },
+    "browser_auth": {
+      "oneOf": [
+        {
+          "enum": [
+            "auto",
+            "none"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "auto",
+                "none"
+              ]
+            },
+            "username": {
+              "type": "string"
+            },
+            "password": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
     "prerequisite": {
       "type": "object",
       "additionalProperties": true,
@@ -420,10 +547,7 @@
           "minLength": 1
         },
         "auth": {
-          "enum": [
-            "auto",
-            "none"
-          ]
+          "$ref": "#/$defs/browser_auth"
         },
         "label": {
           "type": "string",

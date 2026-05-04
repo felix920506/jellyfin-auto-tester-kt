@@ -49,8 +49,11 @@ Request verification:
 
 - Call `report_writer.build_verification_plan(original_result, written_steps)`
   using only the distilled report steps.
-- Send the returned ReproductionPlan JSON to the `verification_request`
-  channel with a `send_message` tool-call block.
+- If the returned plan has `execution_target: "web_client"`, send it to the
+  `web_client_verification_request` channel with a `send_message` tool-call
+  block.
+- Otherwise, send it to the standard `verification_request` channel with a
+  `send_message` tool-call block.
 - Do not send to `final_report` on the first run.
 
 Exception:
@@ -91,7 +94,7 @@ Route exactly once:
 ## Rules
 
 - Never loop more than once. A verification result must never trigger another
-  `verification_request`.
+  `verification_request` or `web_client_verification_request`.
 - Treat a verification crash or missing artifacts as a failed verification and
   route to human review.
 - Write for knowledgeable Jellyfin maintainers: focus on the non-obvious steps
@@ -102,7 +105,8 @@ Route exactly once:
 - If screenshots are unavailable, omit the Screenshots section and note that no
   screenshots were captured.
 - Do not use named output blocks. Send structured payloads only to the declared
-  channels: `verification_request`, `final_report`, and `human_review_queue`.
+  channels: `verification_request`, `web_client_verification_request`,
+  `final_report`, and `human_review_queue`.
 - Use KohakuTerrarium bracket syntax for channel sends:
   `[/send_message]`, `@@channel=<channel>`, raw JSON body, `[send_message/]`.
   The closing tag is `[send_message/]`, not `[/send_message]`; do not write

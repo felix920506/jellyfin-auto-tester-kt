@@ -156,6 +156,26 @@ def sample_result(artifacts_root, run_id="run-1", overall_result="reproduced"):
     }
 
 
+def demo_result(artifacts_root, run_id="demo-run"):
+    result = sample_result(artifacts_root, run_id=run_id)
+    result["plan"].pop("docker_image", None)
+    result["plan"]["target_version"] = "stable"
+    result["plan"]["execution_target"] = "web_client"
+    result["plan"]["server_target"] = {
+        "mode": "demo",
+        "release_track": "stable",
+        "base_url": "https://demo.jellyfin.org/stable",
+        "username": "demo",
+        "password": "",
+        "requires_admin": False,
+    }
+    result["plan"]["prerequisites"] = []
+    result["plan"]["environment"] = {"ports": {}, "volumes": [], "env_vars": {}}
+    result["container_id"] = None
+    result["jellyfin_logs"] = ""
+    return result
+
+
 class ReportWriterTests(unittest.TestCase):
     def test_generate_writes_report_with_filtered_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -261,6 +281,20 @@ class ReportWriterTests(unittest.TestCase):
             self.assertIn("stream", report)
             self.assertIn("![Step 4 screenshot](screenshots/web_flow.png)", report)
 
+    def test_generate_describes_demo_server_without_log_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = demo_result(temp_dir)
+
+            metadata = report_writer.generate(result, artifacts_base=temp_dir)
+
+            report = Path(metadata["path"]).read_text(encoding="utf-8")
+            self.assertIn("Public demo server", report)
+            self.assertIn("https://demo.jellyfin.org/stable", report)
+            self.assertIn("Login as `demo` with blank password", report)
+            self.assertIn("does not collect Jellyfin server logs", report)
+            self.assertNotIn("Docker Image", report)
+            self.assertNotIn("docker run", report)
+
     def test_generate_adds_successful_verification_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original = sample_result(temp_dir, run_id="run-1")
@@ -324,6 +358,23 @@ class ReportWriterTests(unittest.TestCase):
             self.assertEqual(verification_plan["reproduction_steps"], written_steps)
             self.assertFalse(original["plan"]["is_verification"])
             self.assertIsNone(original["plan"]["original_run_id"])
+
+    def test_build_verification_plan_preserves_demo_target_without_docker_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = demo_result(temp_dir)
+            written_steps = [copy.deepcopy(original["plan"]["reproduction_steps"][1])]
+
+            verification_plan = report_writer.build_verification_plan(
+                original,
+                written_steps,
+            )
+
+            self.assertNotIn("docker_image", verification_plan)
+            self.assertEqual(
+                verification_plan["server_target"],
+                original["plan"]["server_target"],
+            )
+            self.assertEqual(verification_plan["execution_target"], "web_client")
 
     def test_build_verification_plan_requires_exactly_one_trigger(self):
         with tempfile.TemporaryDirectory() as temp_dir:

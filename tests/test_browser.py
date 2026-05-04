@@ -278,6 +278,32 @@ class BrowserDriverTests(unittest.TestCase):
             self.assertIn(("reload", "networkidle", 30000), page.calls)
             self.assertIn(("wait_for_load_state", "networkidle", 5000), page.calls)
 
+    def test_goto_auth_object_uses_supplied_credentials(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            page.locator_counts["input[type='password']"] = 1
+            driver, _ = self.make_driver(temp_dir, page)
+
+            result = driver.run(
+                {
+                    "path": "/web",
+                    "auth": {"mode": "auto", "username": "demo", "password": ""},
+                    "actions": [{"type": "goto"}],
+                }
+            )
+
+            self.assertIn(
+                (
+                    "fill",
+                    "input[name='Username'], input[autocomplete='username'], input[type='text']",
+                    "demo",
+                    5000,
+                ),
+                page.calls,
+            )
+            self.assertIn(("fill", "input[type='password']", "", 5000), page.calls)
+            self.assertEqual(result["auth"], {"mode": "auto"})
+
     def test_screenshot_action_writes_artifact(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             page = FakePage()

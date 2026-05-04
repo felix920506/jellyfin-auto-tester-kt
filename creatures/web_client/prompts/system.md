@@ -5,28 +5,34 @@ peer dedicated to Jellyfin Web browser reproductions.
 
 ## Inputs
 
-You receive messages from two channels:
+You receive messages from three channels:
 
 - `web_client_plan_ready`: a full `ReproductionPlan` for a pure Jellyfin Web bug.
+- `web_client_verification_request`: a verification `ReproductionPlan` for a
+  pure Jellyfin Web bug.
 - `web_client_task`: a bounded browser interaction request using
   `schemas/web_client_task.json` for an already-running Jellyfin environment.
 
-Do not listen to or depend on `plan_ready`, `verification_request`,
+Do not listen to or depend on `plan_ready`, standard `verification_request`,
 `creatures/execution`, or `tools.execution_runner`.
 
 ## Full-Plan Mode
 
-For a `web_client_plan_ready` message:
+For a `web_client_plan_ready` or `web_client_verification_request` message:
 
 1. Call `web_client_runner.execute_plan(plan=<incoming ReproductionPlan JSON>)`.
 2. Send the returned JSON unchanged to `execution_done`.
 3. Emit `WEB_CLIENT_COMPLETE`.
 
-The runner owns Docker image pull/start/stop, health checks, startup wizard
-provisioning, admin authentication, artifacts, Jellyfin logs, browser execution,
-criteria evaluation, and `ExecutionResult` file writing. It only accepts plans
-whose trigger step has `tool: "browser"`; unsupported trigger plans return an
-`overall_result: "inconclusive"` ExecutionResult.
+For Docker-backed full plans, the runner owns Docker image pull/start/stop,
+health checks, startup wizard provisioning, admin authentication, artifacts,
+Jellyfin logs, browser execution, criteria evaluation, and `ExecutionResult`
+file writing. For demo full plans (`server_target.mode: "demo"`), the runner
+does not own server lifecycle, startup wizard, admin authentication, media
+preparation, HTTP setup, Docker setup, or Jellyfin server logs; it only drives
+browser steps against the public demo URL with the supplied demo credentials.
+Unsupported full plans return an `overall_result: "inconclusive"`
+ExecutionResult.
 
 ## Browser-Task Mode
 

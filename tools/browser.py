@@ -422,7 +422,7 @@ class BrowserDriver:
             "media_state": media_state,
             "error": error,
             "auth": {
-                "mode": browser_input.get("auth", "none"),
+                "mode": _browser_auth_mode(browser_input.get("auth", "none")),
             },
         }
 
@@ -508,17 +508,18 @@ class BrowserDriver:
         browser_input: Mapping[str, Any],
         timeout_ms: int,
     ) -> None:
-        if browser_input.get("auth") != "auto":
+        mode, username, password_text = _browser_auth_credentials(browser_input.get("auth"))
+        if mode != "auto":
             return
         try:
-            password = page.locator("input[type='password']")
-            if hasattr(password, "count") and password.count() < 1:
+            password_locator = page.locator("input[type='password']")
+            if hasattr(password_locator, "count") and password_locator.count() < 1:
                 return
             page.locator("input[name='Username'], input[autocomplete='username'], input[type='text']").fill(
-                "admin",
+                username,
                 timeout=min(timeout_ms, 5000),
             )
-            password.fill("admin", timeout=min(timeout_ms, 5000))
+            password_locator.fill(password_text, timeout=min(timeout_ms, 5000))
             page.locator("button[type='submit'], button:has-text('Sign In'), button:has-text('Login')").click(
                 timeout=min(timeout_ms, 5000),
             )
@@ -610,6 +611,23 @@ def run_browser_step(
         return driver.run(browser_input, step_id=step_id)
     finally:
         driver.close()
+
+
+def _browser_auth_mode(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return str(value.get("mode") or "none")
+    return str(value or "none")
+
+
+def _browser_auth_credentials(value: Any) -> tuple[str, str, str]:
+    if isinstance(value, Mapping):
+        mode = str(value.get("mode") or "none")
+        username = str(value["username"]) if "username" in value else "admin"
+        password = str(value["password"]) if "password" in value else "admin"
+        return mode, username, password
+    if value == "auto":
+        return "auto", "admin", "admin"
+    return str(value or "none"), "admin", "admin"
 
 
 def _viewport(value: Any) -> dict[str, int]:

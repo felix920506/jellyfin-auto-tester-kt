@@ -95,6 +95,13 @@ Stage 2 supports `tool: "browser"` for Jellyfin Web flows that need a real
 Chromium client. Browser input supports top-level `path` or `url`, `auth`,
 `label`, `timeout_s`, `viewport`, and ordered `actions`.
 
+For pure web-client plans that need no server control, custom media, admin
+settings, API setup, or logs, `server_target.mode: "demo"` can run browser
+steps against `https://demo.jellyfin.org/stable` or
+`https://demo.jellyfin.org/unstable`. Demo login uses username `demo` and a
+blank password. Browser `auth` may be `"auto"`, `"none"`, or a credential object
+such as `{"mode": "auto", "username": "demo", "password": ""}`.
+
 Supported action types are `goto`, `refresh`, `click`, `fill`, `press`,
 `select_option`, `check`, `uncheck`, `wait_for`, `wait_for_text`,
 `wait_for_url`, `wait_for_media`, `evaluate`, and `screenshot`. `refresh` is an

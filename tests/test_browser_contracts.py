@@ -68,10 +68,54 @@ class BrowserContractTests(unittest.TestCase):
 
         self.assertEqual(errors, [])
 
+    def test_reproduction_plan_schema_accepts_demo_without_docker_image(self):
+        validator = Draft202012Validator(load_schema("reproduction_plan.json"))
+        plan = minimal_plan()
+        plan.pop("docker_image")
+        plan["target_version"] = "stable"
+        plan["execution_target"] = "web_client"
+        plan["server_target"] = {
+            "mode": "demo",
+            "release_track": "stable",
+            "base_url": "https://demo.jellyfin.org/stable",
+            "username": "demo",
+            "password": "",
+            "requires_admin": False,
+        }
+
+        errors = sorted(validator.iter_errors(plan), key=lambda error: error.path)
+
+        self.assertEqual(errors, [])
+
+    def test_reproduction_plan_schema_requires_docker_image_by_default(self):
+        validator = Draft202012Validator(load_schema("reproduction_plan.json"))
+        plan = minimal_plan()
+        plan.pop("docker_image")
+
+        errors = sorted(validator.iter_errors(plan), key=lambda error: error.path)
+
+        self.assertTrue(errors)
+
     def test_plan_normalization_defaults_execution_target_to_standard(self):
         normalized = _normalize_reproduction_plan(minimal_plan())
 
         self.assertEqual(normalized["execution_target"], "standard")
+
+    def test_plan_normalization_preserves_demo_server_target(self):
+        plan = minimal_plan()
+        plan.pop("docker_image")
+        plan["target_version"] = "unstable"
+        plan["execution_target"] = "web_client"
+        plan["server_target"] = {"mode": "demo", "release_track": "unstable"}
+
+        normalized = _normalize_reproduction_plan(plan)
+
+        self.assertNotIn("docker_image", normalized)
+        self.assertEqual(normalized["server_target"]["mode"], "demo")
+        self.assertEqual(
+            normalized["server_target"]["base_url"],
+            "https://demo.jellyfin.org/unstable",
+        )
 
     def test_web_client_task_schema_accepts_browser_request(self):
         task = {
@@ -82,7 +126,7 @@ class BrowserContractTests(unittest.TestCase):
             "step_id": 1,
             "browser_input": {
                 "path": "/web",
-                "auth": "auto",
+                "auth": {"mode": "auto", "username": "demo", "password": ""},
                 "actions": [
                     {"type": "goto"},
                     {"type": "screenshot", "label": "home"},
@@ -193,6 +237,24 @@ class BrowserContractTests(unittest.TestCase):
         self.assertIn("When in doubt, choose `standard`", analysis_prompt)
         self.assertIn("web_client_plan_ready", analysis_context)
         self.assertIn('"web_client"', analysis_context)
+        self.assertIn("demo.jellyfin.org/stable", analysis_prompt)
+        self.assertIn("demo.jellyfin.org/unstable", analysis_prompt)
+        self.assertIn("blank password", analysis_prompt)
+        self.assertIn("specific old version", analysis_prompt)
+
+    def test_web_client_and_report_prompts_describe_demo_verification_routing(self):
+        web_client_prompt = (
+            REPO_ROOT / "creatures" / "web_client" / "prompts" / "system.md"
+        ).read_text(encoding="utf-8")
+        report_prompt = (
+            REPO_ROOT / "creatures" / "report" / "prompts" / "system.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("web_client_verification_request", web_client_prompt)
+        self.assertIn("server_target.mode: \"demo\"", web_client_prompt)
+        self.assertIn("does not own server lifecycle", web_client_prompt)
+        self.assertIn("web_client_verification_request", report_prompt)
+        self.assertIn('execution_target: "web_client"', report_prompt)
 
     def test_plan_normalization_defaults_browser_criteria_to_action_run(self):
         plan = minimal_plan()

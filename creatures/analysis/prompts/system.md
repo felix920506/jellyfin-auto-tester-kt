@@ -78,6 +78,38 @@ of these are true:
 - Any HTTP, Docker, shell, or media setup is only preparation for browser state,
   not the suspected owner of the defect.
 
+For safe browser-only plans, prefer public demo server mode instead of Docker
+when all of these are also true:
+
+- Every reproduction step can use `tool: "browser"`; no HTTP request,
+  `docker_exec`, shell command, screenshot-only, media preparation, API setup, or
+  server-side assertion is needed.
+- The demo media catalog is sufficient, either because the flow is generic or
+  can use the first available media item. Do not rely on a specific title,
+  codec, subtitle file, library state, plugin, or metadata value.
+- The issue needs no admin privileges, server/API mutation, startup wizard
+  control, custom media, custom config, logs, plugins, transcoding setup, or
+  exact historical Jellyfin version.
+
+When demo mode is safe, set:
+
+```json
+"server_target": {
+  "mode": "demo",
+  "release_track": "stable",
+  "base_url": "https://demo.jellyfin.org/stable",
+  "username": "demo",
+  "password": "",
+  "requires_admin": false
+}
+```
+
+Use `release_track: "stable"` and `https://demo.jellyfin.org/stable` for
+`stable`, `latest`, or `latest-stable`. Use `release_track: "unstable"` and
+`https://demo.jellyfin.org/unstable` for `unstable`, `latest-unstable`,
+`master`, or issue text explicitly asking for unstable. Demo login is username
+`demo` with a blank password.
+
 Use standard `plan_ready` with `execution_target: "standard"` when any of these
 are true:
 
@@ -89,6 +121,8 @@ are true:
   response.
 - The symptom can be reproduced deterministically as a raw Jellyfin HTTP request
   without depending on DOM or browser state.
+- The issue needs a specific old version, custom media, admin settings, server
+  logs, plugins, API calls, transcoding setup, or server-side assertions.
 
 When in doubt, choose `standard`. The web-client path is for exclusively client
 owned issues, not every issue that mentions Jellyfin Web.
@@ -113,6 +147,12 @@ Set top-level `execution_target` before sending:
 - Use `"web_client"` only for pure Jellyfin Web client bugs whose trigger
   symptom is browser/Jellyfin Web behavior and whose trigger step uses
   `tool: "browser"`.
+- For web-client Docker plans, set `server_target: { "mode": "docker" }` or
+  omit `server_target`; include `docker_image` as usual.
+- For web-client demo plans, include `server_target.mode: "demo"` with the exact
+  stable or unstable demo URL and demo credentials. Use `target_version:
+  "stable"` or `"unstable"` unless the issue/user supplied a more specific
+  label.
 - Use `"standard"` for server, API, transcoding, plugin, startup, filesystem,
   Docker, and mixed-ownership bugs, even when a browser or screenshot step helps
   collect evidence.
@@ -210,7 +250,8 @@ signal.
   `body_base64`; never use a generic `body` field. Use `body_text` with an
   explicit `Content-Type` header for malformed JSON or other non-standard text.
 - Docker image must be `jellyfin/jellyfin:<version>` using the
-  maintainer-specified version.
+  maintainer-specified version for Docker-backed plans. Demo-backed plans do
+  not need `docker_image`.
 - Exactly one reproduction step must have `role: "trigger"`.
 - Trigger-step success criteria describe observing the bug symptom. A passing
   trigger step means the defect manifested as expected.

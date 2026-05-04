@@ -93,7 +93,12 @@ def build_verification_plan(
         raise ValueError("written_steps must contain exactly one trigger step")
 
     verification_plan = deepcopy(original_plan)
-    verification_plan["docker_image"] = deepcopy(original_plan.get("docker_image"))
+    if "docker_image" in original_plan:
+        verification_plan["docker_image"] = deepcopy(original_plan.get("docker_image"))
+    else:
+        verification_plan.pop("docker_image", None)
+    if "server_target" in original_plan:
+        verification_plan["server_target"] = deepcopy(original_plan["server_target"])
     verification_plan["environment"] = deepcopy(original_plan.get("environment") or {})
     verification_plan["prerequisites"] = deepcopy(original_plan.get("prerequisites") or [])
     verification_plan["reproduction_steps"] = steps
@@ -141,7 +146,7 @@ def _render_report(
         "",
         "## Reproduction Steps",
         "",
-        "> Steps begin after Jellyfin is healthy. Each step was executed and verified by the automated pipeline.",
+        _steps_intro(plan),
         "",
         _reproduction_steps(execution_result, written_steps),
         "",
@@ -204,7 +209,6 @@ def _summary(
 
 def _environment_table(plan: dict[str, Any], execution_result: dict[str, Any]) -> str:
     host = execution_result.get("host") or execution_result.get("host_environment") or {}
-    docker_image = _text(plan.get("docker_image"), "Unknown")
     host_os = _first_text(
         host.get("os") if isinstance(host, dict) else None,
         execution_result.get("host_os"),
@@ -215,6 +219,20 @@ def _environment_table(plan: dict[str, Any], execution_result: dict[str, Any]) -
         execution_result.get("architecture"),
         "Unknown",
     )
+    if _is_demo_plan(plan):
+        server_target = _server_target(plan)
+        return "\n".join(
+            [
+                "| Field | Value |",
+                "|---|---|",
+                "| Server Target | `Public demo server` |",
+                f"| Demo URL | `{_escape_table(_demo_url(plan))}` |",
+                f"| Release Track | `{_escape_table(_text(server_target.get('release_track'), 'stable'))}` |",
+                f"| Host OS | `{_escape_table(host_os)}` |",
+                f"| Architecture | `{_escape_table(architecture)}` |",
+            ]
+        )
+    docker_image = _text(plan.get("docker_image"), "Unknown")
     return "\n".join(
         [
             "| Field | Value |",
@@ -227,6 +245,28 @@ def _environment_table(plan: dict[str, Any], execution_result: dict[str, Any]) -
 
 
 def _prerequisites(plan: dict[str, Any]) -> str:
+    if _is_demo_plan(plan):
+        server_target = _server_target(plan)
+        username = _text(server_target.get("username"), "demo")
+        password = _text(server_target.get("password"), "")
+        password_text = "blank password" if password == "" else "configured password"
+        lines = [
+            f"- Public demo server: `{_inline_code(_demo_url(plan))}`",
+            f"- Login as `{_inline_code(username)}` with {password_text}.",
+            "- No Docker container, custom media setup, admin configuration, or Jellyfin server logs are expected in demo mode.",
+        ]
+        prereqs = plan.get("prerequisites") if isinstance(plan.get("prerequisites"), list) else []
+        if prereqs:
+            lines.append("- Additional browser-only prerequisites declared by the plan:")
+            for prereq in prereqs:
+                if isinstance(prereq, dict):
+                    lines.append(f"  - {_text(prereq.get('description'), 'Unspecified prerequisite')}")
+                else:
+                    lines.append(f"  - {_text(prereq)}")
+        else:
+            lines.append("- No additional media files or library state were declared in the plan.")
+        return "\n".join(lines)
+
     version = _text(plan.get("target_version"), "<version>")
     docker_image = _text(plan.get("docker_image"), f"jellyfin/jellyfin:{version}")
     env = plan.get("environment") if isinstance(plan.get("environment"), dict) else {}
@@ -259,6 +299,12 @@ def _prerequisites(plan: dict[str, Any]) -> str:
     else:
         lines.append("- No additional media files or library state were declared in the plan.")
     return "\n".join(lines)
+
+
+def _steps_intro(plan: dict[str, Any]) -> str:
+    if _is_demo_plan(plan):
+        return "> Steps run against the public demo server. Each browser step was executed and verified by the automated pipeline."
+    return "> Steps begin after Jellyfin is healthy. Each step was executed and verified by the automated pipeline."
 
 
 def _reproduction_steps(
@@ -406,6 +452,8 @@ def _evidence(
 def _log_excerpt(execution_result: dict[str, Any]) -> str:
     logs = _jellyfin_logs(execution_result)
     if not logs.strip():
+        if _is_demo_plan(_plan(execution_result)):
+            return "```text\nPublic demo server mode does not collect Jellyfin server logs.\n```"
         return "```text\nNo Jellyfin server logs were captured.\n```"
 
     indicators = _failure_indicators(execution_result)
@@ -726,6 +774,25 @@ def _result_label(value: Any) -> str:
 def _plan(execution_result: Mapping[str, Any]) -> dict[str, Any]:
     plan = execution_result.get("plan")
     return plan if isinstance(plan, dict) else {}
+
+
+def _server_target(plan: Mapping[str, Any]) -> dict[str, Any]:
+    value = plan.get("server_target")
+    return dict(value) if isinstance(value, Mapping) else {"mode": "docker"}
+
+
+def _is_demo_plan(plan: Mapping[str, Any]) -> bool:
+    return str(_server_target(plan).get("mode") or "").lower() == "demo"
+
+
+def _demo_url(plan: Mapping[str, Any]) -> str:
+    server_target = _server_target(plan)
+    if server_target.get("base_url"):
+        return str(server_target["base_url"])
+    release_track = str(server_target.get("release_track") or "stable").lower()
+    if release_track == "unstable":
+        return "https://demo.jellyfin.org/unstable"
+    return "https://demo.jellyfin.org/stable"
 
 
 def _trigger_entry(execution_result: Mapping[str, Any]) -> dict[str, Any] | None:

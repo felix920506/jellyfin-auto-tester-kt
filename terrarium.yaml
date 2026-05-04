@@ -22,6 +22,7 @@ creatures:
     channels:
       listen:
         - "web_client_plan_ready"
+        - "web_client_verification_request"
         - "web_client_task"
       can_send:
         - "execution_done"
@@ -34,6 +35,7 @@ creatures:
         - "execution_done"
       can_send:
         - "verification_request"
+        - "web_client_verification_request"
         - "final_report"
         - "human_review_queue"
 
@@ -41,6 +43,8 @@ channels:
   plan_ready:
     type: "queue"
   web_client_plan_ready:
+    type: "queue"
+  web_client_verification_request:
     type: "queue"
   execution_done:
     type: "queue"
