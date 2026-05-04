@@ -35,6 +35,10 @@ WEB_CLIENT_PLAN_CHANNELS = (
 WEB_CLIENT_TASK_CHANNEL = "web_client_task"
 WEB_CLIENT_DONE_CHANNEL = "web_client_done"
 EXECUTION_DONE_CHANNEL = "execution_done"
+REPORT_VERIFICATION_CHANNELS = (
+    "verification_request",
+    "web_client_verification_request",
+)
 STAGE_CHOICES = ("analysis", "execution", "web-client", "report")
 STAGE_CHANNEL_GRACE_S = 2.0
 ANALYSIS_TRANSCRIPT_FILE = "transcript.json"
@@ -1424,15 +1428,55 @@ def run_report_stage(
     out_dir: str | Path,
     *,
     verification_result_path: str | Path | None = None,
+    timeout_s: float | None = 10 * 60,
+    engine_factory: Callable[[str], Any] | None = None,
 ) -> StageDebugResult:
-    """Run Stage 3's file-based report handoff.
+    """Run the Stage 3 KT peer from an ExecutionResult handoff.
 
-    With only a first-run ``result.json``, this writes a draft ``report.md`` and
-    ``verification_plan.json`` that can be passed to Stage 2. With
-    ``verification_result_path``, this writes the verified/final routing
-    metadata as ``final_report.json`` or ``human_review_queue.json``.
+    By default, the report agent receives the first ExecutionResult through
+    ``execution_done``, requests verification, and the isolated execution agent
+    handles that second Stage 2 run. With ``verification_result_path``, the
+    supplied result is injected only after the report agent emits
+    ``verification_request``.
     """
 
+    return run_sync_away_from_loop(
+        _run_report_stage_sync,
+        input_path,
+        out_dir,
+        verification_result_path=verification_result_path,
+        timeout_s=timeout_s,
+        engine_factory=engine_factory,
+    )
+
+
+def _run_report_stage_sync(
+    input_path: str | Path,
+    out_dir: str | Path,
+    *,
+    verification_result_path: str | Path | None = None,
+    timeout_s: float | None = 10 * 60,
+    engine_factory: Callable[[str], Any] | None = None,
+) -> StageDebugResult:
+    return asyncio.run(
+        _run_report_stage_impl(
+            input_path,
+            out_dir,
+            verification_result_path=verification_result_path,
+            timeout_s=timeout_s,
+            engine_factory=engine_factory,
+        )
+    )
+
+
+async def _run_report_stage_impl(
+    input_path: str | Path,
+    out_dir: str | Path,
+    *,
+    verification_result_path: str | Path | None = None,
+    timeout_s: float | None = 10 * 60,
+    engine_factory: Callable[[str], Any] | None = None,
+) -> StageDebugResult:
     load_env_file()
     logger = _logger()
     logger.info("Starting Stage 3 debug run from %s", input_path)
@@ -1445,63 +1489,263 @@ def run_report_stage(
         else None
     )
 
-    from tools import report_writer
+    if not isinstance(execution_result, dict):
+        raise TypeError("Stage 3 input must be an ExecutionResult JSON object")
+    if verification_result is not None and not isinstance(verification_result, dict):
+        raise TypeError("verification result must be an ExecutionResult JSON object")
 
-    written_steps = _debug_report_steps(execution_result)
-    metadata = report_writer.generate(
-        execution_result,
-        verification_result,
-        artifacts_base=output_dir,
-        written_steps=written_steps,
-    )
-    report_file = _mirror_report(metadata.get("path"), output_dir)
-    metadata["path"] = str(report_file)
-    _write_json_file(output_dir / "report_metadata.json", metadata)
     _write_json_file(output_dir / "execution_result.json", execution_result)
-
+    _ensure_execution_result_artifact_file(execution_result)
     if verification_result is not None:
         _write_json_file(output_dir / "verification_result.json", verification_result)
-        route = "final_report" if metadata.get("verified") is True else "human_review_queue"
-        route_payload = dict(metadata)
-        if route == "human_review_queue":
-            route_payload.setdefault("reason", "verification failed or was inconsistent")
-        route_file = output_dir / f"{route}.json"
-        _write_json_file(route_file, route_payload)
-        logger.info("Stage 3 debug run wrote %s", route_file.name)
-        return _write_stage_result(
-            StageDebugResult(
-                stage="report",
-                status=route,
-                output_dir=str(output_dir),
-                output_file=route_file.name,
-                metadata={"report": "report.md", "verified": metadata.get("verified")},
-            )
-        )
 
-    if execution_result.get("is_verification"):
-        logger.info("Stage 3 debug run wrote report.md")
-        return _write_stage_result(
-            StageDebugResult(
-                stage="report",
-                status="report_written",
-                output_dir=str(output_dir),
-                output_file="report.md",
-                metadata={"report_metadata": "report_metadata.json"},
-            )
-        )
+    engine = await _load_stage_engine(
+        "report",
+        engine_factory=engine_factory,
+        include_verification_agents=verification_result is None,
+    )
+    logger.debug(
+        "Routing Stage 3 execution result through KT report agent run_id=%s "
+        "verification_result=%s",
+        execution_result.get("run_id"),
+        verification_result is not None,
+    )
+    route, route_payload, verification_injected = await _run_report_agent_handoff(
+        engine,
+        execution_result,
+        verification_result,
+        timeout_s=timeout_s,
+    )
 
-    verification_plan = report_writer.build_verification_plan(execution_result, written_steps)
-    _write_json_file(output_dir / "verification_plan.json", verification_plan)
-    logger.info("Stage 3 debug run wrote report.md and verification_plan.json")
+    route_payload = _normalize_route_payload(route_payload)
+    report_file = _mirror_report_from_route(route_payload, output_dir, execution_result)
+    if report_file is not None and isinstance(route_payload, dict):
+        route_payload["path"] = str(report_file)
+        if "report_path" in route_payload:
+            route_payload["report_path"] = str(report_file)
+
+    route_file = output_dir / f"{route}.json"
+    _write_json_file(route_file, route_payload)
+    _write_json_file(output_dir / "result.json", route_payload)
+    _write_json_file(output_dir / "report_metadata.json", route_payload)
+    logger.info("Stage 3 debug run wrote %s", route_file.name)
+
     return _write_stage_result(
         StageDebugResult(
             stage="report",
-            status="verification_ready",
+            status=route,
             output_dir=str(output_dir),
-            output_file="verification_plan.json",
-            metadata={"report": "report.md", "report_metadata": "report_metadata.json"},
+            output_file=route_file.name,
+            metadata={
+                "input": str(result_path),
+                "report": "report.md" if report_file is not None else None,
+                "verified": (
+                    route_payload.get("verified")
+                    if isinstance(route_payload, dict)
+                    else None
+                ),
+                "verification_injected": verification_injected,
+                "verification_result": (
+                    "verification_result.json"
+                    if verification_result is not None
+                    else None
+                ),
+            },
         )
     )
+
+
+async def _run_report_agent_handoff(
+    engine: Any,
+    execution_result: dict[str, Any],
+    verification_result: dict[str, Any] | None,
+    *,
+    timeout_s: float | None,
+) -> tuple[str, Any, bool]:
+    logger = _logger()
+    engine_task = asyncio.create_task(_run_stage_engine(engine))
+    terminal_task: asyncio.Task[tuple[str, Any]] | None = None
+    verification_task: asyncio.Task[tuple[str, Any]] | None = None
+    loop = asyncio.get_running_loop()
+    deadline = None if timeout_s is None else loop.time() + timeout_s
+    verification_injected = False
+    try:
+        await _wait_for_engine_channel(engine, EXECUTION_DONE_CHANNEL, engine_task)
+        for channel in TERMINAL_CHANNELS:
+            await _wait_for_engine_channel(engine, channel, engine_task)
+        if verification_result is not None:
+            verification_task = _create_first_channel_observer_task(
+                engine,
+                REPORT_VERIFICATION_CHANNELS,
+            )
+            if verification_task is None:
+                verification_channels = _available_channels(
+                    engine,
+                    REPORT_VERIFICATION_CHANNELS,
+                )
+                if not verification_channels:
+                    verification_channels = ("verification_request",)
+                verification_task = _create_first_channel_receive_task(
+                    engine,
+                    verification_channels,
+                )
+
+        terminal_task = asyncio.create_task(_wait_for_terminal_message(engine))
+        await _send_channel_message(
+            engine,
+            EXECUTION_DONE_CHANNEL,
+            json.dumps(execution_result, sort_keys=True, default=str),
+            sender="report_stage_debug",
+        )
+        logger.debug("Sent first-run ExecutionResult to report agent")
+
+        while True:
+            tasks: set[asyncio.Task[Any]] = {terminal_task, engine_task}
+            if verification_task is not None and not verification_injected:
+                tasks.add(verification_task)
+            done, _pending = await asyncio.wait(
+                tasks,
+                timeout=_timeout_remaining(deadline),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if terminal_task in done:
+                channel, payload = terminal_task.result()
+                return channel, payload, verification_injected
+
+            if (
+                verification_task is not None
+                and verification_task in done
+                and not verification_injected
+            ):
+                route_channel, request_payload = verification_task.result()
+                logger.debug(
+                    "Observed %s from report agent; injecting supplied "
+                    "verification result run_id=%s",
+                    route_channel,
+                    verification_result.get("run_id"),
+                )
+                if isinstance(request_payload, dict):
+                    _apply_execution_turn_budget_if_available(engine, request_payload)
+                await _send_channel_message(
+                    engine,
+                    EXECUTION_DONE_CHANNEL,
+                    json.dumps(verification_result, sort_keys=True, default=str),
+                    sender="report_stage_debug_verification",
+                )
+                verification_injected = True
+                continue
+
+            if engine_task in done:
+                engine_task.result()
+                try:
+                    channel, payload = await asyncio.wait_for(
+                        terminal_task,
+                        timeout=STAGE_CHANNEL_GRACE_S,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError(
+                        "report stage engine stopped before emitting a terminal "
+                        "report channel"
+                    ) from exc
+                return channel, payload, verification_injected
+
+            timeout_text = (
+                "without a timeout"
+                if timeout_s is None
+                else f"within {timeout_s:g} seconds"
+            )
+            raise PipelineTimeoutError(
+                "timed out waiting for Stage 3 report handoff "
+                f"{timeout_text}"
+            )
+    finally:
+        if verification_task is not None and not verification_task.done():
+            verification_task.cancel()
+            await _cancel_task(verification_task)
+        if terminal_task is not None and not terminal_task.done():
+            terminal_task.cancel()
+            await _cancel_task(terminal_task)
+        await _stop_stage_engine(engine)
+        if not engine_task.done():
+            engine_task.cancel()
+            await _cancel_task(engine_task)
+        elif engine_task.cancelled():
+            pass
+        else:
+            try:
+                engine_task.result()
+            except Exception:
+                if terminal_task is None or not terminal_task.done():
+                    raise
+
+
+def _timeout_remaining(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - asyncio.get_running_loop().time())
+
+
+def _apply_execution_turn_budget_if_available(
+    engine: Any,
+    plan: dict[str, Any],
+) -> None:
+    try:
+        apply_execution_turn_budget(engine, plan)
+    except Exception as exc:
+        _logger().debug("Could not apply verification execution budget: %s", exc)
+
+
+def _available_channels(
+    engine: Any,
+    channel_names: Iterable[str],
+) -> tuple[str, ...]:
+    return tuple(
+        channel_name
+        for channel_name in channel_names
+        if _get_channel(engine, channel_name) is not None
+    )
+
+
+def _ensure_execution_result_artifact_file(execution_result: dict[str, Any]) -> None:
+    artifacts_dir = execution_result.get("artifacts_dir")
+    if not artifacts_dir:
+        return
+    target = Path(str(artifacts_dir)).expanduser() / "result.json"
+    if target.is_file():
+        return
+    try:
+        _write_json_file(target, execution_result)
+    except Exception as exc:
+        _logger().debug("Could not mirror execution result into artifacts: %s", exc)
+
+
+def _normalize_route_payload(payload: Any) -> Any:
+    decoded = _decode_jsonish(payload)
+    if isinstance(decoded, dict):
+        return dict(decoded)
+    return decoded
+
+
+def _mirror_report_from_route(
+    route_payload: Any,
+    output_dir: Path,
+    execution_result: dict[str, Any],
+) -> Path | None:
+    source: Any = None
+    if isinstance(route_payload, dict):
+        source = route_payload.get("path") or route_payload.get("report_path")
+    if not source:
+        artifacts_dir = execution_result.get("artifacts_dir")
+        if artifacts_dir:
+            source = Path(str(artifacts_dir)).expanduser() / "report.md"
+    if not source:
+        return None
+
+    source_path = Path(str(source)).expanduser()
+    if not source_path.is_file():
+        _logger().debug("Report route referenced missing report path: %s", source_path)
+        return None
+    return _mirror_report(source_path, output_dir)
 
 
 async def _load_engine(
@@ -1531,10 +1775,11 @@ async def _load_stage_engine(
     stage: str,
     *,
     engine_factory: Callable[[str], Any] | None,
+    include_verification_agents: bool = True,
 ) -> Any:
     if engine_factory is not None:
         return await _maybe_await(engine_factory(stage))
-    if stage not in {"analysis", "execution", "web-client"}:
+    if stage not in {"analysis", "execution", "web-client", "report"}:
         raise ValueError(f"no isolated Terrarium recipe is defined for stage {stage!r}")
     if stage == "analysis":
         _assert_stage1_model_config_allowed(DEFAULT_ANALYSIS_CONFIG_PATH)
@@ -1599,7 +1844,7 @@ async def _load_stage_engine(
                 ChannelConfig(name=EXECUTION_DONE_CHANNEL, channel_type="queue"),
             ],
         )
-    else:
+    elif stage == "execution":
         recipe = TerrariumConfig(
             name="execution_debug",
             creatures=[
@@ -1620,6 +1865,68 @@ async def _load_stage_engine(
                     for channel in EXECUTION_PLAN_CHANNELS
                 ],
                 ChannelConfig(name=EXECUTION_DONE_CHANNEL, channel_type="queue"),
+            ],
+        )
+    else:
+        creatures = [
+            CreatureConfig(
+                name="report_agent",
+                config_data={
+                    "name": "report_agent",
+                    "base_config": "creatures/report",
+                },
+                base_dir=REPO_ROOT,
+                listen_channels=[EXECUTION_DONE_CHANNEL],
+                send_channels=[
+                    "verification_request",
+                    "web_client_verification_request",
+                    "final_report",
+                    "human_review_queue",
+                ],
+            )
+        ]
+        if include_verification_agents:
+            creatures.extend(
+                [
+                    CreatureConfig(
+                        name="execution_agent",
+                        config_data={
+                            "name": "execution_agent",
+                            "base_config": "creatures/execution",
+                        },
+                        base_dir=REPO_ROOT,
+                        listen_channels=["verification_request"],
+                        send_channels=[EXECUTION_DONE_CHANNEL],
+                    ),
+                    CreatureConfig(
+                        name="web_client_agent",
+                        config_data={
+                            "name": "web_client_agent",
+                            "base_config": "creatures/web_client",
+                        },
+                        base_dir=REPO_ROOT,
+                        listen_channels=[
+                            "web_client_verification_request",
+                            WEB_CLIENT_TASK_CHANNEL,
+                        ],
+                        send_channels=[EXECUTION_DONE_CHANNEL, WEB_CLIENT_DONE_CHANNEL],
+                    ),
+                ]
+            )
+        recipe = TerrariumConfig(
+            name="report_debug",
+            creatures=creatures,
+            channels=[
+                ChannelConfig(name=EXECUTION_DONE_CHANNEL, channel_type="queue"),
+                ChannelConfig(name="verification_request", channel_type="queue"),
+                ChannelConfig(
+                    name="web_client_verification_request",
+                    channel_type="queue",
+                ),
+                ChannelConfig(name=WEB_CLIENT_TASK_CHANNEL, channel_type="queue"),
+                ChannelConfig(name=WEB_CLIENT_DONE_CHANNEL, channel_type="queue"),
+                ChannelConfig(name="final_report", channel_type="broadcast"),
+                ChannelConfig(name="human_review_queue", channel_type="queue"),
             ],
         )
     return await _maybe_await(Terrarium.from_recipe(recipe))
@@ -3408,38 +3715,6 @@ def _write_stage_result(result: StageDebugResult) -> StageDebugResult:
         asdict(result),
     )
     return result
-
-
-def _debug_report_steps(execution_result: dict[str, Any]) -> list[dict[str, Any]]:
-    plan = execution_result.get("plan") if isinstance(execution_result, dict) else {}
-    steps = plan.get("reproduction_steps") if isinstance(plan, dict) else None
-    if not isinstance(steps, list):
-        return []
-
-    trigger_index = next(
-        (
-            index
-            for index, step in enumerate(steps)
-            if isinstance(step, dict) and step.get("role") == "trigger"
-        ),
-        None,
-    )
-    if trigger_index is None:
-        return [dict(step) for step in steps if isinstance(step, dict)]
-
-    selected: list[dict[str, Any]] = []
-    selected.extend(
-        dict(step)
-        for step in steps[:trigger_index]
-        if isinstance(step, dict) and step.get("role") == "setup"
-    )
-    selected.append(dict(steps[trigger_index]))
-    selected.extend(
-        dict(step)
-        for step in steps[trigger_index + 1 :]
-        if isinstance(step, dict) and step.get("role") == "verify"
-    )
-    return selected
 
 
 def _mirror_report(source: Any, output_dir: Path) -> Path:

@@ -391,6 +391,110 @@ class FakeWebClientStageEngine(FakeStage2AgentEngine):
         )
 
 
+class FakeReportStageEngine:
+    def __init__(
+        self,
+        *,
+        auto_execute_verification=True,
+        default_verification_run_id="verify-run",
+    ):
+        self.auto_execute_verification = auto_execute_verification
+        self.default_verification_run_id = default_verification_run_id
+        self.execution_agent = FakeExecutionAgent()
+        self.channels = {
+            "execution_done": FakeAsyncChannel(),
+            "verification_request": FakeAsyncChannel(),
+            "final_report": FakeAsyncChannel(),
+            "human_review_queue": FakeAsyncChannel(),
+        }
+        self.first_execution_result = None
+        self.verification_request = None
+        self.verification_result = None
+        self.verification_result_queued_before_request = False
+        self.run_thread = None
+        self.stopped = False
+
+    def __getitem__(self, name):
+        if name == "execution_agent":
+            return self.execution_agent
+        raise KeyError(name)
+
+    async def run(self):
+        self.run_thread = threading.get_ident()
+        first_message = await self.channels["execution_done"].receive()
+        self.first_execution_result = json.loads(first_message.content)
+        plan = self.first_execution_result["plan"]
+        verification_plan = dict(plan)
+        verification_plan["is_verification"] = True
+        verification_plan["original_run_id"] = self.first_execution_result["run_id"]
+        self.verification_request = verification_plan
+        self.verification_result_queued_before_request = (
+            not self.channels["execution_done"].queue.empty()
+        )
+        await self.channels["verification_request"].send(
+            types.SimpleNamespace(
+                sender="report_agent",
+                content=json.dumps(verification_plan),
+                metadata={},
+                message_id="verification-request",
+                reply_to=None,
+                channel="verification_request",
+            )
+        )
+
+        if self.auto_execute_verification:
+            await self.channels["execution_done"].send(
+                types.SimpleNamespace(
+                    sender="execution_agent",
+                    content=json.dumps(
+                        _sample_execution_result(
+                            verification_plan,
+                            Path(self.first_execution_result["artifacts_dir"]).parent
+                            / self.default_verification_run_id,
+                            run_id=self.default_verification_run_id,
+                        )
+                    ),
+                    metadata={},
+                    message_id="verification-done",
+                    reply_to=None,
+                    channel="execution_done",
+                )
+            )
+
+        verification_message = await self.channels["execution_done"].receive()
+        self.verification_result = json.loads(verification_message.content)
+        verified = (
+            self.verification_result.get("overall_result")
+            == self.first_execution_result.get("overall_result")
+        )
+        route = "final_report" if verified else "human_review_queue"
+        report_path = Path(self.first_execution_result["artifacts_dir"]) / "report.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text("# Report\n", encoding="utf-8")
+        payload = {
+            "path": str(report_path),
+            "verified": verified,
+            "run_id": self.first_execution_result["run_id"],
+            "verification_run_id": self.verification_result.get("run_id"),
+            "overall_result": self.first_execution_result.get("overall_result"),
+        }
+        if not verified:
+            payload["reason"] = "verification failed or was inconsistent"
+        await self.channels[route].send(
+            types.SimpleNamespace(
+                sender="report_agent",
+                content=json.dumps(payload),
+                metadata={},
+                message_id=route,
+                reply_to=None,
+                channel=route,
+            )
+        )
+
+    async def stop(self):
+        self.stopped = True
+
+
 class HangingChannel:
     async def receive(self):
         await asyncio.Event().wait()
@@ -510,6 +614,23 @@ def _sample_plan():
         "ambiguities": [],
         "is_verification": False,
         "original_run_id": None,
+    }
+
+
+def _sample_execution_result(plan, artifacts_dir, *, run_id="run-1"):
+    artifacts_dir = Path(artifacts_dir)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "plan": plan,
+        "run_id": run_id,
+        "is_verification": bool(plan.get("is_verification", False)),
+        "original_run_id": plan.get("original_run_id"),
+        "container_id": "container-1",
+        "execution_log": [_sample_execution_entry(plan)],
+        "overall_result": "reproduced",
+        "artifacts_dir": str(artifacts_dir),
+        "jellyfin_logs": "server log\n",
+        "error_summary": None,
     }
 
 
@@ -1777,41 +1898,100 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(engine.run_thread)
             self.assertNotEqual(engine.run_thread, main_thread)
 
-    def test_run_report_stage_writes_report_and_verification_plan(self):
+    def test_run_report_stage_routes_report_and_verification_through_agents(self):
         plan = _sample_plan()
+        engine = FakeReportStageEngine()
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             execution_dir = temp_path / "execution"
             artifacts_dir = execution_dir / "run-1"
-            artifacts_dir.mkdir(parents=True)
-            execution_result = {
-                "plan": plan,
-                "run_id": "run-1",
-                "is_verification": False,
-                "original_run_id": None,
-                "container_id": "container-1",
-                "execution_log": [_sample_execution_entry(plan)],
-                "overall_result": "reproduced",
-                "artifacts_dir": str(artifacts_dir),
-                "jellyfin_logs": "server log\n",
-                "error_summary": None,
-            }
+            execution_result = _sample_execution_result(plan, artifacts_dir)
             (execution_dir / "result.json").write_text(
                 json.dumps(execution_result),
                 encoding="utf-8",
             )
 
-            result = run_report_stage(execution_dir, temp_path / "report")
+            result = run_report_stage(
+                execution_dir,
+                temp_path / "report",
+                engine_factory=lambda stage: engine,
+            )
 
-            verification_plan = json.loads(
-                (temp_path / "report" / "verification_plan.json").read_text(
-                    encoding="utf-8"
+            route_payload = json.loads(
+                (temp_path / "report" / "final_report.json").read_text(
+                    encoding="utf-8",
                 )
             )
-            self.assertEqual(result.status, "verification_ready")
+            self.assertEqual(result.status, "final_report")
+            self.assertEqual(result.output_file, "final_report.json")
             self.assertTrue((temp_path / "report" / "report.md").is_file())
-            self.assertTrue(verification_plan["is_verification"])
-            self.assertEqual(verification_plan["original_run_id"], "run-1")
+            self.assertTrue((temp_path / "report" / "result.json").is_file())
+            self.assertEqual(
+                json.loads(
+                    (temp_path / "report" / "execution_result.json").read_text(
+                        encoding="utf-8",
+                    )
+                ),
+                execution_result,
+            )
+            self.assertEqual(engine.first_execution_result, execution_result)
+            self.assertTrue(engine.verification_request["is_verification"])
+            self.assertEqual(engine.verification_request["original_run_id"], "run-1")
+            self.assertEqual(engine.verification_result["run_id"], "verify-run")
+            self.assertEqual(
+                route_payload["path"],
+                str((temp_path / "report" / "report.md").resolve()),
+            )
+            self.assertTrue(engine.stopped)
+
+    def test_run_report_stage_injects_supplied_verification_after_request(self):
+        plan = _sample_plan()
+        engine = FakeReportStageEngine(auto_execute_verification=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            execution_dir = temp_path / "execution"
+            artifacts_dir = execution_dir / "run-1"
+            execution_result = _sample_execution_result(plan, artifacts_dir)
+            (execution_dir / "result.json").write_text(
+                json.dumps(execution_result),
+                encoding="utf-8",
+            )
+            verification_plan = dict(plan)
+            verification_plan["is_verification"] = True
+            verification_plan["original_run_id"] = "run-1"
+            verification_result = _sample_execution_result(
+                verification_plan,
+                execution_dir / "verify-supplied",
+                run_id="verify-supplied",
+            )
+            verification_dir = temp_path / "verification"
+            verification_dir.mkdir()
+            (verification_dir / "result.json").write_text(
+                json.dumps(verification_result),
+                encoding="utf-8",
+            )
+
+            result = run_report_stage(
+                execution_dir,
+                temp_path / "report",
+                verification_result_path=verification_dir,
+                engine_factory=lambda stage: engine,
+            )
+
+            self.assertEqual(result.status, "final_report")
+            self.assertTrue(result.metadata["verification_injected"])
+            self.assertFalse(engine.verification_result_queued_before_request)
+            self.assertEqual(engine.verification_result, verification_result)
+            self.assertTrue(engine.verification_request["is_verification"])
+            self.assertEqual(
+                json.loads(
+                    (temp_path / "report" / "verification_result.json").read_text(
+                        encoding="utf-8",
+                    )
+                ),
+                verification_result,
+            )
+            self.assertEqual(engine.verification_result["run_id"], "verify-supplied")
 
     def test_execution_turn_budget_matches_master_plan(self):
         self.assertEqual(execution_turn_budget(0), (60, 70))

@@ -141,15 +141,13 @@ outcomes, or success criteria.
 - **Stage 1 (Analysis)** writes `transcript.json` and `reproduction_plan.json`.
 - **Stage 2 (Execution)** reads `reproduction_plan.json` and writes `execution_result.json`.
 - **Stage 2 (Web Client)** is a peer to Execution for pure Jellyfin Web bugs; it reads `reproduction_plan.json` and writes `execution_result.json`.
-- **Stage 3 (Report)** reads `execution_result.json` and writes `report.md` plus `verification_plan.json`.
+- **Stage 3 (Report)** reads `execution_result.json`, runs the report and verification agents through KT channels, and writes `report.md` plus `final_report.json` or `human_review_queue.json`.
 
-To debug the verification pass, feed that plan back through Stage 2 and then finalize the report:
+For compatibility with an already captured verification run, pass it with
+`--verification-result`; Stage 3 still waits for the report agent to request
+verification before injecting that supplied result:
 
 ```bash
-.venv/bin/python main.py --stage execution \
-  --input debug/stage3/verification_plan.json \
-  --out debug/stage2-verify
-
 .venv/bin/python main.py --stage report \
   --input debug/stage2 \
   --verification-result debug/stage2-verify \
