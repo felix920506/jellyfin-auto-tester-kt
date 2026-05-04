@@ -1,7 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from tools import execution_runner
 from tools.execution_runner import ExecutionRunner
 
 
@@ -161,6 +163,44 @@ class FakeBrowserDriver:
         self.closed = True
 
 
+class FakeModuleExecutionRunner:
+    instances = []
+
+    def __init__(self, artifacts_root=None):
+        self.artifacts_root = artifacts_root
+        self.calls = []
+        FakeModuleExecutionRunner.instances.append(self)
+
+    def execute_plan(self, plan, run_id=None):
+        self.calls.append(("execute_plan", plan, run_id))
+        return {
+            "plan": plan,
+            "run_id": run_id,
+            "overall_result": "reproduced",
+            "artifacts_dir": str(self.artifacts_root),
+        }
+
+    def start_plan(self, plan, run_id=None):
+        self.calls.append(("start_plan", plan, run_id))
+        return {
+            "status": "needs_browser_repair",
+            "run_id": run_id,
+            "step_id": 1,
+        }
+
+    def retry_browser_step(self, step_id, browser_input):
+        self.calls.append(("retry_browser_step", step_id, browser_input))
+        return {"status": "repair_applied", "step_id": step_id}
+
+    def finalize_plan(self):
+        self.calls.append(("finalize_plan",))
+        return {
+            "run_id": "wrapped-run",
+            "overall_result": "reproduced",
+            "execution_log": [],
+        }
+
+
 def base_plan(steps):
     return {
         "issue_url": "https://github.com/jellyfin/jellyfin/issues/1",
@@ -184,6 +224,73 @@ def base_plan(steps):
 
 
 class ExecutionRunnerTests(unittest.TestCase):
+    def test_module_execute_plan_wrapper_uses_artifacts_root(self):
+        plan = base_plan([])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            FakeModuleExecutionRunner.instances = []
+            with patch.object(
+                execution_runner,
+                "ExecutionRunner",
+                FakeModuleExecutionRunner,
+            ):
+                result = execution_runner.execute_plan(
+                    plan,
+                    run_id="wrapped-run",
+                    artifacts_root=temp_dir,
+                )
+
+            runner = FakeModuleExecutionRunner.instances[0]
+            self.assertEqual(runner.artifacts_root, temp_dir)
+            self.assertEqual(runner.calls, [("execute_plan", plan, "wrapped-run")])
+            self.assertEqual(result["run_id"], "wrapped-run")
+
+    def test_module_repair_wrappers_share_runner_instance(self):
+        plan = base_plan([])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            FakeModuleExecutionRunner.instances = []
+            execution_runner._DEFAULT_REPAIR_RUNNER = None
+            try:
+                with patch.object(
+                    execution_runner,
+                    "ExecutionRunner",
+                    FakeModuleExecutionRunner,
+                ):
+                    start = execution_runner.start_plan(
+                        plan,
+                        run_id="repair-run",
+                        artifacts_root=temp_dir,
+                    )
+                    retry = execution_runner.retry_browser_step(
+                        1,
+                        {"actions": [{"type": "refresh"}]},
+                    )
+                    final = execution_runner.finalize_plan()
+            finally:
+                execution_runner._DEFAULT_REPAIR_RUNNER = None
+
+            runner = FakeModuleExecutionRunner.instances[0]
+            self.assertEqual(start["status"], "needs_browser_repair")
+            self.assertEqual(retry["status"], "repair_applied")
+            self.assertEqual(final["overall_result"], "reproduced")
+            self.assertEqual(runner.artifacts_root, temp_dir)
+            self.assertEqual(
+                runner.calls,
+                [
+                    ("start_plan", plan, "repair-run"),
+                    (
+                        "retry_browser_step",
+                        1,
+                        {"actions": [{"type": "refresh"}]},
+                    ),
+                    ("finalize_plan",),
+                ],
+            )
+
+    def test_module_repair_wrappers_require_start_plan(self):
+        execution_runner._DEFAULT_REPAIR_RUNNER = None
+        with self.assertRaisesRegex(RuntimeError, "start_plan"):
+            execution_runner.finalize_plan()
+
     def test_execute_plan_resolves_capture_and_marks_reproduced(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             api = FakeAPI(

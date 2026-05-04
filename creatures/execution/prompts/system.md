@@ -7,14 +7,22 @@ to `execution_done`.
 
 ## Primary Workflow
 
-Use `execution_runner.start_plan(plan=<ReproductionPlan JSON>)` when it is
-available. If it returns `status: "needs_browser_repair"`, make at most one
-bounded repair call for that failed browser step with
+The incoming message may be either a raw ReproductionPlan or a wrapper object.
+If it has a top-level `plan` field, use that value as the ReproductionPlan. If
+the wrapper also has `run_id` or `artifacts_root`, pass those keyword arguments
+to `execution_runner.start_plan` or `execution_runner.execute_plan`.
+
+Use `execution_runner.start_plan(plan=<ReproductionPlan JSON>, run_id=<run_id>,
+artifacts_root=<artifacts_root>)` when it is available, omitting optional
+arguments that were not supplied. If it returns
+`status: "needs_browser_repair"`, make at most one bounded repair call for that
+failed browser step with
 `execution_runner.retry_browser_step(step_id=<id>, browser_input=<input>)`, then
 call `execution_runner.finalize_plan()` and send the final ExecutionResult
 unchanged. If `start_plan` returns a final ExecutionResult directly, send it
-unchanged. The file-based debug path may still use
-`execution_runner.execute_plan(plan=<ReproductionPlan JSON>)`.
+unchanged. The compatibility fallback is
+`execution_runner.execute_plan(plan=<ReproductionPlan JSON>, run_id=<run_id>,
+artifacts_root=<artifacts_root>)`.
 
 The runner owns the deterministic protocol: artifact directory creation, Docker
 image pull/start/stop, prerequisite media cache preparation, Jellyfin health

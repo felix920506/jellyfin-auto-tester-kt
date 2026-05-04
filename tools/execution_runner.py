@@ -921,10 +921,53 @@ class ExecutionRunner:
 def execute_plan(
     plan: dict[str, Any],
     run_id: str | None = None,
+    artifacts_root: str | Path | None = None,
 ) -> dict[str, Any]:
     return run_sync_away_from_loop(
-        lambda: ExecutionRunner().execute_plan(plan=plan, run_id=run_id)
+        lambda: ExecutionRunner(artifacts_root=artifacts_root).execute_plan(
+            plan=plan,
+            run_id=run_id,
+        )
     )
+
+
+def start_plan(
+    plan: dict[str, Any],
+    run_id: str | None = None,
+    artifacts_root: str | Path | None = None,
+) -> dict[str, Any]:
+    global _DEFAULT_REPAIR_RUNNER
+    _DEFAULT_REPAIR_RUNNER = ExecutionRunner(artifacts_root=artifacts_root)
+    return run_sync_away_from_loop(
+        lambda: _DEFAULT_REPAIR_RUNNER.start_plan(plan=plan, run_id=run_id)
+    )
+
+
+def retry_browser_step(
+    step_id: int | str,
+    browser_input: dict[str, Any],
+) -> dict[str, Any]:
+    runner = _repair_runner()
+    return run_sync_away_from_loop(
+        lambda: runner.retry_browser_step(
+            step_id=step_id,
+            browser_input=browser_input,
+        )
+    )
+
+
+def finalize_plan() -> dict[str, Any]:
+    runner = _repair_runner()
+    return run_sync_away_from_loop(lambda: runner.finalize_plan())
+
+
+def _repair_runner() -> ExecutionRunner:
+    if _DEFAULT_REPAIR_RUNNER is None:
+        raise RuntimeError("no active execution_runner.start_plan call")
+    return _DEFAULT_REPAIR_RUNNER
+
+
+_DEFAULT_REPAIR_RUNNER: ExecutionRunner | None = None
 
 
 def _command_from_source(source: str) -> str | None:

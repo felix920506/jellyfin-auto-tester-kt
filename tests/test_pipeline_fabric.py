@@ -18,6 +18,7 @@ from main import (
     AnalysisAgentProtocolError,
     BlockedStage1ModelError,
     LOGGER_NAME,
+    PipelineTimeoutError,
     _build_parser,
     _build_stage_parser,
     _assert_stage1_model_allowed_for_recipe,
@@ -297,26 +298,45 @@ class FakeAsyncChannel:
         self.callbacks.remove(callback)
 
 
-class FakeWebClientStageEngine:
-    def __init__(self):
+class FakeStage2AgentEngine:
+    def __init__(
+        self,
+        plan_channels=("plan_ready", "verification_request"),
+        *,
+        agent_sender="execution_agent",
+        default_run_id="agent-run",
+        fail_immediately=False,
+        hang=False,
+    ):
+        self.plan_channels = tuple(plan_channels)
+        self.agent_sender = agent_sender
+        self.default_run_id = default_run_id
+        self.fail_immediately = fail_immediately
+        self.hang = hang
+        self.execution_agent = FakeExecutionAgent()
         self.channels = {
-            "web_client_plan_ready": FakeAsyncChannel(),
-            "web_client_verification_request": FakeAsyncChannel(),
-            "execution_done": FakeAsyncChannel(),
+            channel: FakeAsyncChannel()
+            for channel in (*self.plan_channels, "execution_done")
         }
         self.received_channel = None
         self.received_payload = None
         self.run_thread = None
         self.stopped = False
 
+    def __getitem__(self, name):
+        if name == "execution_agent":
+            return self.execution_agent
+        raise KeyError(name)
+
     async def run(self):
         self.run_thread = threading.get_ident()
+        if self.fail_immediately:
+            raise RuntimeError("stage engine failed")
+        if self.hang:
+            await asyncio.Event().wait()
         pending = {
             asyncio.create_task(self.channels[channel].receive()): channel
-            for channel in (
-                "web_client_plan_ready",
-                "web_client_verification_request",
-            )
+            for channel in self.plan_channels
         }
         done, pending_tasks = await asyncio.wait(
             set(pending),
@@ -329,7 +349,8 @@ class FakeWebClientStageEngine:
         message = message_task.result()
         self.received_payload = json.loads(message.content)
         plan = self.received_payload.get("plan", self.received_payload)
-        run_id = self.received_payload.get("run_id") or "web-agent-run"
+        run_id = self.received_payload.get("run_id") or self.default_run_id
+        artifacts_root = self.received_payload.get("artifacts_root")
         result = {
             "plan": plan,
             "run_id": run_id,
@@ -338,13 +359,17 @@ class FakeWebClientStageEngine:
             "container_id": None,
             "execution_log": [_sample_execution_entry(plan)],
             "overall_result": "reproduced",
-            "artifacts_dir": "agent-artifacts",
+            "artifacts_dir": (
+                str(Path(artifacts_root) / run_id)
+                if artifacts_root
+                else "agent-artifacts"
+            ),
             "jellyfin_logs": "",
             "error_summary": None,
         }
         await self.channels["execution_done"].send(
             types.SimpleNamespace(
-                sender="web_client_agent",
+                sender=self.agent_sender,
                 content=json.dumps(result),
                 metadata={},
                 message_id="execution-done",
@@ -355,6 +380,15 @@ class FakeWebClientStageEngine:
 
     async def stop(self):
         self.stopped = True
+
+
+class FakeWebClientStageEngine(FakeStage2AgentEngine):
+    def __init__(self):
+        super().__init__(
+            ("web_client_plan_ready", "web_client_verification_request"),
+            agent_sender="web_client_agent",
+            default_run_id="web-agent-run",
+        )
 
 
 class HangingChannel:
@@ -1527,6 +1561,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
     def test_run_execution_stage_reads_plan_and_writes_result_handoff(self):
         plan = _sample_plan()
+        engine = FakeStage2AgentEngine()
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
@@ -1537,15 +1572,86 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 input_dir,
                 temp_path / "execution",
                 run_id="run-1",
-                runner_factory=lambda artifacts_root: FakeStage2Runner(artifacts_root),
+                engine_factory=lambda stage: engine,
             )
 
+            execution_result_path = temp_path / "execution" / "execution_result.json"
             result_path = temp_path / "execution" / "result.json"
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            stage_result_path = temp_path / "execution" / "stage_result.json"
+            payload = json.loads(execution_result_path.read_text(encoding="utf-8"))
             self.assertEqual(result.status, "reproduced")
-            self.assertEqual(result.output_file, "result.json")
+            self.assertEqual(result.output_file, "execution_result.json")
             self.assertEqual(payload["run_id"], "run-1")
             self.assertEqual(payload["plan"], plan)
+            self.assertEqual(
+                json.loads(result_path.read_text(encoding="utf-8")),
+                payload,
+            )
+            self.assertTrue(stage_result_path.is_file())
+            self.assertEqual(engine.received_channel, "plan_ready")
+            self.assertEqual(engine.received_payload["run_id"], "run-1")
+            self.assertEqual(engine.received_payload["plan"], plan)
+            self.assertEqual(
+                engine.received_payload["artifacts_root"],
+                str((temp_path / "execution").resolve()),
+            )
+            self.assertTrue(engine.stopped)
+
+    def test_run_execution_stage_routes_verification_request_channel(self):
+        plan = _sample_plan()
+        plan["is_verification"] = True
+        engine = FakeStage2AgentEngine()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            result = run_execution_stage(
+                input_dir,
+                temp_path / "execution",
+                engine_factory=lambda stage: engine,
+            )
+
+            self.assertEqual(result.status, "reproduced")
+            self.assertEqual(engine.received_channel, "verification_request")
+
+    def test_run_execution_stage_stops_engine_after_timeout(self):
+        plan = _sample_plan()
+        engine = FakeStage2AgentEngine(hang=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            with self.assertRaises(PipelineTimeoutError):
+                run_execution_stage(
+                    input_dir,
+                    temp_path / "execution",
+                    timeout_s=0.01,
+                    engine_factory=lambda stage: engine,
+                )
+
+            self.assertTrue(engine.stopped)
+
+    def test_run_execution_stage_stops_engine_after_error(self):
+        plan = _sample_plan()
+        engine = FakeStage2AgentEngine(fail_immediately=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "stage engine failed"):
+                run_execution_stage(
+                    input_dir,
+                    temp_path / "execution",
+                    engine_factory=lambda stage: engine,
+                )
+
+            self.assertTrue(engine.stopped)
 
     def test_run_web_client_stage_reads_plan_and_writes_execution_result(self):
         plan = _sample_web_client_plan()
@@ -1646,6 +1752,31 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(engine.run_thread)
             self.assertNotEqual(engine.run_thread, main_thread)
 
+    def test_execution_stage_offloads_agent_engine_inside_active_event_loop(self):
+        plan = _sample_plan()
+        main_thread = threading.get_ident()
+        engine = FakeStage2AgentEngine()
+
+        async def call_stage(input_dir, output_dir):
+            return run_execution_stage(
+                input_dir,
+                output_dir,
+                run_id="standard-run-threaded",
+                engine_factory=lambda stage: engine,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "analysis"
+            input_dir.mkdir()
+            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+            result = asyncio.run(call_stage(input_dir, temp_path / "execution"))
+
+            self.assertEqual(result.status, "reproduced")
+            self.assertIsNotNone(engine.run_thread)
+            self.assertNotEqual(engine.run_thread, main_thread)
+
     def test_run_report_stage_writes_report_and_verification_plan(self):
         plan = _sample_plan()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1738,6 +1869,21 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(stage_args.log_level, "WARNING")
         self.assertEqual(stage_args.log_stderr, "on")
+
+        execution_stage_args = _build_stage_parser("execution").parse_args(
+            [
+                "--stage",
+                "execution",
+                "--input",
+                "debug/stage1",
+                "--out",
+                "debug/stage2",
+                "--timeout-s",
+                "3.5",
+            ]
+        )
+
+        self.assertEqual(execution_stage_args.timeout_s, 3.5)
 
     def test_logging_defaults_read_environment(self):
         with patch.dict(
