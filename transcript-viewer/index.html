@@ -235,33 +235,45 @@
         let transcripts = [];
 
         async function handleFiles(files) {
-            for (const file of files) {
+            const selectedFiles = Array.from(files);
+            const filesByPath = new Map(
+                selectedFiles.map(file => [file.webkitRelativePath || file.name, file])
+            );
+            const hasTranscript = selectedFiles.some(file => file.name === 'transcript.json');
+
+            for (const file of selectedFiles) {
                 if (file.name === 'transcript.json') {
                     try {
                         const text = await file.text();
                         const json = JSON.parse(text);
+                        const path = file.webkitRelativePath || file.name;
+                        const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+                        const metadataFile = filesByPath.get(`${dir}transcript_metadata.json`);
+                        const metadata = metadataFile ? await readJsonFile(metadataFile) : {};
                         // Extract parent directory name as ID
-                        const pathParts = file.webkitRelativePath.split('/');
+                        const pathParts = path.split('/');
                         const runId = pathParts.length >= 2 ? pathParts[pathParts.length - 2] : file.name;
                         
                         transcripts.push({
                             name: runId,
-                            path: file.webkitRelativePath || file.name,
-                            data: json
+                            path,
+                            data: json,
+                            metadata
                         });
                     } catch (err) {
                         console.error('Error parsing file:', file.name, err);
                     }
-                } else if (file.name.endsWith('.json') && !files.some(f => f.name === 'transcript.json')) {
+                } else if (file.name.endsWith('.json') && !hasTranscript) {
                     // Also allow direct json selection
                      try {
                         const text = await file.text();
                         const json = JSON.parse(text);
-                        if (json.messages || json.issue_url) {
+                        if (json.messages) {
                             transcripts.push({
                                 name: file.name,
                                 path: file.name,
-                                data: json
+                                data: json,
+                                metadata: {}
                             });
                         }
                     } catch (err) {}
@@ -270,6 +282,15 @@
             // Sort by name
             transcripts.sort((a, b) => a.name.localeCompare(b.name));
             renderFileList();
+        }
+
+        async function readJsonFile(file) {
+            try {
+                return JSON.parse(await file.text());
+            } catch (err) {
+                console.error('Error parsing metadata file:', file.name, err);
+                return {};
+            }
         }
 
         fileInput.addEventListener('change', (e) => handleFiles(Array.from(e.target.files)));
@@ -282,7 +303,7 @@
                 item.className = 'sidebar-item';
                 item.innerHTML = `
                     <span class="filename">${t.name}</span>
-                    <span class="meta">${t.data.container_version || 'No version'}</span>
+                    <span class="meta">${t.metadata.container_version || t.metadata.status || 'No version'}</span>
                 `;
                 item.onclick = () => selectTranscript(index);
                 fileList.appendChild(item);
@@ -295,6 +316,7 @@
             items[index].classList.add('active');
 
             const t = transcripts[index].data;
+            const metadata = transcripts[index].metadata || {};
             mainView.innerHTML = '';
 
             // Meta Info
@@ -304,9 +326,11 @@
                 <h2>Transcript: ${transcripts[index].name}</h2>
                 <div class="meta-grid">
                     <div class="meta-label">Issue URL:</div>
-                    <div class="meta-value"><a href="${t.issue_url}" target="_blank">${t.issue_url}</a></div>
+                    <div class="meta-value">${metadata.issue_url ? `<a href="${metadata.issue_url}" target="_blank">${metadata.issue_url}</a>` : 'N/A'}</div>
                     <div class="meta-label">Container Version:</div>
-                    <div class="meta-value">${t.container_version || 'N/A'}</div>
+                    <div class="meta-value">${metadata.container_version || 'N/A'}</div>
+                    <div class="meta-label">Status:</div>
+                    <div class="meta-value">${metadata.status || 'N/A'}</div>
                 </div>
             `;
             mainView.appendChild(meta);

@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from main import (
     ANALYSIS_TRANSCRIPT_FILE,
+    TRANSCRIPT_METADATA_FILE,
     INSUFFICIENT_INFORMATION_SUMMARY_FILE,
     AnalysisAgentEmptyResponseError,
     AnalysisAgentProtocolError,
@@ -1087,6 +1088,19 @@ def _read_stage_transcript(path):
     )
 
 
+def _read_stage_transcript_metadata(path):
+    return json.loads(
+        (Path(path) / TRANSCRIPT_METADATA_FILE).read_text(encoding="utf-8")
+    )
+
+
+def _assistant_text(transcript):
+    for message in reversed(transcript["messages"]):
+        if message["role"] == "assistant" and message["content"]:
+            return message["content"]
+    return ""
+
+
 def _sample_execution_entry(plan):
     step = plan["reproduction_steps"][0]
     return {
@@ -1586,18 +1600,26 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             input_payload = json.loads((Path(temp_dir) / "input.json").read_text())
             self.assertEqual(input_payload["prefetched_issue_thread"]["title"], "Debug issue")
             transcript_payload = _read_stage_transcript(temp_dir)
-            self.assertEqual(transcript_payload["schema_version"], 1)
-            self.assertEqual(transcript_payload["stage"], "analysis")
+            transcript_metadata = _read_stage_transcript_metadata(temp_dir)
+            self.assertEqual(set(transcript_payload), {"messages"})
+            self.assertNotIn("schema_version", transcript_payload)
+            self.assertNotIn("input", transcript_payload)
+            self.assertNotIn("output", transcript_payload)
+            self.assertNotIn("provider_requests", transcript_payload)
+            self.assertNotIn("events", transcript_payload)
+            self.assertEqual(transcript_metadata["schema_version"], 1)
+            self.assertEqual(transcript_metadata["stage"], "analysis")
             self.assertIn(
                 "Issue: https://github.com/jellyfin/jellyfin/issues/1",
-                transcript_payload["input"]["prompt"],
+                transcript_payload["messages"][0]["content"],
             )
-            self.assertIn("system_prompt", transcript_payload["input"])
+            self.assertNotIn("prompt", transcript_metadata["input"])
+            self.assertNotIn("system_prompt", transcript_metadata["input"])
             self.assertEqual(transcript_payload["messages"][0]["role"], "user")
             self.assertEqual(transcript_payload["messages"][1]["role"], "assistant")
-            self.assertIn("analysis started", transcript_payload["output"]["assistant"])
+            self.assertIn("analysis started", _assistant_text(transcript_payload))
             self.assertEqual(
-                transcript_payload["input"]["prefetched_issue_thread"]["title"],
+                transcript_metadata["input"]["prefetched_issue_thread"]["title"],
                 "Debug issue",
             )
             self.assertEqual(stream.getvalue(), "")
@@ -1644,6 +1666,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             INSUFFICIENT_INFORMATION_SUMMARY_FILE,
         )
         self.assertEqual(stage_result["metadata"]["transcript"], "transcript.json")
+        self.assertEqual(
+            stage_result["metadata"]["transcript_metadata"],
+            "transcript_metadata.json",
+        )
         self.assertNotIn("tool docs", stage_result["metadata"]["message"])
 
     async def test_run_analysis_stage_flushes_transcript_while_streaming(self):
@@ -1666,8 +1692,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             transcript_payload = _read_stage_transcript(temp_dir)
+            transcript_metadata = _read_stage_transcript_metadata(temp_dir)
 
-        self.assertEqual(transcript_payload["status"], "running")
+        self.assertEqual(set(transcript_payload), {"messages"})
+        self.assertEqual(transcript_metadata["status"], "running")
         self.assertEqual(transcript_payload["messages"][0]["role"], "user")
         self.assertIn(
             "Issue: https://github.com/jellyfin/jellyfin/issues/1",
@@ -1679,8 +1707,12 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             "partial response\n",
         )
         self.assertEqual(
-            transcript_payload["output"]["assistant"],
+            _assistant_text(transcript_payload),
             "partial response\n",
+        )
+        self.assertEqual(
+            transcript_metadata["output"]["assistant_length"],
+            len("partial response\n"),
         )
 
     async def test_run_analysis_stage_transcript_uses_provider_messages(self):
@@ -1707,6 +1739,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
 
             transcript_payload = _read_stage_transcript(temp_dir)
+            transcript_metadata = _read_stage_transcript_metadata(temp_dir)
 
         self.assertEqual(result.status, "plan_ready")
         self.assertEqual(len(analysis_agent.agent.llm.calls), 2)
@@ -1719,11 +1752,18 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             "[Tool completed]",
             transcript_payload["messages"][2]["content"],
         )
-        self.assertEqual(len(transcript_payload["provider_requests"]), 2)
+        self.assertTrue(
+            all(
+                set(message).issubset({"role", "content", "name"})
+                for message in transcript_payload["messages"]
+            )
+        )
+        self.assertEqual(len(transcript_metadata["provider_requests"]), 2)
         self.assertEqual(
-            transcript_payload["provider_requests"][1]["message_count"],
+            transcript_metadata["provider_requests"][1]["message_count"],
             3,
         )
+        self.assertNotIn("messages", transcript_metadata["provider_requests"][1])
 
     async def test_run_analysis_stage_rejects_json_plan_handoff(self):
         plan = _sample_provider_plan_without_target_version()
@@ -1775,13 +1815,14 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, "plan_ready")
         self.assertEqual(result.metadata["source"], "channel")
+        self.assertEqual(result.metadata["transcript_metadata"], TRANSCRIPT_METADATA_FILE)
         _assert_handoff_metadata(self, written_plan, plan)
         self.assertEqual(len(analysis_agent.prompts), 2)
         self.assertIn("REJECTED", analysis_agent.prompts[1])
         self.assertIn("attempt 2 of 3", analysis_agent.prompts[1])
         self.assertIn(
             "has been sent to `plan_ready`",
-            transcript_payload["output"]["assistant"],
+            _assistant_text(transcript_payload),
         )
         self.assertTrue(analysis_agent.cancelled)
 
@@ -1814,7 +1855,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             transcript_payload = _read_stage_transcript(temp_dir)
-            self.assertIn("analysis started", transcript_payload["output"]["assistant"])
+            self.assertIn("analysis started", _assistant_text(transcript_payload))
             self.assertEqual(len(engine.analysis_agent.prompts), 3)
             self.assertIn("attempt 2 of 3", engine.analysis_agent.prompts[1])
             self.assertIn("attempt 3 of 3", engine.analysis_agent.prompts[2])
@@ -1853,12 +1894,12 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
             written_transcript = _read_stage_transcript(temp_dir)
 
-            self.assertIn("jellyfin_version", written_transcript["output"]["assistant"])
+            self.assertIn("jellyfin_version", _assistant_text(written_transcript))
             self.assertEqual(written_transcript["messages"][0]["role"], "user")
             self.assertEqual(written_transcript["messages"][1]["role"], "assistant")
             self.assertEqual(
                 written_transcript["messages"][1]["content"],
-                written_transcript["output"]["assistant"],
+                _assistant_text(written_transcript),
             )
             self.assertFalse((Path(temp_dir) / "plan.md").exists())
 
@@ -1894,10 +1935,11 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             written_transcript = _read_stage_transcript(temp_dir)
+            written_metadata = _read_stage_transcript_metadata(temp_dir)
 
             self.assertEqual(stream.getvalue(), "")
-            self.assertIn("jellyfin_version", written_transcript["output"]["assistant"])
-            self.assertEqual(written_transcript["output"]["sources"][0]["source"], "conversation")
+            self.assertIn("jellyfin_version", _assistant_text(written_transcript))
+            self.assertEqual(written_metadata["output"]["sources"][0]["source"], "conversation")
             self.assertFalse((Path(temp_dir) / "plan.md").exists())
 
     async def test_run_analysis_stage_rejects_printed_send_message_without_delivery(self):
@@ -1937,7 +1979,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             transcript_payload = _read_stage_transcript(temp_dir)
-            self.assertIn("@@channel=plan_ready", transcript_payload["output"]["assistant"])
+            self.assertIn("@@channel=plan_ready", _assistant_text(transcript_payload))
             self.assertFalse((Path(temp_dir) / "plan.md").exists())
 
     async def test_run_analysis_stage_raises_when_plan_ready_is_missing(self):
@@ -1961,7 +2003,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             transcript_payload = _read_stage_transcript(temp_dir)
-            self.assertIn("analysis started", transcript_payload["output"]["assistant"])
+            self.assertIn("analysis started", _assistant_text(transcript_payload))
             self.assertFalse((Path(temp_dir) / "plan.md").exists())
             self.assertFalse((Path(temp_dir) / "stage_result.json").exists())
 
@@ -1986,7 +2028,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             transcript_payload = _read_stage_transcript(temp_dir)
-            self.assertEqual(transcript_payload["output"]["assistant"], "")
+            self.assertEqual(_assistant_text(transcript_payload), "")
             self.assertEqual(len(engine.analysis_agent.prompts), 3)
             self.assertIn("attempt 2 of 3", engine.analysis_agent.prompts[1])
             self.assertIn("attempt 3 of 3", engine.analysis_agent.prompts[2])
@@ -2183,6 +2225,9 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
 
             transcript_payload = _read_stage_transcript(temp_path / "web-client")
+            transcript_metadata = _read_stage_transcript_metadata(
+                temp_path / "web-client"
+            )
             stage_result = json.loads(
                 (temp_path / "web-client" / "stage_result.json").read_text(
                     encoding="utf-8"
@@ -2190,18 +2235,16 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result.status, "reproduced")
-        self.assertEqual(transcript_payload["schema_version"], 1)
-        self.assertEqual(transcript_payload["stage"], "web-client")
-        self.assertEqual(transcript_payload["status"], "execution_done")
-        self.assertEqual(transcript_payload["input"]["channel"], "web_client_plan_ready")
-        _assert_handoff_metadata(
-            self,
-            parse_reproduction_plan_markdown(transcript_payload["input"]["plan_markdown"]),
-            plan,
-        )
+        self.assertEqual(set(transcript_payload), {"messages"})
+        self.assertEqual(transcript_metadata["schema_version"], 1)
+        self.assertEqual(transcript_metadata["stage"], "web-client")
+        self.assertEqual(transcript_metadata["status"], "execution_done")
+        self.assertEqual(transcript_metadata["input"]["channel"], "web_client_plan_ready")
+        self.assertNotIn("plan_markdown", transcript_metadata["input"])
+        self.assertIn("plan_markdown_path", transcript_metadata["input"])
         self.assertIn(
             "Channel: web_client_plan_ready",
-            transcript_payload["input"]["prompt"],
+            transcript_payload["messages"][0]["content"],
         )
         self.assertEqual(
             [message["role"] for message in transcript_payload["messages"]],
@@ -2221,12 +2264,17 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "WEB_CLIENT_COMPLETE",
-            transcript_payload["output"]["assistant"],
+            _assistant_text(transcript_payload),
         )
-        self.assertEqual(len(transcript_payload["provider_requests"]), 1)
+        self.assertEqual(len(transcript_metadata["provider_requests"]), 1)
+        self.assertNotIn("messages", transcript_metadata["provider_requests"][0])
         self.assertEqual(
             stage_result["metadata"]["transcript"],
             ANALYSIS_TRANSCRIPT_FILE,
+        )
+        self.assertEqual(
+            stage_result["metadata"]["transcript_metadata"],
+            TRANSCRIPT_METADATA_FILE,
         )
 
     def test_run_web_client_stage_flushes_transcript_while_provider_runs(self):
@@ -2251,8 +2299,11 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             transcript_payload = _read_stage_transcript(temp_path / "web-client")
+            transcript_metadata = _read_stage_transcript_metadata(
+                temp_path / "web-client"
+            )
 
-        self.assertEqual(transcript_payload["status"], "running")
+        self.assertEqual(transcript_metadata["status"], "running")
         self.assertEqual(
             [message["role"] for message in transcript_payload["messages"]],
             ["user", "assistant"],
@@ -2262,10 +2313,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             "partial web-client response\n",
         )
         self.assertEqual(
-            transcript_payload["output"]["assistant"],
+            _assistant_text(transcript_payload),
             "partial web-client response\n",
         )
-        self.assertEqual(len(transcript_payload["provider_requests"]), 1)
+        self.assertEqual(len(transcript_metadata["provider_requests"]), 1)
 
     def test_run_web_client_stage_supports_started_terrarium_engine_lifecycle(self):
         plan = _sample_web_client_plan()

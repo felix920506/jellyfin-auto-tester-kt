@@ -47,6 +47,7 @@ REPORT_VERIFICATION_CHANNELS = (
 STAGE_CHOICES = ("analysis", "execution", "web-client", "report")
 STAGE_CHANNEL_GRACE_S = 2.0
 ANALYSIS_TRANSCRIPT_FILE = "transcript.json"
+TRANSCRIPT_METADATA_FILE = "transcript_metadata.json"
 INSUFFICIENT_INFORMATION_SUMMARY_FILE = "insufficient_information.md"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR")
 LOG_STDERR_CHOICES = ("auto", "on", "off")
@@ -224,7 +225,7 @@ class _TranscriptOutput:
 
 
 class _AnalysisTranscriptWriter:
-    """Keep a stage transcript.json valid while provider traffic is in flight."""
+    """Keep stage transcript files valid while provider traffic is in flight."""
 
     def __init__(
         self,
@@ -239,6 +240,7 @@ class _AnalysisTranscriptWriter:
         input_metadata: dict[str, Any] | None = None,
     ) -> None:
         self.path = Path(path).expanduser()
+        self.metadata_path = self.path.with_name(TRANSCRIPT_METADATA_FILE)
         self.stage = stage
         self.issue_url = issue_url
         self.container_version = container_version
@@ -370,26 +372,30 @@ class _AnalysisTranscriptWriter:
         status: str,
     ) -> None:
         assistant = self.assistant_text if assistant_output is None else assistant_output
+        messages = self._messages_for_output(assistant)
+        output_sources = (
+            output_sources
+            if output_sources is not None
+            else _transcript_sources(("incremental", self.assistant_text))
+        )
         _write_json_file(
             self.path,
-            _analysis_transcript_payload(
+            _transcript_payload(messages),
+        )
+        _write_json_file(
+            self.metadata_path,
+            _analysis_transcript_metadata_payload(
                 stage=self.stage,
                 issue_url=self.issue_url,
                 container_version=self.container_version,
-                prompt=self.prompt,
                 issue_thread=self.issue_thread,
-                system_prompt=self.system_prompt,
                 input_metadata=self.input_metadata,
                 assistant_output=assistant,
-                output_sources=(
-                    output_sources
-                    if output_sources is not None
-                    else _transcript_sources(("incremental", self.assistant_text))
-                ),
-                messages=self._messages_for_output(assistant),
+                output_sources=output_sources,
                 status=status,
                 provider_requests=self._provider_requests,
                 events=self._events,
+                transcript_file=self.path.name,
             ),
         )
 
@@ -787,7 +793,8 @@ async def run_analysis_stage(
 
     Output files:
     - ``input.json``: issue URL and target version used for the run.
-    - ``transcript.json``: machine-readable prompt and assistant response.
+    - ``transcript.json``: machine-readable model messages only.
+    - ``transcript_metadata.json``: debug run metadata for the transcript.
     - ``plan.md``: ReproductionPlan Markdown payload for Stage 2 when available.
     - ``insufficient_information.md``: readable early-stop summary when no
       executable plan can be produced.
@@ -938,6 +945,7 @@ async def run_analysis_stage(
                                 "message": summary_text,
                                 "summary": summary_file.name,
                                 "transcript": ANALYSIS_TRANSCRIPT_FILE,
+                                "transcript_metadata": TRANSCRIPT_METADATA_FILE,
                             },
                         )
                     )
@@ -1026,6 +1034,7 @@ async def run_analysis_stage(
                 output_file="plan.md",
                 metadata={
                     "transcript": ANALYSIS_TRANSCRIPT_FILE,
+                    "transcript_metadata": TRANSCRIPT_METADATA_FILE,
                     "source": plan_source,
                     "channel": plan_channel or "plan_ready",
                 },
@@ -1320,6 +1329,7 @@ async def _run_web_client_stage_impl(
                 "run_id": result.get("run_id"),
                 "artifacts_dir": result.get("artifacts_dir"),
                 "transcript": ANALYSIS_TRANSCRIPT_FILE,
+                "transcript_metadata": TRANSCRIPT_METADATA_FILE,
             },
         )
     )
@@ -3478,73 +3488,108 @@ def _merge_transcript_sources(*sources: str) -> str:
     return "".join(merged)
 
 
-def _analysis_transcript_payload(
+def _transcript_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "messages": [
+            message
+            for message in (
+                _transcript_message_payload(message) for message in messages
+            )
+            if message is not None
+        ],
+    }
+
+
+def _transcript_message_payload(message: Mapping[str, Any]) -> dict[str, Any] | None:
+    role = message.get("role")
+    if not role:
+        return None
+    payload: dict[str, Any] = {
+        "role": str(role),
+        "content": _message_content_text(message.get("content", "")),
+    }
+    name = message.get("name")
+    if name:
+        payload["name"] = str(name)
+    return payload
+
+
+def _analysis_transcript_metadata_payload(
     *,
     issue_url: str | None,
     container_version: str | None,
-    prompt: str,
     issue_thread: dict[str, Any] | None,
-    system_prompt: str | None,
     assistant_output: str,
     output_sources: list[dict[str, str]],
     stage: str = "analysis",
     input_metadata: dict[str, Any] | None = None,
-    messages: list[dict[str, Any]] | None = None,
     status: str | None = None,
     provider_requests: list[dict[str, Any]] | None = None,
     events: list[dict[str, Any]] | None = None,
+    transcript_file: str = ANALYSIS_TRANSCRIPT_FILE,
 ) -> dict[str, Any]:
-    payload_messages = messages
-    if payload_messages is None:
-        payload_messages = []
-        if system_prompt:
-            payload_messages.append(
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                }
-            )
-        payload_messages.extend(
-            [
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-                {
-                    "role": "assistant",
-                    "content": assistant_output,
-                },
-            ]
-        )
     input_payload: dict[str, Any] = {
-        "system_prompt": system_prompt,
-        "prompt": prompt,
         "issue_url": issue_url,
         "container_version": container_version,
         "prefetched_issue_thread": issue_thread,
     }
     if input_metadata:
-        input_payload.update(_json_safe_value(input_metadata))
+        input_payload.update(_transcript_metadata_input(_json_safe_value(input_metadata)))
 
     payload = {
         "stage": stage,
         "schema_version": 1,
+        "transcript_file": transcript_file,
+        "metadata_file": TRANSCRIPT_METADATA_FILE,
         "issue_url": issue_url,
         "container_version": container_version,
         "input": input_payload,
         "output": {
-            "assistant": assistant_output,
-            "sources": output_sources,
+            "assistant_length": len(assistant_output),
+            "sources": _transcript_output_source_metadata(output_sources),
         },
-        "messages": payload_messages,
     }
     if status is not None:
         payload["status"] = status
     if provider_requests is not None:
-        payload["provider_requests"] = provider_requests
+        payload["provider_requests"] = _transcript_provider_request_metadata(
+            provider_requests
+        )
     if events is not None:
         payload["events"] = events
     return payload
+
+
+def _transcript_metadata_input(input_metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in input_metadata.items()
+        if key not in {"prompt", "system_prompt", "plan_markdown"}
+    }
+
+
+def _transcript_output_source_metadata(
+    output_sources: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "source": str(source.get("source", "")),
+            "content_length": len(source.get("content", "")),
+        }
+        for source in output_sources
+    ]
+
+
+def _transcript_provider_request_metadata(
+    provider_requests: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "request_index": request.get("request_index"),
+            "message_count": request.get("message_count"),
+        }
+        for request in provider_requests
+    ]
 
 
 async def _collect_analysis_chat(

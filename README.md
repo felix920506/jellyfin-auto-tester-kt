@@ -52,6 +52,9 @@ The repository includes a standalone web application to view execution transcrip
 2. Click **"Select Debug Folder"** and choose the `debug/` directory.
 3. Select a transcript from the sidebar to view the conversation and tool calls.
 
+Debug runs write model traffic to `transcript.json` and the surrounding run
+details to `transcript_metadata.json`.
+
 ## Running Tests
 
 Tests use the standard library `unittest` framework:
@@ -138,9 +141,9 @@ outcomes, or success criteria.
   --out debug/stage3
 ```
 
-- **Stage 1 (Analysis)** writes `transcript.json` and `plan.md`.
+- **Stage 1 (Analysis)** writes `transcript.json`, `transcript_metadata.json`, and `plan.md`.
 - **Stage 2 (Execution)** reads `plan.md` and writes `execution_result.json`.
-- **Stage 2 (Web Client)** is a peer to Execution for pure Jellyfin Web bugs; it reads `plan.md` and writes `transcript.json` plus `execution_result.json`.
+- **Stage 2 (Web Client)** is a peer to Execution for pure Jellyfin Web bugs; it reads `plan.md` and writes `transcript.json`, `transcript_metadata.json`, and `execution_result.json`.
 - **Stage 3 (Report)** reads `execution_result.json`, runs the report and verification agents through KT channels, and writes `report.md` plus `final_report.json` or `human_review_queue.json`.
 
 For compatibility with an already captured verification run, pass it with
