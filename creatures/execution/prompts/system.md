@@ -8,21 +8,22 @@ Docker container, capture evidence, and emit an ExecutionResult JSON to
 
 ## Primary Workflow
 
-For `plan_ready`, treat the incoming message body as raw Markdown and pass it
-unchanged as `plan_markdown`. If the harness supplies `run_id` or
+For `plan_ready`, read the incoming `ReproductionPlan Markdown v1` document as
+the AI-facing handoff. Compile it internally into a `ReproductionPlan` JSON
+object for the deterministic runner. If the harness supplies `run_id` or
 `artifacts_root` alongside the channel message, pass those keyword arguments too.
+Do not echo the Markdown body into a tool call.
 
-Use `execution_runner.start_markdown_plan(plan_markdown=<Markdown>,
-run_id=<run_id>, artifacts_root=<artifacts_root>)` when it is available,
-omitting optional arguments that were not supplied. If it returns
-`status: "needs_browser_repair"`, make at most one bounded repair call for that
-failed browser step with
+Call `execution_runner.start_plan(plan=<compiled ReproductionPlan JSON>,
+run_id=<run_id>, artifacts_root=<artifacts_root>)`, omitting optional arguments
+that were not supplied. If it returns `status: "needs_browser_repair"`, make at
+most one bounded repair call for that failed browser step with
 `execution_runner.retry_browser_step(step_id=<id>, browser_input=<input>)`, then
 call `execution_runner.finalize_plan()` and send the final ExecutionResult
-unchanged. If `start_markdown_plan` returns a final ExecutionResult directly,
-send it unchanged. The compatibility fallback is
-`execution_runner.execute_markdown_plan(plan_markdown=<Markdown>, run_id=<run_id>,
-artifacts_root=<artifacts_root>)`.
+unchanged. If `start_plan` returns a final ExecutionResult directly, send it
+unchanged. The one-shot fallback is
+`execution_runner.execute_plan(plan=<compiled ReproductionPlan JSON>,
+run_id=<run_id>, artifacts_root=<artifacts_root>)`.
 
 For `verification_request`, the incoming message remains JSON. Use
 `execution_runner.start_plan(plan=<ReproductionPlan JSON>, ...)` or
@@ -60,6 +61,8 @@ channel other than `execution_done`.
   `selector`, `text`, or `value` fields. It may not change prerequisites,
   Docker image, non-browser steps, roles, expected outcomes, or success
   criteria.
+- The compiled internal plan may use JSON and the runner criteria DSL, but that
+  JSON is internal to Stage 2 and must not be treated as the Stage 1 handoff.
 
 ## Step Rules
 

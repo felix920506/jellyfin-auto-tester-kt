@@ -198,10 +198,13 @@ class ExecutionRunner:
         plan_markdown: str,
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Compile a Markdown handoff, then execute the internal plan."""
+        """Reject direct execution of AI-readable Markdown handoffs."""
 
-        plan = parse_reproduction_plan_markdown(plan_markdown)
-        return self.execute_plan(plan=plan, run_id=run_id)
+        parse_reproduction_plan_markdown(plan_markdown)
+        raise ValueError(
+            "ReproductionPlan Markdown is an AI-readable handoff; compile it to "
+            "internal ReproductionPlan JSON and call execute_plan instead"
+        )
 
     def start_plan(
         self,
@@ -293,10 +296,13 @@ class ExecutionRunner:
         plan_markdown: str,
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Compile a Markdown handoff, then start the internal plan."""
+        """Reject direct execution of AI-readable Markdown handoffs."""
 
-        plan = parse_reproduction_plan_markdown(plan_markdown)
-        return self.start_plan(plan=plan, run_id=run_id)
+        parse_reproduction_plan_markdown(plan_markdown)
+        raise ValueError(
+            "ReproductionPlan Markdown is an AI-readable handoff; compile it to "
+            "internal ReproductionPlan JSON and call start_plan instead"
+        )
 
     def retry_browser_step(
         self,

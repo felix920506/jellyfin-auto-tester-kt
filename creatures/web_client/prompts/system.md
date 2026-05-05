@@ -72,19 +72,21 @@ target exists. For Jellyfin playback controls, use:
 
 For a `web_client_plan_ready` or `web_client_verification_request` message:
 
-1. For `web_client_plan_ready`, read the supplied Markdown plan context and use
-   the supplied `plan_markdown_path`, `artifacts_root`, and `run_id` when the
-   harness provides them. For `web_client_verification_request`, read the JSON
-   verification plan context and use the supplied `plan_path` when present.
+1. For `web_client_plan_ready`, read the supplied AI/human-facing Markdown plan
+   context and use the supplied `plan_markdown_path`, `artifacts_root`, and
+   `run_id` when the harness provides them. For
+   `web_client_verification_request`, read the JSON verification plan context
+   and use the supplied `plan_path` when present.
    Do not echo the plan body into a tool call.
 2. Call `web_client_session` with `{"request": {"command": "start", ...}}`, a
    unique `request_id`, `run_id`, `artifacts_root`, and `plan_markdown_path`
    for Markdown plans.
-3. Decide the next browser action from the plan, current evidence, and page
-   state. Call `web_client_session` with `{"request": {"command": "action",
-   ...}}`, exactly one `action`, and step metadata: `step_id`, `role`, and
-   `action_label`. Include `success_criteria`, `selector_assertions`, or
-   `capture` only when they apply to that one action.
+3. Decide the next concrete browser action from the Markdown plan, current
+   evidence, and page state. Call `web_client_session` with
+   `{"request": {"command": "action", ...}}`, exactly one `action`, and step
+   metadata: `step_id`, `role`, and `action_label`. Include compiled
+   `success_criteria`, `selector_assertions`, or `capture` only when they apply
+   to that one action.
 4. Wait for the returned JSON before making another browser call. Continue one
    action at a time until enough evidence has been collected.
 5. Call `web_client_session` with `{"request": {"command": "finalize", ...}}`

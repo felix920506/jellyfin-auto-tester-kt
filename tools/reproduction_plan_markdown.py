@@ -1,4 +1,4 @@
-"""Markdown handoff parser for Stage 1 ReproductionPlan documents."""
+"""Human-readable Markdown handoff helpers for Stage 1 plans."""
 
 from __future__ import annotations
 
@@ -37,17 +37,23 @@ DEFAULT_ENVIRONMENT = {
 
 _SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _STEP_RE = re.compile(r"^###\s+Step\s+(\d+)(?::\s*(.*?))?\s*$", re.MULTILINE)
-_STEP_SUBSECTION_RE = re.compile(r"^####\s+(.+?)\s*$", re.MULTILINE)
+_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$", re.MULTILINE)
 _KEY_VALUE_RE = re.compile(r"^\s*[-*]\s+([^:\n]+):\s*(.*?)\s*$")
-_JSON_FENCE_RE = re.compile(r"```(?:json|JSON)?\s*\n?(.*?)\n?```", re.DOTALL)
+_FENCE_RE = re.compile(r"```([A-Za-z0-9_-]*)\s*\n?(.*?)\n?```", re.DOTALL)
 
 
 class ReproductionPlanMarkdownError(ValueError):
-    """Raised when a Markdown plan cannot be parsed or validated."""
+    """Raised when a Markdown handoff cannot be accepted."""
 
 
 def parse_reproduction_plan_markdown(markdown: str) -> dict[str, Any]:
-    """Parse a ``ReproductionPlan Markdown v1`` document into a plan dict."""
+    """Inspect and lint a ``ReproductionPlan Markdown v1`` handoff.
+
+    The Stage 1 handoff is intentionally written for a human or AI Stage 2
+    agent. This function therefore validates the document contract and extracts
+    enough routing metadata for the pipeline fabric, but it does not compile the
+    full deterministic runner schema.
+    """
 
     if not isinstance(markdown, str) or not markdown.strip():
         raise ReproductionPlanMarkdownError("plan Markdown is empty")
@@ -63,65 +69,77 @@ def parse_reproduction_plan_markdown(markdown: str) -> dict[str, Any]:
         )
 
     sections = _split_sections(text)
-    missing = [section for section in REQUIRED_SECTIONS if section not in sections]
-    if missing:
-        raise ReproductionPlanMarkdownError(
-            f"missing required section(s): {', '.join(missing)}"
-        )
+    _validate_required_sections(sections)
+    _validate_json_fence_scope(text)
 
     goal = _parse_key_value_bullets(sections["Goal"])
     target = _parse_key_value_bullets(sections["Execution Target"])
+    execution_target = str(target.get("execution_target") or "standard").strip()
+    if execution_target not in ALLOWED_EXECUTION_TARGETS:
+        raise ReproductionPlanMarkdownError(
+            "Execution Target must be standard or web_client"
+        )
+
     is_verification = target.get("is_verification", False)
     if not isinstance(is_verification, bool):
         raise ReproductionPlanMarkdownError(
             "Execution Target is_verification must be true or false"
         )
+    original_run_id = target.get("original_run_id")
+    if original_run_id is not None and not isinstance(original_run_id, str):
+        raise ReproductionPlanMarkdownError(
+            "Execution Target original_run_id must be a string or null"
+        )
 
+    steps = _parse_steps_section(sections["Steps"])
+    confidence = _parse_confidence(sections["Confidence"])
     plan: dict[str, Any] = {
         "issue_url": _required_text(goal, "issue_url", "Goal"),
         "issue_title": _required_text(goal, "issue_title", "Goal"),
-        "target_version": _required_text(
-            target,
-            "target_version",
-            "Execution Target",
-        ),
-        "prerequisites": _parse_json_array_section(
-            sections["Prerequisites"],
-            "Prerequisites",
-        ),
-        "environment": _parse_environment_section(sections["Environment"]),
-        "reproduction_steps": _parse_steps_section(sections["Steps"]),
         "reproduction_goal": _required_text(
             goal,
             "reproduction_goal",
             "Goal",
         ),
+        "target_version": _required_text(
+            target,
+            "target_version",
+            "Execution Target",
+        ),
+        "execution_target": execution_target,
+        "server_mode": str(target.get("server_mode") or "docker").strip().lower(),
+        "docker_image": target.get("docker_image"),
+        "environment": _parse_environment_notes(sections["Environment"]),
+        "environment_notes": sections["Environment"].strip(),
+        "prerequisites": [],
+        "prerequisite_notes": _parse_text_list_section(sections["Prerequisites"]),
+        "reproduction_steps": steps,
         "failure_indicators": _parse_text_list_section(
             sections["Failure Indicators"],
         ),
-        "execution_target": str(
-            target.get("execution_target") or "standard"
-        ).strip(),
-        "confidence": _parse_confidence(sections["Confidence"]),
+        "confidence": confidence,
         "ambiguities": _parse_text_list_section(sections["Ambiguities"]),
         "is_verification": is_verification,
-        "original_run_id": target.get("original_run_id"),
+        "original_run_id": original_run_id,
     }
 
-    server_mode = str(target.get("server_mode") or "docker").strip().lower()
-    if server_mode == "demo":
+    if plan["server_mode"] == "demo":
         release_track = str(target.get("demo_release_track") or "").strip().lower()
         if release_track not in DEMO_SERVER_URLS:
             raise ReproductionPlanMarkdownError(
                 "Execution Target demo_release_track must be stable or unstable"
             )
-        base_url = str(
-            target.get("demo_base_url") or DEMO_SERVER_URLS[release_track]
-        ).strip()
         requires_admin = target.get("demo_requires_admin", False)
         if not isinstance(requires_admin, bool):
             raise ReproductionPlanMarkdownError(
                 "Execution Target demo_requires_admin must be true or false"
+            )
+        base_url = str(
+            target.get("demo_base_url") or DEMO_SERVER_URLS[release_track]
+        ).strip()
+        if base_url != DEMO_SERVER_URLS[release_track]:
+            raise ReproductionPlanMarkdownError(
+                "Execution Target demo_base_url must match the selected demo track"
             )
         plan["execution_target"] = "web_client"
         plan["server_target"] = {
@@ -135,13 +153,14 @@ def parse_reproduction_plan_markdown(markdown: str) -> dict[str, Any]:
     else:
         docker_image = _required_text(target, "docker_image", "Execution Target")
         plan["docker_image"] = docker_image
+        plan.pop("server_target", None)
 
-    validate_reproduction_plan(plan)
+    _validate_handoff_steps(plan)
     return plan
 
 
 def parse_reproduction_plan_markdown_file(path: str | Path) -> dict[str, Any]:
-    """Read and parse a Markdown plan file."""
+    """Read and inspect a Markdown handoff file."""
 
     return parse_reproduction_plan_markdown(
         Path(path).expanduser().read_text(encoding="utf-8")
@@ -149,7 +168,7 @@ def parse_reproduction_plan_markdown_file(path: str | Path) -> dict[str, Any]:
 
 
 def render_reproduction_plan_markdown(plan: Mapping[str, Any]) -> str:
-    """Render a plan dict as ``ReproductionPlan Markdown v1``."""
+    """Render an internal plan dict as an AI/human-readable Stage 1 handoff."""
 
     plan_dict = deepcopy(dict(plan))
     plan_dict["environment"] = _normalize_environment(
@@ -201,10 +220,10 @@ def render_reproduction_plan_markdown(plan: Mapping[str, Any]) -> str:
             f"- Original Run ID: {_json_scalar(plan_dict.get('original_run_id'))}",
             "",
             "## Environment",
-            _json_block(plan_dict["environment"]),
+            *_render_environment(plan_dict),
             "",
             "## Prerequisites",
-            _json_block(plan_dict.get("prerequisites", [])),
+            *_render_prerequisites(plan_dict.get("prerequisites", [])),
             "",
             "## Steps",
         ]
@@ -322,6 +341,51 @@ def _split_sections(text: str) -> dict[str, str]:
     return sections
 
 
+def _validate_required_sections(sections: Mapping[str, str]) -> None:
+    names = list(sections)
+    missing = [section for section in REQUIRED_SECTIONS if section not in sections]
+    if missing:
+        raise ReproductionPlanMarkdownError(
+            f"missing required section(s): {', '.join(missing)}"
+        )
+    unexpected = [name for name in names if name not in REQUIRED_SECTIONS]
+    if unexpected:
+        raise ReproductionPlanMarkdownError(
+            f"unexpected top-level section(s): {', '.join(unexpected)}"
+        )
+    ordered = [name for name in names if name in REQUIRED_SECTIONS]
+    if ordered != list(REQUIRED_SECTIONS):
+        raise ReproductionPlanMarkdownError(
+            "top-level sections must appear in the required order"
+        )
+
+
+def _validate_json_fence_scope(text: str) -> None:
+    for match in _FENCE_RE.finditer(text):
+        info = match.group(1).strip().lower()
+        if info != "json":
+            continue
+        heading = _nearest_heading(text, match.start())
+        if heading != "Exact Request Payload":
+            raise ReproductionPlanMarkdownError(
+                "JSON fences are allowed only under an Exact Request Payload subsection"
+            )
+        try:
+            json.loads(match.group(2).strip())
+        except json.JSONDecodeError as exc:
+            raise ReproductionPlanMarkdownError(
+                f"Exact Request Payload contains malformed JSON at line {exc.lineno} "
+                f"column {exc.colno}: {exc.msg}"
+            ) from exc
+
+
+def _nearest_heading(text: str, position: int) -> str | None:
+    heading = None
+    for match in _HEADING_RE.finditer(text[:position]):
+        heading = match.group(2).strip()
+    return heading
+
+
 def _parse_key_value_bullets(text: str) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for line in text.splitlines():
@@ -364,45 +428,19 @@ def _parse_scalar(value: str) -> Any:
     return text
 
 
-def _parse_environment_section(text: str) -> dict[str, Any]:
-    environment = _parse_json_object_section(text, "Environment")
-    return _normalize_environment(environment, field="environment")
-
-
-def _parse_json_array_section(text: str, label: str) -> list[Any]:
-    value = _parse_json_section(text, label)
-    if not isinstance(value, list):
-        raise ReproductionPlanMarkdownError(f"{label} must be a JSON array")
-    return value
-
-
-def _parse_json_object_section(text: str, label: str) -> dict[str, Any]:
-    value = _parse_json_section(text, label)
-    if not isinstance(value, dict):
-        raise ReproductionPlanMarkdownError(f"{label} must be a JSON object")
-    return value
-
-
-def _parse_json_section(text: str, label: str) -> Any:
-    block = _first_json_block(text)
-    if block is None:
-        stripped = text.strip()
-        if stripped in {"", "- None", "- none", "None", "none"}:
-            raise ReproductionPlanMarkdownError(f"{label} must contain a JSON block")
-        block = stripped
-    try:
-        return json.loads(block)
-    except json.JSONDecodeError as exc:
-        raise ReproductionPlanMarkdownError(
-            f"{label} contains malformed JSON at line {exc.lineno} column {exc.colno}: {exc.msg}"
-        ) from exc
-
-
-def _first_json_block(text: str) -> str | None:
-    match = _JSON_FENCE_RE.search(text)
-    if not match:
-        return None
-    return match.group(1).strip()
+def _parse_environment_notes(text: str) -> dict[str, Any]:
+    environment = deepcopy(DEFAULT_ENVIRONMENT)
+    fields = _parse_key_value_bullets(text)
+    host = fields.get("host_port") or fields.get("host")
+    container = fields.get("container_port") or fields.get("container")
+    if host is not None:
+        environment["ports"]["host"] = _normalize_port(host, "environment.host_port")
+    if container is not None:
+        environment["ports"]["container"] = _normalize_port(
+            container,
+            "environment.container_port",
+        )
+    return environment
 
 
 def _parse_text_list_section(text: str) -> list[str]:
@@ -451,68 +489,69 @@ def _parse_steps_section(text: str) -> list[dict[str, Any]]:
         body = text[start:end].strip()
         heading_id = int(match.group(1))
         heading_action = (match.group(2) or "").strip()
-        steps.append(_parse_step(body, heading_id, heading_action))
+        fields = _parse_key_value_bullets(body)
+        step_id = fields.get("step_id", heading_id)
+        if not isinstance(step_id, int):
+            raise ReproductionPlanMarkdownError("step_id must be an integer")
+        step = {
+            "step_id": step_id,
+            "role": str(fields.get("role") or "").strip(),
+            "action": str(fields.get("action") or heading_action).strip(),
+            "tool": str(fields.get("tool") or "").strip(),
+            "expected_outcome": str(
+                fields.get("expected_outcome") or fields.get("expected_result") or ""
+            ).strip(),
+            "notes": body,
+        }
+        if not step["expected_outcome"]:
+            step["expected_outcome"] = step["action"] or "Step completes"
+        _validate_handoff_step(step, step_id)
+        steps.append(step)
     return steps
 
 
-def _parse_step(body: str, heading_id: int, heading_action: str) -> dict[str, Any]:
-    subsections = _split_step_subsections(body)
-    prelude = subsections.pop("_prelude", "")
-    fields = _parse_key_value_bullets(prelude)
-    step_id = fields.get("step_id", heading_id)
-    if not isinstance(step_id, int):
-        raise ReproductionPlanMarkdownError("step_id must be an integer")
-
-    input_section = _required_step_section(subsections, "Input", step_id)
-    criteria_section = _required_step_section(subsections, "Success Criteria", step_id)
-    step: dict[str, Any] = {
-        "step_id": step_id,
-        "role": str(fields.get("role") or "").strip(),
-        "action": str(fields.get("action") or heading_action).strip(),
-        "tool": str(fields.get("tool") or "").strip(),
-        "input": _parse_json_object_section(input_section, f"Step {step_id} Input"),
-        "success_criteria": _parse_json_object_section(
-            criteria_section,
-            f"Step {step_id} Success Criteria",
-        ),
-    }
-    step["expected_outcome"] = str(
-        fields.get("expected_outcome") or step["action"] or "Step completes"
-    ).strip()
-    capture_section = subsections.get("Capture")
-    if capture_section and capture_section.strip():
-        step["capture"] = _parse_json_object_section(
-            capture_section,
-            f"Step {step_id} Capture",
+def _validate_handoff_steps(plan: Mapping[str, Any]) -> None:
+    steps = plan.get("reproduction_steps")
+    if not isinstance(steps, list) or not steps:
+        raise ReproductionPlanMarkdownError("Steps must contain at least one step")
+    trigger_count = sum(
+        1
+        for step in steps
+        if isinstance(step, Mapping) and step.get("role") == "trigger"
+    )
+    if trigger_count != 1:
+        raise ReproductionPlanMarkdownError(
+            f"Steps must contain exactly one trigger step; found {trigger_count}"
         )
-    _validate_step(step, step_id)
-    return step
+    if plan.get("server_mode") == "demo":
+        non_browser = [
+            str(step.get("tool"))
+            for step in steps
+            if isinstance(step, Mapping) and step.get("tool") != "browser"
+        ]
+        if non_browser:
+            raise ReproductionPlanMarkdownError(
+                "demo server mode only supports browser steps"
+            )
 
 
-def _split_step_subsections(text: str) -> dict[str, str]:
-    matches = list(_STEP_SUBSECTION_RE.finditer(text))
-    subsections: dict[str, str] = {}
-    prelude_end = matches[0].start() if matches else len(text)
-    subsections["_prelude"] = text[:prelude_end].strip()
-    for index, match in enumerate(matches):
-        name = match.group(1).strip()
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        if name in subsections:
-            raise ReproductionPlanMarkdownError(f"duplicate step subsection: {name}")
-        subsections[name] = text[start:end].strip()
-    return subsections
-
-
-def _required_step_section(
-    subsections: Mapping[str, str],
-    name: str,
-    step_id: int,
-) -> str:
-    value = subsections.get(name)
-    if not value:
-        raise ReproductionPlanMarkdownError(f"Step {step_id} missing {name} subsection")
-    return value
+def _validate_handoff_step(step: Mapping[str, Any], display_index: int) -> None:
+    step_id = step.get("step_id")
+    if not isinstance(step_id, int) or step_id < 1:
+        raise ReproductionPlanMarkdownError(
+            f"step {display_index} step_id must be a positive integer"
+        )
+    role = step.get("role")
+    if role not in ALLOWED_STEP_ROLES:
+        raise ReproductionPlanMarkdownError(
+            f"step {step_id} role must be setup, trigger, or verify"
+        )
+    _require_non_empty_string(step.get("action"), f"step {step_id} action")
+    tool = step.get("tool")
+    if tool not in ALLOWED_STEP_TOOLS:
+        raise ReproductionPlanMarkdownError(
+            f"step {step_id} tool must be one of: {', '.join(sorted(ALLOWED_STEP_TOOLS))}"
+        )
 
 
 def _validate_demo_server_target(server_target: Mapping[str, Any]) -> None:
@@ -685,6 +724,69 @@ def _require_non_empty_string(value: Any, field: str) -> None:
         raise ReproductionPlanMarkdownError(f"{field} must be a non-empty string")
 
 
+def _render_environment(plan: Mapping[str, Any]) -> list[str]:
+    server_target = plan.get("server_target")
+    if isinstance(server_target, Mapping) and server_target.get("mode") == "demo":
+        return [
+            f"- Use the public Jellyfin demo server at {server_target.get('base_url')}.",
+            "- Stage 2 should not start Docker, run the startup wizard, or require admin access.",
+        ]
+
+    environment = _normalize_environment(plan.get("environment"), field="environment")
+    ports = environment["ports"]
+    lines = [
+        "- Stage 2 manages Docker lifecycle and waits for Jellyfin health.",
+        f"- Host Port: {ports['host']}",
+        f"- Container Port: {ports['container']}",
+    ]
+    volumes = environment.get("volumes") or []
+    if volumes:
+        lines.append("- Volumes:")
+        for volume in volumes:
+            lines.append(f"  - {_volume_description(volume)}")
+    else:
+        lines.append("- Volumes: none")
+    env_vars = environment.get("env_vars") or {}
+    if env_vars:
+        lines.append("- Environment Variables:")
+        for key, value in sorted(env_vars.items()):
+            lines.append(f"  - `{key}={value}`")
+    else:
+        lines.append("- Environment Variables: none")
+    return lines
+
+
+def _volume_description(volume: Any) -> str:
+    if isinstance(volume, Mapping):
+        host = volume.get("host") or volume.get("source") or "host path"
+        container = volume.get("container") or volume.get("target") or "container path"
+        mode = volume.get("mode")
+        suffix = f" ({mode})" if mode else ""
+        return f"`{host}` mounted at `{container}`{suffix}"
+    return str(volume)
+
+
+def _render_prerequisites(values: Iterable[Any]) -> list[str]:
+    items = list(values)
+    if not items:
+        return ["- None"]
+    lines: list[str] = []
+    for item in items:
+        if isinstance(item, Mapping):
+            description = str(item.get("description") or item.get("source") or item)
+            source = item.get("source")
+            target = item.get("target_name") or item.get("target")
+            detail = description
+            if source:
+                detail += f"; source: {source}"
+            if target:
+                detail += f"; target: {target}"
+            lines.append(f"- {detail}")
+        else:
+            lines.append(f"- {item}")
+    return lines
+
+
 def _render_step(step: Mapping[str, Any]) -> list[str]:
     lines = [
         "",
@@ -694,20 +796,188 @@ def _render_step(step: Mapping[str, Any]) -> list[str]:
         f"- Action: {step['action']}",
         f"- Tool: {step['tool']}",
         f"- Expected Outcome: {step['expected_outcome']}",
-        "",
-        "#### Input",
-        _json_block(step["input"]),
+        *_step_instruction_lines(step),
     ]
-    if "capture" in step:
-        lines.extend(["", "#### Capture", _json_block(step["capture"])])
-    lines.extend(
-        [
-            "",
-            "#### Success Criteria",
-            _json_block(step["success_criteria"]),
-        ]
-    )
+    payload = _exact_json_payload(step)
+    if payload is not None:
+        lines.extend(["", "#### Exact Request Payload", _json_block(payload)])
+    text_payload = _exact_text_payload(step)
+    if text_payload is not None:
+        lines.extend(["", "#### Exact Request Body", _text_block(text_payload)])
     return lines
+
+
+def _step_instruction_lines(step: Mapping[str, Any]) -> list[str]:
+    tool = step.get("tool")
+    step_input = step.get("input") if isinstance(step.get("input"), Mapping) else {}
+    lines: list[str] = []
+    if tool == "http_request":
+        method = step_input.get("method", "GET")
+        path = step_input.get("path", "/")
+        auth = step_input.get("auth", "auto")
+        lines.append(f"- Request: {method} {path} with `{auth}` authentication.")
+        headers = step_input.get("headers")
+        if isinstance(headers, Mapping) and headers:
+            header_text = ", ".join(f"{key}: {value}" for key, value in headers.items())
+            lines.append(f"- Headers: {header_text}.")
+        if step_input.get("body_text") is not None:
+            lines.append("- Exact Request Body: use the text block supplied by the issue.")
+        if step_input.get("body_base64") is not None:
+            lines.append("- Exact Request Body: use the base64 body supplied by the issue.")
+    elif tool == "bash":
+        lines.append(f"- Command: `{step_input.get('command', '')}`")
+    elif tool == "docker_exec":
+        lines.append(f"- Container Command: `{step_input.get('command', '')}`")
+    elif tool == "browser":
+        for action in _browser_actions(step_input):
+            lines.append(f"- Browser Action: {_browser_action_description(action)}")
+    elif tool == "screenshot":
+        target = step_input.get("url") or step_input.get("path") or "Jellyfin Web"
+        lines.append(f"- Screenshot Target: {target}")
+
+    capture = step.get("capture")
+    if isinstance(capture, Mapping) and capture:
+        lines.append(f"- Capture: {_mapping_description(capture)}")
+    lines.append(f"- Reproduced When: {_criteria_description(step.get('success_criteria'))}")
+    return lines
+
+
+def _browser_actions(step_input: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    actions = step_input.get("actions")
+    if isinstance(actions, list):
+        return [action for action in actions if isinstance(action, Mapping)]
+    return []
+
+
+def _browser_action_description(action: Mapping[str, Any]) -> str:
+    action_type = str(action.get("type") or "browser action")
+    if action_type == "goto":
+        return f"navigate to {action.get('url') or action.get('path') or 'the target page'}."
+    if action_type == "click":
+        return f"click {_target_description(action.get('target'))}."
+    if action_type == "fill":
+        return f"fill `{action.get('selector')}` with `{action.get('value')}`."
+    if action_type == "press":
+        return f"press `{action.get('key')}` in `{action.get('selector')}`."
+    if action_type == "wait_for":
+        return f"wait for `{action.get('selector')}` to be {action.get('state', 'visible')}."
+    if action_type == "wait_for_text":
+        return f"wait for text `{action.get('text')}`."
+    if action_type == "wait_for_url":
+        return f"wait for URL {action.get('pattern') or action.get('url') or action.get('path')}."
+    if action_type == "wait_for_media":
+        return f"wait for media state `{action.get('state')}`."
+    if action_type == "screenshot":
+        return f"capture screenshot `{action.get('label', 'browser')}`."
+    if action_type == "evaluate":
+        return "run the described browser evaluation."
+    return f"perform `{action_type}`."
+
+
+def _target_description(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return "the target described in the plan"
+    kind = value.get("kind")
+    name = value.get("name")
+    scope = value.get("scope")
+    selector = value.get("selector")
+    index = value.get("index")
+    if kind == "control":
+        scope_text = f" {scope}" if scope else ""
+        return f"the{scope_text} control named `{name}`"
+    if kind == "link":
+        return f"the link named `{name}`"
+    if kind == "text":
+        return f"the text target `{name}`"
+    if kind == "css":
+        suffix = f" at index {index}" if index is not None else ""
+        return f"CSS selector `{selector}`{suffix}"
+    return _mapping_description(value)
+
+
+def _criteria_description(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return "the observable bug symptom appears."
+    operator = "all_of" if "all_of" in value else "any_of" if "any_of" in value else None
+    assertions = value.get(operator) if operator else None
+    if not isinstance(assertions, list) or not assertions:
+        return "the observable bug symptom appears."
+    joiner = " and " if operator == "all_of" else " or "
+    return joiner.join(_assertion_description(assertion) for assertion in assertions)
+
+
+def _assertion_description(assertion: Any) -> str:
+    if not isinstance(assertion, Mapping):
+        return str(assertion)
+    assertion_type = assertion.get("type")
+    if assertion_type == "status_code":
+        return f"HTTP status equals {assertion.get('equals')}"
+    if assertion_type == "body_contains":
+        return f"response body contains `{assertion.get('text')}`"
+    if assertion_type == "body_matches":
+        return f"response body matches `{assertion.get('pattern')}`"
+    if assertion_type == "body_json_path":
+        path = assertion.get("path")
+        if "equals" in assertion:
+            return f"response JSON path `{path}` equals `{assertion.get('equals')}`"
+        return f"response JSON path `{path}` exists"
+    if assertion_type == "exit_code":
+        return f"exit code equals {assertion.get('equals')}"
+    if assertion_type == "stdout_contains":
+        return f"stdout contains `{assertion.get('text')}`"
+    if assertion_type == "stderr_contains":
+        return f"stderr contains `{assertion.get('text')}`"
+    if assertion_type == "log_matches":
+        return f"Jellyfin logs match `{assertion.get('pattern')}`"
+    if assertion_type == "screenshot_present":
+        return "a screenshot artifact is present"
+    if assertion_type == "browser_action_run":
+        return "the browser action completes"
+    if assertion_type == "browser_element":
+        if assertion.get("target"):
+            return f"browser shows {_target_description(assertion.get('target'))}"
+        selector = assertion.get("selector")
+        state = assertion.get("state") or "visible"
+        return f"browser selector `{selector}` is {state}"
+    if assertion_type == "browser_text_contains":
+        return f"browser text contains `{assertion.get('text')}`"
+    if assertion_type == "browser_url_matches":
+        return f"browser URL matches `{assertion.get('pattern')}`"
+    if assertion_type == "browser_media_state":
+        return f"browser media state is `{assertion.get('state')}`"
+    if assertion_type == "browser_console_matches":
+        return f"browser console matches `{assertion.get('pattern')}`"
+    return f"{assertion_type}: {_mapping_description(assertion)}"
+
+
+def _mapping_description(value: Mapping[str, Any]) -> str:
+    parts = []
+    for key, item in value.items():
+        if isinstance(item, Mapping):
+            parts.append(f"{key} ({_mapping_description(item)})")
+        elif isinstance(item, list):
+            parts.append(f"{key} [{len(item)} item(s)]")
+        else:
+            parts.append(f"{key}={item}")
+    return ", ".join(parts)
+
+
+def _exact_json_payload(step: Mapping[str, Any]) -> Any | None:
+    step_input = step.get("input")
+    if isinstance(step_input, Mapping) and "body_json" in step_input:
+        return step_input["body_json"]
+    return None
+
+
+def _exact_text_payload(step: Mapping[str, Any]) -> str | None:
+    step_input = step.get("input")
+    if not isinstance(step_input, Mapping):
+        return None
+    if "body_text" in step_input:
+        return str(step_input["body_text"])
+    if "body_base64" in step_input:
+        return str(step_input["body_base64"])
+    return None
 
 
 def _render_text_list(values: Iterable[Any]) -> list[str]:
@@ -725,6 +995,10 @@ def _json_block(value: Any) -> str:
         sort_keys=True,
         default=str,
     ) + "\n```"
+
+
+def _text_block(value: str) -> str:
+    return "```text\n" + value.rstrip() + "\n```"
 
 
 def _json_scalar(value: Any) -> str:

@@ -1,7 +1,8 @@
 # Analysis Agent Context
 
-The Stage 1 output is consumed by an execution agent, not by a human-only review
-process. Keep every action deterministic and machine-checkable.
+The Stage 1 output is consumed by an execution agent and may also be reviewed by
+a human. Keep it concrete and executable, but write the handoff as readable
+Markdown instead of runner JSON.
 
 Important constraints from `plans/plan-master.md`:
 
@@ -15,11 +16,11 @@ Important constraints from `plans/plan-master.md`:
   client bugs whose trigger step uses `tool: "browser"`. Use `"standard"` for
   server, API, transcoding, plugin, startup, filesystem, and mixed ownership
   bugs.
-- For safe browser-only web-client bugs, you may set `server_target.mode` to
-  `"demo"` and run against the public demo servers instead of Docker. Demo mode
-  requires browser-only reproduction, demo media sufficiency, no admin
-  privileges, no server/API mutation, no custom media, and no exact historical
-  version requirement.
+- For safe browser-only web-client bugs, you may set `Server Mode: demo` and run
+  against the public demo servers instead of Docker. Demo mode requires
+  browser-only reproduction, demo media sufficiency, no admin privileges, no
+  server/API mutation, no custom media, and no exact historical version
+  requirement.
 - Demo URL mapping is exact: stable/latest/latest-stable use
   `https://demo.jellyfin.org/stable`; unstable/latest-unstable/master use
   `https://demo.jellyfin.org/unstable`. Demo login is username `demo` with a
@@ -35,14 +36,13 @@ Important constraints from `plans/plan-master.md`:
   form/UI interactions, client-side media controls, browser console evidence,
   or screenshots after user interaction. Prefer `http_request` for API-level
   bugs and the standard path for mixed client/server ownership.
-- Put exactly one Playwright action in each browser step's `input.actions`.
-  Navigation, waits, clicks, fills, screenshots, and evaluations are separate
-  browser steps/actions.
-- Browser click actions use typed targets such as
-  `{"type":"click","target":{"kind":"control","name":"Play"}}`; do not emit
-  loose click `selector`, `text`, or `value` fields unless using the explicit
-  CSS escape hatch target.
-- Use only structured success criteria with top-level `all_of` or `any_of`.
+- Put exactly one Playwright-style browser action in each browser step, described
+  in prose/bullets. Navigation, waits, clicks, fills, screenshots, and
+  evaluations are separate browser steps/actions.
+- Browser click actions should name visible controls, links, text targets, or an
+  explicit CSS escape hatch selector.
+- Write observations as plain Markdown bullets that Stage 2 can compile into
+  deterministic criteria.
 - Use captures for values discovered at runtime, then reference them as
   `${variable_name}` in later steps.
 - Include exactly one step with `role: "trigger"`; that step's criteria should
@@ -50,6 +50,9 @@ Important constraints from `plans/plan-master.md`:
 - Finish all required fetch/search tool calls before emitting the plan. If more
   data is needed, output only the tool call and wait for the result; never mix a
   final plan with tool calls in the same response.
+- Do not put routine plan fields in fenced JSON. The only allowed fenced `json`
+  block is under `#### Exact Request Payload` when an API bug depends on an
+  exact JSON request body.
 - Deliver the final plan with a single `send_message` tool-call block:
   `[/send_message]`, `@@channel=plan_ready` or
   `@@channel=web_client_plan_ready`, raw Markdown body, `[send_message/]`. Do

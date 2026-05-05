@@ -880,16 +880,10 @@ The bug is reported as a Jellyfin Web favorite-state reset after playback stops.
 - Original Run ID: null
 
 ## Environment
-```json
-{}
-```
+- Use the public Jellyfin demo server.
 
 ## Prerequisites
-```json
-[
-  "The demo catalog contains one playable song."
-]
-```
+- The demo catalog contains one playable song.
 
 ## Steps
 ### Step 1: Stop playback and observe the favorite state reset
@@ -897,16 +891,8 @@ The bug is reported as a Jellyfin Web favorite-state reset after playback stops.
 - Role: trigger
 - Action: Stop playback while the current song is marked favorite.
 - Tool: browser
-
-#### Input
-```json
-{"actions":[{"type":"click","target":{"kind":"control","name":"Stop","scope":"player"}}]}
-```
-
-#### Success Criteria
-```json
-{"all_of":[{"type":"browser_element","selector":"button[aria-label='Add to favorites']","exists":true}]}
-```
+- Browser Action: click the player stop control named Stop.
+- Reproduced When: the same song row changes back to Add to favorites.
 
 ## Failure Indicators
 - The favorite mark disappears after playback stops.
@@ -1129,6 +1115,27 @@ def _sample_execution_entry(plan):
         },
         "duration_ms": 10,
     }
+
+
+def _assert_handoff_metadata(testcase, parsed, plan):
+    testcase.assertEqual(parsed["issue_url"], plan["issue_url"])
+    testcase.assertEqual(parsed["issue_title"], plan["issue_title"])
+    testcase.assertEqual(parsed["target_version"], plan["target_version"])
+    testcase.assertEqual(parsed["execution_target"], plan["execution_target"])
+    testcase.assertEqual(parsed["is_verification"], plan["is_verification"])
+    testcase.assertEqual(parsed["original_run_id"], plan["original_run_id"])
+    if "docker_image" in plan:
+        testcase.assertEqual(parsed["docker_image"], plan["docker_image"])
+    if "server_target" in plan:
+        testcase.assertEqual(parsed["server_target"], plan["server_target"])
+    testcase.assertEqual(
+        [step["tool"] for step in parsed["reproduction_steps"]],
+        [step["tool"] for step in plan["reproduction_steps"]],
+    )
+    testcase.assertEqual(
+        [step["role"] for step in parsed["reproduction_steps"]],
+        [step["role"] for step in plan["reproduction_steps"]],
+    )
 
 
 class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
@@ -1392,7 +1399,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "plan_ready")
         self.assertEqual(result.metadata["source"], "channel")
         self.assertEqual(result.output_file, "plan.md")
-        self.assertEqual(written_plan, plan)
+        _assert_handoff_metadata(self, written_plan, plan)
         self.assertTrue(analysis_agent.cancelled)
 
     async def test_run_analysis_stage_writes_routed_web_client_plan(self):
@@ -1569,7 +1576,8 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(result.status, "plan_ready")
             self.assertEqual(result.output_file, "plan.md")
-            self.assertEqual(
+            _assert_handoff_metadata(
+                self,
                 parse_reproduction_plan_markdown(
                     (Path(temp_dir) / "plan.md").read_text(encoding="utf-8")
                 ),
@@ -1767,7 +1775,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, "plan_ready")
         self.assertEqual(result.metadata["source"], "channel")
-        self.assertEqual(written_plan, plan)
+        _assert_handoff_metadata(self, written_plan, plan)
         self.assertEqual(len(analysis_agent.prompts), 2)
         self.assertIn("REJECTED", analysis_agent.prompts[1])
         self.assertIn("attempt 2 of 3", analysis_agent.prompts[1])
@@ -2011,7 +2019,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status, "reproduced")
             self.assertEqual(result.output_file, "execution_result.json")
             self.assertEqual(payload["run_id"], "run-1")
-            self.assertEqual(payload["plan"], plan)
+            _assert_handoff_metadata(self, payload["plan"], plan)
             self.assertEqual(
                 json.loads(result_path.read_text(encoding="utf-8")),
                 payload,
@@ -2024,7 +2032,8 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 engine.received_metadata["artifacts_root"],
                 str((temp_path / "execution").resolve()),
             )
-            self.assertEqual(
+            _assert_handoff_metadata(
+                self,
                 parse_reproduction_plan_markdown(engine.received_payload),
                 plan,
             )
@@ -2120,12 +2129,13 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status, "reproduced")
             self.assertEqual(result.output_file, "execution_result.json")
             self.assertEqual(payload["run_id"], "web-run-1")
-            self.assertEqual(payload["plan"], plan)
+            _assert_handoff_metadata(self, payload["plan"], plan)
             self.assertTrue((temp_path / "web-client" / "result.json").is_file())
             self.assertEqual(engine.received_channel, "web_client_plan_ready")
             self.assertIn("# ReproductionPlan Markdown v1", engine.received_payload)
             self.assertEqual(engine.received_metadata["run_id"], "web-run-1")
-            self.assertEqual(
+            _assert_handoff_metadata(
+                self,
                 parse_reproduction_plan_markdown(engine.received_payload),
                 plan,
             )
@@ -2184,7 +2194,8 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transcript_payload["stage"], "web-client")
         self.assertEqual(transcript_payload["status"], "execution_done")
         self.assertEqual(transcript_payload["input"]["channel"], "web_client_plan_ready")
-        self.assertEqual(
+        _assert_handoff_metadata(
+            self,
             parse_reproduction_plan_markdown(transcript_payload["input"]["plan_markdown"]),
             plan,
         )

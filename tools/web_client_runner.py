@@ -1640,6 +1640,13 @@ class WebClientRunner:
         run_id: str,
     ) -> None:
         for index, prereq in enumerate(prerequisites, start=1):
+            if not isinstance(prereq, Mapping):
+                self._append_docker_ops_log(
+                    run_id,
+                    "prerequisite_note_skipped",
+                    {"description": str(prereq)},
+                )
+                continue
             target = self._prerequisite_target(prereq, prereq_dir, index)
             if target.exists():
                 continue

@@ -93,39 +93,42 @@ def web_client_demo_plan():
 
 
 class ReproductionPlanMarkdownTests(unittest.TestCase):
-    def test_standard_plan_round_trips(self):
-        plan = standard_plan()
-        markdown = render_reproduction_plan_markdown(plan)
+    def test_standard_plan_renders_human_markdown(self):
+        markdown = render_reproduction_plan_markdown(standard_plan())
 
         parsed = parse_reproduction_plan_markdown(markdown)
 
-        self.assertEqual(parsed, plan)
         self.assertIn("# ReproductionPlan Markdown v1", markdown)
         self.assertIn("## Steps", markdown)
+        self.assertIn("- Request: GET /health with `none` authentication.", markdown)
+        self.assertNotIn("#### Input", markdown)
+        self.assertNotIn("#### Success Criteria", markdown)
+        self.assertNotIn("```json", markdown)
+        self.assertEqual(parsed["execution_target"], "standard")
+        self.assertEqual(parsed["docker_image"], "jellyfin/jellyfin:10.9.7")
+        self.assertEqual(parsed["reproduction_steps"][1]["tool"], "http_request")
 
-    def test_web_client_docker_plan_round_trips(self):
-        plan = web_client_docker_plan()
+    def test_web_client_docker_plan_renders_without_json_fragments(self):
+        markdown = render_reproduction_plan_markdown(web_client_docker_plan())
 
-        parsed = parse_reproduction_plan_markdown(
-            render_reproduction_plan_markdown(plan)
-        )
+        parsed = parse_reproduction_plan_markdown(markdown)
 
-        self.assertEqual(parsed, plan)
+        self.assertNotIn("```json", markdown)
         self.assertEqual(parsed["execution_target"], "web_client")
         self.assertEqual(parsed["reproduction_steps"][0]["tool"], "browser")
+        self.assertIn("Browser Action: capture screenshot", markdown)
 
-    def test_web_client_demo_plan_round_trips(self):
-        plan = web_client_demo_plan()
+    def test_web_client_demo_plan_extracts_demo_metadata(self):
+        markdown = render_reproduction_plan_markdown(web_client_demo_plan())
 
-        parsed = parse_reproduction_plan_markdown(
-            render_reproduction_plan_markdown(plan)
-        )
+        parsed = parse_reproduction_plan_markdown(markdown)
 
-        self.assertEqual(parsed, plan)
-        self.assertNotIn("docker_image", parsed)
+        self.assertNotIn("```json", markdown)
+        self.assertNotIn("Docker Image", markdown)
         self.assertEqual(parsed["server_target"]["mode"], "demo")
+        self.assertEqual(parsed["server_target"]["password"], "")
 
-    def test_demo_plan_accepts_empty_environment_and_missing_expected_outcome(self):
+    def test_demo_plan_accepts_readable_environment_and_missing_expected_outcome(self):
         markdown = """# ReproductionPlan Markdown v1
 
 ## Goal
@@ -149,16 +152,10 @@ The reported symptom is visible in Jellyfin Web after playback stops.
 - Original Run ID: null
 
 ## Environment
-```json
-{}
-```
+- Use the public Jellyfin demo server.
 
 ## Prerequisites
-```json
-[
-  "The demo catalog contains one playable song."
-]
-```
+- The demo catalog contains one playable song.
 
 ## Steps
 ### Step 1: Stop playback and observe the favorite state reset
@@ -166,16 +163,8 @@ The reported symptom is visible in Jellyfin Web after playback stops.
 - Role: trigger
 - Action: Stop the music player while the song is favorited.
 - Tool: browser
-
-#### Input
-```json
-{"actions":[{"type":"click","target":{"kind":"control","name":"Stop","scope":"player"}}]}
-```
-
-#### Success Criteria
-```json
-{"all_of":[{"type":"browser_element","selector":"button[aria-label='Add to favorites']","exists":true}]}
-```
+- Browser Action: click the player stop control named Stop.
+- Reproduced When: the song row changes back to Add to favorites.
 
 ## Failure Indicators
 - The favorite mark disappears after stopping playback.
@@ -198,6 +187,49 @@ medium
             parsed["reproduction_steps"][0]["expected_outcome"],
             "Stop the music player while the song is favorited.",
         )
+
+    def test_rejects_routine_json_blocks(self):
+        markdown = render_reproduction_plan_markdown(standard_plan()).replace(
+            "- Stage 2 manages Docker lifecycle and waits for Jellyfin health.\n"
+            "- Host Port: 8096\n"
+            "- Container Port: 8096\n"
+            "- Volumes: none\n"
+            "- Environment Variables: none",
+            '```json\n{"ports":{"host":8096,"container":8096}}\n```',
+        )
+
+        with self.assertRaisesRegex(
+            ReproductionPlanMarkdownError,
+            "JSON fences are allowed only",
+        ):
+            parse_reproduction_plan_markdown(markdown)
+
+    def test_allows_exact_request_payload_json(self):
+        plan = standard_plan()
+        plan["reproduction_steps"][1]["input"]["body_json"] = {
+            "Name": "Bad payload",
+            "ProviderIds": {"Tvdb": "123"},
+        }
+        markdown = render_reproduction_plan_markdown(plan)
+
+        parsed = parse_reproduction_plan_markdown(markdown)
+
+        self.assertIn("#### Exact Request Payload", markdown)
+        self.assertIn("```json", markdown)
+        self.assertEqual(parsed["reproduction_steps"][1]["tool"], "http_request")
+
+    def test_renders_exact_non_json_request_body_as_text(self):
+        plan = standard_plan()
+        plan["reproduction_steps"][1]["input"]["body_text"] = '{"bad":'
+
+        markdown = render_reproduction_plan_markdown(plan)
+        parsed = parse_reproduction_plan_markdown(markdown)
+
+        self.assertIn("#### Exact Request Body", markdown)
+        self.assertIn("```text", markdown)
+        self.assertNotIn("#### Exact Request Payload", markdown)
+        self.assertNotIn("```json", markdown)
+        self.assertEqual(parsed["reproduction_steps"][1]["tool"], "http_request")
 
     def test_rejects_multiple_trigger_steps(self):
         plan = standard_plan()

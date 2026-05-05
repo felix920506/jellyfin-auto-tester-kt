@@ -92,18 +92,9 @@ when all of these are also true:
   control, custom media, custom config, logs, plugins, transcoding setup, or
   exact historical Jellyfin version.
 
-When demo mode is safe, set:
-
-```json
-"server_target": {
-  "mode": "demo",
-  "release_track": "stable",
-  "base_url": "https://demo.jellyfin.org/stable",
-  "username": "demo",
-  "password": "",
-  "requires_admin": false
-}
-```
+When demo mode is safe, write `Server Mode: demo` in the `Execution Target`
+section and include the demo release track, base URL, username, blank password,
+and whether admin access is required.
 
 Use `release_track: "stable"` and `https://demo.jellyfin.org/stable` for
 `stable`, `latest`, or `latest-stable`. Use `release_track: "unstable"` and
@@ -159,21 +150,26 @@ Use exactly these top-level sections, in this order:
 8. `Confidence`
 9. `Ambiguities`
 
-The Markdown is the Stage 1 to Stage 2 handoff. Do not emit the full plan as a
-single JSON object. JSON is allowed only inside fenced `json` blocks for nested
-machine fields such as `environment`, step `input`, optional `capture`, and
-`success_criteria`.
+The Markdown is the Stage 1 to Stage 2 handoff for an AI execution agent. Make
+it readable Markdown, not a JSON wrapper. Do not emit the full plan as a single
+JSON object, and do not put routine plan fields such as environment, actions,
+captures, or success criteria inside fenced JSON blocks.
+
+The only allowed fenced `json` block in the handoff is under a step subsection
+named exactly `#### Exact Request Payload`, and only when the issue depends on
+sending a specific JSON request body. For malformed JSON or other exact
+non-JSON bodies, use a plain text/code block under `#### Exact Request Body`.
 
 Set top-level `execution_target` before sending:
 
 - Use `"web_client"` only for pure Jellyfin Web client bugs whose trigger
   symptom is browser/Jellyfin Web behavior and whose trigger step uses
   `tool: "browser"`.
-- For web-client Docker plans, set `server_target: { "mode": "docker" }` or
-  omit `server_target`; include `docker_image` as usual.
-- For web-client demo plans, include `server_target.mode: "demo"` with the exact
-  stable or unstable demo URL and demo credentials. Use `target_version:
-  "stable"` or `"unstable"` unless the issue/user supplied a more specific
+- For web-client Docker plans, use `Server Mode: docker` and include
+  `Docker Image`.
+- For web-client demo plans, use `Server Mode: demo` with the exact stable or
+  unstable demo URL and demo credentials. Use `Target Version: stable` or
+  `Target Version: unstable` unless the issue/user supplied a more specific
   label.
 - Use `"standard"` for server, API, transcoding, plugin, startup, filesystem,
   Docker, and mixed-ownership bugs, even when a browser or screenshot step helps
@@ -196,42 +192,29 @@ Never include steps like "pull image", "docker run", "start Jellyfin", or "wait
 for health" in `reproduction_steps`; they will be executed a second time and can
 cause port conflicts or duplicate containers.
 
-Each step must have a `tool` field specifying how Stage 2 should execute it:
+Each step must have a `Tool` bullet specifying how Stage 2 should execute it:
 
 - `bash`: shell command on the host, such as file preparation or ffmpeg.
 - `http_request`: raw Jellyfin HTTP request, including intentionally
-  non-spec-compliant calls when they can be represented with structured fields.
+  non-spec-compliant calls when they can be described precisely.
 - `screenshot`: capture browser state at this step.
 - `docker_exec`: command inside the already-running container.
 - `browser`: Playwright browser flow for Jellyfin Web UI interactions.
 
 Prefer `browser` when the issue depends on Jellyfin Web behavior, React-style UI
 state, media playback controls/state, or client/server interaction that cannot
-be represented as a raw API call. A browser step input must contain ordered
-`actions` with exactly one action. Navigation, waits, clicks, fills,
-screenshots, refreshes, key presses, selector waits, text waits, URL waits,
-media waits, and evaluations each count as separate browser steps/actions; the
-web-client agent must wait for the returned result before another browser call.
-Supported action types are `goto`, `refresh`, `click`, `fill`, `press`,
-`select_option`, `check`, `uncheck`, `wait_for`, `wait_for_text`,
-`wait_for_url`, `wait_for_media`, `evaluate`, and `screenshot`.
-Click actions must use a typed `target`, not loose `selector`, `text`, or
-`value` fields. Prefer visible controls and links by name:
+be represented as a raw API call. Write browser steps as one user-like action
+per step: navigation, waits, clicks, fills, screenshots, refreshes, key presses,
+selector waits, text waits, URL waits, media waits, and evaluations each count
+as separate steps. Describe click targets by visible control, link, text, or an
+explicit CSS selector escape hatch. For Jellyfin playback controls, say "the
+player favorite control named Add to favorites" and "the player stop control
+named Stop".
 
-```json
-{"type": "click", "target": {"kind": "control", "name": "Play"}}
-```
-
-Use `{"kind": "control", "name": "Add to favorites", "scope": "player"}` for
-the Jellyfin player favorite button and
-`{"kind": "control", "name": "Stop", "scope": "player"}` for the player stop
-button. Use `{"kind": "css", "selector": "...", "index": 0}` only when the
-target cannot be expressed as a visible control, link, or text target.
-
-When a step needs a value produced by an earlier step, declare a `capture` block
-on the producing step and reference the variable as `${name}` inside later
-`input` or `success_criteria` fields. Never embed placeholder strings like
-`{item_id}` because they will be sent to Jellyfin verbatim.
+When a step needs a value produced by an earlier step, describe what to capture
+and how later steps should refer to it by name, such as `${item_id}`. Never
+embed placeholder strings like `{item_id}` because they will be sent to
+Jellyfin verbatim if compiled literally.
 
 Send standard plans to the `plan_ready` channel with exactly one `send_message`
 tool-call block:
@@ -288,14 +271,14 @@ Short factual context from the issue and supporting sources.
 - Original Run ID: null
 
 ## Environment
-```json
-{"ports":{"host":8096,"container":8096},"volumes":[],"env_vars":{}}
-```
+- Stage 2 manages Docker lifecycle and waits for Jellyfin health.
+- Host Port: 8096
+- Container Port: 8096
+- Volumes: none
+- Environment Variables: none
 
 ## Prerequisites
-```json
-[]
-```
+- None
 
 ## Steps
 ### Step 1: Trigger the bug
@@ -304,16 +287,8 @@ Short factual context from the issue and supporting sources.
 - Action: Trigger the bug
 - Tool: http_request
 - Expected Outcome: The observable bug symptom appears.
-
-#### Input
-```json
-{"method":"GET","path":"/health","auth":"none"}
-```
-
-#### Success Criteria
-```json
-{"all_of":[{"type":"status_code","equals":500}]}
-```
+- Request: GET /health with no authentication.
+- Reproduced When: HTTP status equals 500.
 
 ## Failure Indicators
 - Observable bug symptom.
@@ -334,10 +309,8 @@ plans.
 
 - Never invent steps the issue does not support. Put ambiguity in
   `ambiguities`, not in steps.
-- `success_criteria` must be a structured `{ "all_of": [...] }` or
-  `{ "any_of": [...] }` object using the assertion DSL defined in
-  `plans/plan-master.md`. Never emit free-text criteria; Stage 2 evaluates them
-  programmatically.
+- Step observations must be concrete enough for Stage 2 to compile into
+  deterministic criteria. Write them as plain Markdown bullets, not JSON.
 - Prefer `http_request` over browser automation for API-level bugs. It is a raw
   HTTP transport, not a Jellyfin SDK. Every `http_request` input must include
   `method`, `path`, and `auth`. Use `auth: "auto"` for the Stage 2 admin token,
@@ -352,17 +325,19 @@ plans.
   `execution_target: "web_client"`. Route server, API, transcoding, plugin,
   startup, and mixed ownership bugs to `plan_ready` with
   `execution_target: "standard"`.
-- For request bodies, use at most one of `body_json`, `body_text`, or
-  `body_base64`; never use a generic `body` field. Use `body_text` with an
-  explicit `Content-Type` header for malformed JSON or other non-standard text.
+- For request bodies, include exact body content only when the issue depends on
+  it. Use `#### Exact Request Payload` with a fenced `json` block only for exact
+  JSON request payloads. Use `#### Exact Request Body` with plain text/code for
+  malformed JSON or other non-standard text.
 - Docker image must be `jellyfin/jellyfin:<version>` using the
   maintainer-specified version for Docker-backed plans. Demo-backed plans do
   not need `docker_image`.
 - Exactly one reproduction step must have `role: "trigger"`.
-- Trigger-step success criteria describe observing the bug symptom. A passing
-  trigger step means the defect manifested as expected.
+- Trigger-step observations describe the bug symptom. Stage 2 compiles those
+  observations into criteria where a passing trigger step means the defect
+  manifested as expected.
 - Top-level `reproduction_goal` is human-readable context only and must not be
-  used as a substitute for structured step criteria.
+  used as a substitute for concrete step observations.
 - Never emit a separate completion keyword after the plan. `plan_ready` or
   `web_client_plan_ready` is the authoritative completion signal.
 - Never combine the final `send_message` block for either final plan channel
