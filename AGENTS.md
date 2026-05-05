@@ -48,6 +48,8 @@ Tests use `unittest` and fake collaborators for Docker, API, screenshots, and co
 
 Recent commits use concise, imperative summaries such as `Add debug logging to github tool wrappers` and `Centralize stage tools into top-level tools/ package`. Keep the first line specific and under roughly 72 characters when possible. Pull requests should explain the behavior change, list verification commands run, reference related Jellyfin or repo issues, and include sample output or screenshots when report or transcript-viewer behavior changes.
 
+When large changes are made, favor multiple small commits over monolithic large commits. Always commit after changes are made, unless instructed otherwise.
+
 ## Security & Configuration Tips
 
 Do not commit `.env`, provider API keys, run artifacts, or debug outputs. Prefer `kt login <provider>` for KohakuTerrarium credentials; only place provider keys in `.env` when this process should supply auth. Use `GITHUB_TOKEN` locally to avoid low GitHub rate limits.
