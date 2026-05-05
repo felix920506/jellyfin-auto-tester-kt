@@ -57,3 +57,7 @@ Do not commit `.env`, provider API keys, run artifacts, or debug outputs. Prefer
 ## Backwards compatibility
 
 This project is in the prototype stage. There is no need for backwards compatibility.
+
+## New Feature Implementation
+
+Always evaluate whether an existing external library exists for the feature. If you want to use a custom implementation, you should always present the off-the-shelf option to the user with a list of pros and cons, and let the user decide.
