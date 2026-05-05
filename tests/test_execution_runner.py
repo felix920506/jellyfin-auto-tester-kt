@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from tools import execution_runner
 from tools.execution_runner import ExecutionRunner
+from tools.reproduction_plan_markdown import render_reproduction_plan_markdown
 
 
 class FakeDocker:
@@ -180,8 +181,25 @@ class FakeModuleExecutionRunner:
             "artifacts_dir": str(self.artifacts_root),
         }
 
+    def execute_markdown_plan(self, plan_markdown, run_id=None):
+        self.calls.append(("execute_markdown_plan", plan_markdown, run_id))
+        return {
+            "plan_markdown": plan_markdown,
+            "run_id": run_id,
+            "overall_result": "reproduced",
+            "artifacts_dir": str(self.artifacts_root),
+        }
+
     def start_plan(self, plan, run_id=None):
         self.calls.append(("start_plan", plan, run_id))
+        return {
+            "status": "needs_browser_repair",
+            "run_id": run_id,
+            "step_id": 1,
+        }
+
+    def start_markdown_plan(self, plan_markdown, run_id=None):
+        self.calls.append(("start_markdown_plan", plan_markdown, run_id))
         return {
             "status": "needs_browser_repair",
             "run_id": run_id,
@@ -244,6 +262,44 @@ class ExecutionRunnerTests(unittest.TestCase):
             self.assertEqual(runner.calls, [("execute_plan", plan, "wrapped-run")])
             self.assertEqual(result["run_id"], "wrapped-run")
 
+    def test_module_execute_markdown_plan_wrapper_uses_artifacts_root(self):
+        plan = base_plan(
+            [
+                {
+                    "step_id": 1,
+                    "role": "trigger",
+                    "action": "Call health endpoint",
+                    "tool": "http_request",
+                    "input": {"method": "GET", "path": "/health", "auth": "none"},
+                    "expected_outcome": "HTTP 200",
+                    "success_criteria": {
+                        "all_of": [{"type": "status_code", "equals": 200}]
+                    },
+                }
+            ]
+        )
+        plan_markdown = render_reproduction_plan_markdown(plan)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            FakeModuleExecutionRunner.instances = []
+            with patch.object(
+                execution_runner,
+                "ExecutionRunner",
+                FakeModuleExecutionRunner,
+            ):
+                result = execution_runner.execute_markdown_plan(
+                    plan_markdown,
+                    run_id="wrapped-md-run",
+                    artifacts_root=temp_dir,
+                )
+
+            runner = FakeModuleExecutionRunner.instances[0]
+            self.assertEqual(runner.artifacts_root, temp_dir)
+            self.assertEqual(
+                runner.calls,
+                [("execute_markdown_plan", plan_markdown, "wrapped-md-run")],
+            )
+            self.assertEqual(result["run_id"], "wrapped-md-run")
+
     def test_module_repair_wrappers_share_runner_instance(self):
         plan = base_plan([])
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -282,6 +338,53 @@ class ExecutionRunnerTests(unittest.TestCase):
                         1,
                         {"actions": [{"type": "refresh"}]},
                     ),
+                    ("finalize_plan",),
+                ],
+            )
+
+    def test_module_markdown_repair_wrappers_share_runner_instance(self):
+        plan = base_plan(
+            [
+                {
+                    "step_id": 1,
+                    "role": "trigger",
+                    "action": "Call health endpoint",
+                    "tool": "http_request",
+                    "input": {"method": "GET", "path": "/health", "auth": "none"},
+                    "expected_outcome": "HTTP 200",
+                    "success_criteria": {
+                        "all_of": [{"type": "status_code", "equals": 200}]
+                    },
+                }
+            ]
+        )
+        plan_markdown = render_reproduction_plan_markdown(plan)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            FakeModuleExecutionRunner.instances = []
+            execution_runner._DEFAULT_REPAIR_RUNNER = None
+            try:
+                with patch.object(
+                    execution_runner,
+                    "ExecutionRunner",
+                    FakeModuleExecutionRunner,
+                ):
+                    start = execution_runner.start_markdown_plan(
+                        plan_markdown,
+                        run_id="repair-md-run",
+                        artifacts_root=temp_dir,
+                    )
+                    final = execution_runner.finalize_plan()
+            finally:
+                execution_runner._DEFAULT_REPAIR_RUNNER = None
+
+            runner = FakeModuleExecutionRunner.instances[0]
+            self.assertEqual(start["status"], "needs_browser_repair")
+            self.assertEqual(final["overall_result"], "reproduced")
+            self.assertEqual(runner.artifacts_root, temp_dir)
+            self.assertEqual(
+                runner.calls,
+                [
+                    ("start_markdown_plan", plan_markdown, "repair-md-run"),
                     ("finalize_plan",),
                 ],
             )

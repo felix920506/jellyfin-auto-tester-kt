@@ -44,6 +44,10 @@
           "type": "string",
           "minLength": 1
         },
+        "plan_markdown_path": {
+          "type": "string",
+          "minLength": 1
+        },
         "base_url": {
           "type": "string",
           "minLength": 1
@@ -148,8 +152,36 @@
                   "plan_path"
                 ],
                 "not": {
-                  "required": [
-                    "base_url"
+                  "anyOf": [
+                    {
+                      "required": [
+                        "plan_markdown_path"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "base_url"
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "plan_markdown_path"
+                ],
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "plan_path"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "base_url"
+                      ]
+                    }
                   ]
                 }
               },
@@ -158,8 +190,17 @@
                   "base_url"
                 ],
                 "not": {
-                  "required": [
-                    "plan_path"
+                  "anyOf": [
+                    {
+                      "required": [
+                        "plan_path"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "plan_markdown_path"
+                      ]
+                    }
                   ]
                 }
               }

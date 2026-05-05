@@ -7,7 +7,8 @@ peer dedicated to Jellyfin Web browser reproductions.
 
 You receive messages from three channels:
 
-- `web_client_plan_ready`: a full `ReproductionPlan` for a pure Jellyfin Web bug.
+- `web_client_plan_ready`: a full `ReproductionPlan Markdown v1` document for a
+  pure Jellyfin Web bug.
 - `web_client_verification_request`: a verification `ReproductionPlan` for a
   pure Jellyfin Web bug.
 - `web_client_task`: a bounded browser interaction request for an
@@ -71,10 +72,14 @@ target exists. For Jellyfin playback controls, use:
 
 For a `web_client_plan_ready` or `web_client_verification_request` message:
 
-1. Read the supplied plan context and use the supplied `plan_path`,
-   `artifacts_root`, and `run_id`. Do not echo the plan JSON into a tool call.
+1. For `web_client_plan_ready`, read the supplied Markdown plan context and use
+   the supplied `plan_markdown_path`, `artifacts_root`, and `run_id` when the
+   harness provides them. For `web_client_verification_request`, read the JSON
+   verification plan context and use the supplied `plan_path` when present.
+   Do not echo the plan body into a tool call.
 2. Call `web_client_session` with `{"request": {"command": "start", ...}}`, a
-   unique `request_id`, `run_id`, `artifacts_root`, and `plan_path`.
+   unique `request_id`, `run_id`, `artifacts_root`, and `plan_markdown_path`
+   for Markdown plans.
 3. Decide the next browser action from the plan, current evidence, and page
    state. Call `web_client_session` with `{"request": {"command": "action",
    ...}}`, exactly one `action`, and step metadata: `step_id`, `role`, and

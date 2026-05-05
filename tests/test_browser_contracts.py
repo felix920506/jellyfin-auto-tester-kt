@@ -229,7 +229,7 @@ class BrowserContractTests(unittest.TestCase):
             "request_id": "request-1",
             "run_id": "run-1",
             "artifacts_root": "/tmp/artifacts",
-            "plan_path": "/tmp/artifacts/plan.json",
+            "plan_markdown_path": "/tmp/artifacts/plan.md",
         }
         start_task_request = {
             "command": "start",
@@ -293,7 +293,7 @@ class BrowserContractTests(unittest.TestCase):
             "request_id": "request-4",
             "run_id": "run-1",
             "artifacts_root": "/tmp/artifacts",
-            "plan_path": "/tmp/artifacts/plan.json",
+            "plan_markdown_path": "/tmp/artifacts/plan.md",
         }
         content_wrapper = {"content": json.dumps({"request": raw_command})}
 
@@ -394,6 +394,9 @@ class BrowserContractTests(unittest.TestCase):
         self.assertIn("When in doubt, choose `standard`", analysis_prompt)
         self.assertIn("web_client_plan_ready", analysis_context)
         self.assertIn('"web_client"', analysis_context)
+        self.assertIn("ReproductionPlan Markdown v1", analysis_prompt)
+        self.assertNotIn("valid ReproductionPlan JSON", analysis_prompt)
+        self.assertNotIn("raw JSON body", analysis_context)
         self.assertIn("demo.jellyfin.org/stable", analysis_prompt)
         self.assertIn("demo.jellyfin.org/unstable", analysis_prompt)
         self.assertIn("blank password", analysis_prompt)
@@ -421,7 +424,7 @@ class BrowserContractTests(unittest.TestCase):
         self.assertIn("web_client_session", web_client_prompt)
         self.assertIn('command: "action"', web_client_prompt)
         self.assertIn("exactly one top-level `action` object", web_client_prompt)
-        self.assertIn("Do not echo the plan JSON into a tool call", web_client_prompt)
+        self.assertIn("Do not echo the plan body into a tool call", web_client_prompt)
         self.assertIn('command: "finalize"', web_client_prompt)
         self.assertIn("There is only one active web-client session", web_client_prompt)
         self.assertNotIn("session_id", web_client_prompt)

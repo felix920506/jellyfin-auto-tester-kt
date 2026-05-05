@@ -138,9 +138,9 @@ outcomes, or success criteria.
   --out debug/stage3
 ```
 
-- **Stage 1 (Analysis)** writes `transcript.json` and `reproduction_plan.json`.
-- **Stage 2 (Execution)** reads `reproduction_plan.json` and writes `execution_result.json`.
-- **Stage 2 (Web Client)** is a peer to Execution for pure Jellyfin Web bugs; it reads `reproduction_plan.json` and writes `transcript.json` plus `execution_result.json`.
+- **Stage 1 (Analysis)** writes `transcript.json` and `plan.md`.
+- **Stage 2 (Execution)** reads `plan.md` and writes `execution_result.json`.
+- **Stage 2 (Web Client)** is a peer to Execution for pure Jellyfin Web bugs; it reads `plan.md` and writes `transcript.json` plus `execution_result.json`.
 - **Stage 3 (Report)** reads `execution_result.json`, runs the report and verification agents through KT channels, and writes `report.md` plus `final_report.json` or `human_review_queue.json`.
 
 For compatibility with an already captured verification run, pass it with

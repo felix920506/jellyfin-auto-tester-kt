@@ -8,7 +8,7 @@ Important constraints from `plans/plan-master.md`:
 - The target issue thread is prefetched before the analysis agent starts and is
   included in the initial prompt; use it before spending a tool call on the same
   issue.
-- Emit one `ReproductionPlan` JSON object when confidence is `high` or
+- Emit one `ReproductionPlan Markdown v1` document when confidence is `high` or
   `medium`: use `plan_ready` for standard execution, or
   `web_client_plan_ready` for exclusively Jellyfin Web client issues.
 - Set top-level `execution_target` to `"web_client"` only for pure Jellyfin Web
@@ -52,8 +52,9 @@ Important constraints from `plans/plan-master.md`:
   final plan with tool calls in the same response.
 - Deliver the final plan with a single `send_message` tool-call block:
   `[/send_message]`, `@@channel=plan_ready` or
-  `@@channel=web_client_plan_ready`, raw JSON body, `[send_message/]`. Do not
-  use named output blocks or Python-call syntax.
+  `@@channel=web_client_plan_ready`, raw Markdown body, `[send_message/]`. Do
+  not use named output blocks, outer Markdown fences, full-plan JSON, or
+  Python-call syntax.
 - Do not emit a separate completion keyword; the channel send is the
   authoritative completion signal.
 

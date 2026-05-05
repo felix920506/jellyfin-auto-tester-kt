@@ -14,6 +14,7 @@ from tools.web_client_runner import (
     WebClientRunner,
     WebClientSessionTool,
 )
+from tools.reproduction_plan_markdown import render_reproduction_plan_markdown
 
 from tests.test_execution_runner import (
     FakeAPI,
@@ -352,12 +353,15 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(docker.pulled, [])
             self.assertEqual(docker.started, [])
 
-    def test_session_start_with_plan_path_prepares_without_running_browser_action(self):
+    def test_session_start_with_plan_markdown_path_prepares_without_running_browser_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             docker = FakeDocker()
             browser_driver = FakeBrowserDriver(temp_dir)
-            plan_path = Path(temp_dir) / "plan.json"
-            plan_path.write_text(json.dumps(browser_plan()), encoding="utf-8")
+            plan_path = Path(temp_dir) / "plan.md"
+            plan_path.write_text(
+                render_reproduction_plan_markdown(browser_plan()),
+                encoding="utf-8",
+            )
             runner = WebClientRunner(
                 artifacts_root=temp_dir,
                 docker=docker,
@@ -373,7 +377,7 @@ class WebClientRunnerTests(unittest.TestCase):
                     "request_id": "start-1",
                     "run_id": "plan-run",
                     "artifacts_root": temp_dir,
-                    "plan_path": str(plan_path),
+                    "plan_markdown_path": str(plan_path),
                 }
             )
 
@@ -383,6 +387,8 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(browser_driver.runs, [])
             self.assertEqual(docker.pulled, [("jellyfin/jellyfin:10.9.7", "plan-run")])
             self.assertEqual(len(docker.started), 1)
+            self.assertTrue(Path(temp_dir, "plan-run", "plan.md").is_file())
+            self.assertTrue(Path(temp_dir, "plan-run", "plan.json").is_file())
 
             runner.session(
                 {
@@ -1250,7 +1256,7 @@ class WebClientRunnerToolTests(unittest.TestCase):
             "request_id": "start-1",
             "run_id": "tool-run",
             "artifacts_root": "/tmp/artifacts",
-            "plan_path": "/tmp/artifacts/plan.json",
+            "plan_markdown_path": "/tmp/artifacts/plan.md",
         }
         expected = {
             "request_id": "start-1",

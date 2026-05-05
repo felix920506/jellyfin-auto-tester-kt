@@ -49,6 +49,7 @@ from tools.criteria import (
 )
 from tools.docker_manager import DockerManager
 from tools.jellyfin_http import JellyfinHTTP
+from tools.reproduction_plan_markdown import parse_reproduction_plan_markdown
 from tools.screenshot import Screenshotter
 
 
@@ -89,6 +90,7 @@ SESSION_ALLOWED_FIELDS = {
     "run_id",
     "artifacts_root",
     "plan_path",
+    "plan_markdown_path",
     "base_url",
     "step_id",
     "role",
@@ -108,6 +110,7 @@ SESSION_FIELDS_BY_COMMAND = {
         "run_id",
         "artifacts_root",
         "plan_path",
+        "plan_markdown_path",
         "base_url",
         "step_id",
         "browser_input",
@@ -842,16 +845,39 @@ class WebClientRunner:
         setup_failed = False
         error_summary: str | None = None
 
-        if payload.get("plan_path"):
-            plan_path = Path(str(payload["plan_path"])).expanduser().resolve()
-            plan = _read_json_file(plan_path)
-            if not _looks_like_reproduction_plan(plan):
-                result = _web_client_error(
-                    request_id,
-                    "plan_path must point to a ReproductionPlan JSON object",
+        if payload.get("plan_path") or payload.get("plan_markdown_path"):
+            if payload.get("plan_markdown_path"):
+                plan_path = (
+                    Path(str(payload["plan_markdown_path"])).expanduser().resolve()
                 )
-                self._write_session_result_if_possible(payload, result)
-                return result
+                plan_markdown = plan_path.read_text(encoding="utf-8")
+                try:
+                    plan = parse_reproduction_plan_markdown(plan_markdown)
+                except Exception as exc:
+                    message = (
+                        "plan_markdown_path must point to a valid "
+                        f"ReproductionPlan Markdown document: {exc}"
+                    )
+                    result = _web_client_error(
+                        request_id,
+                        message,
+                    )
+                    self._write_session_result_if_possible(payload, result)
+                    return result
+                (artifacts_dir / "plan.md").write_text(
+                    plan_markdown.rstrip() + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                plan_path = Path(str(payload["plan_path"])).expanduser().resolve()
+                plan = _read_json_file(plan_path)
+                if not _looks_like_reproduction_plan(plan):
+                    result = _web_client_error(
+                        request_id,
+                        "plan_path must point to a ReproductionPlan JSON object",
+                    )
+                    self._write_session_result_if_possible(payload, result)
+                    return result
             _write_json(artifacts_dir / "plan.json", plan)
             server_target = _server_target(plan)
             self._debug_event(run_id, "session_plan_start", _plan_debug_payload(plan))
@@ -2282,13 +2308,25 @@ def _validate_session_request(payload: Mapping[str, Any]) -> dict[str, str] | No
         has_plan_path = isinstance(payload.get("plan_path"), str) and bool(
             str(payload.get("plan_path")).strip()
         )
+        has_plan_markdown_path = isinstance(
+            payload.get("plan_markdown_path"),
+            str,
+        ) and bool(str(payload.get("plan_markdown_path")).strip())
         has_base_url = isinstance(payload.get("base_url"), str) and bool(
             str(payload.get("base_url")).strip()
         )
-        if has_plan_path == has_base_url:
+        supplied_targets = sum(
+            1
+            for supplied in (has_plan_path, has_plan_markdown_path, has_base_url)
+            if supplied
+        )
+        if supplied_targets != 1:
             return {
                 "path": "$.plan_path",
-                "message": "start requires exactly one of plan_path or base_url",
+                "message": (
+                    "start requires exactly one of plan_path, "
+                    "plan_markdown_path, or base_url"
+                ),
             }
     elif command == "action":
         action = payload.get("action")

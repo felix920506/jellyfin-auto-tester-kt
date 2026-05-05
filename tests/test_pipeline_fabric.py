@@ -41,6 +41,10 @@ from main import (
     run_issue,
     run_report_stage,
 )
+from tools.reproduction_plan_markdown import (
+    parse_reproduction_plan_markdown,
+    render_reproduction_plan_markdown,
+)
 
 
 class FakeAnalysisAgent:
@@ -143,7 +147,7 @@ class RetryThenPlanReadyAnalysisAgent:
             yield "The reproduction plan has been sent to `plan_ready`.\n"
             return
 
-        self.plan_channel.send(json.dumps(self.plan))
+        self.plan_channel.send(render_reproduction_plan_markdown(self.plan))
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -162,7 +166,7 @@ class SendMessagePlanReadyAnalysisAgent:
 
     async def chat(self, prompt):
         self.prompts.append(prompt)
-        self.plan_channel.send(json.dumps(self.plan))
+        self.plan_channel.send(render_reproduction_plan_markdown(self.plan))
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -259,7 +263,7 @@ class ProviderConversationAnalysisAgent:
             second_parts.append(chunk)
             yield chunk
         conversation.append("assistant", "".join(second_parts))
-        self.plan_channel.send(self.plan)
+        self.plan_channel.send(render_reproduction_plan_markdown(self.plan))
 
 
 class FakeExecutionAgent:
@@ -320,6 +324,7 @@ class FakeStage2AgentEngine:
         }
         self.received_channel = None
         self.received_payload = None
+        self.received_metadata = None
         self.run_thread = None
         self.stopped = False
 
@@ -347,10 +352,11 @@ class FakeStage2AgentEngine:
         message_task = next(iter(done))
         self.received_channel = pending[message_task]
         message = message_task.result()
-        self.received_payload = json.loads(message.content)
-        plan = self.received_payload.get("plan", self.received_payload)
-        run_id = self.received_payload.get("run_id") or self.default_run_id
-        artifacts_root = self.received_payload.get("artifacts_root")
+        self.received_payload = message.content
+        self.received_metadata = dict(getattr(message, "metadata", {}) or {})
+        plan = parse_reproduction_plan_markdown(message.content)
+        run_id = self.received_metadata.get("run_id") or self.default_run_id
+        artifacts_root = self.received_metadata.get("artifacts_root")
         result = {
             "plan": plan,
             "run_id": run_id,
@@ -436,9 +442,10 @@ class ProviderWebClientStageEngine(FakeWebClientStageEngine):
         message_task = next(iter(done))
         self.received_channel = pending[message_task]
         message = message_task.result()
-        self.received_payload = json.loads(message.content)
-        plan = self.received_payload.get("plan", self.received_payload)
-        run_id = self.received_payload.get("run_id") or self.default_run_id
+        self.received_payload = message.content
+        self.received_metadata = dict(getattr(message, "metadata", {}) or {})
+        plan = parse_reproduction_plan_markdown(message.content)
+        run_id = self.received_metadata.get("run_id") or self.default_run_id
         result = {
             "plan": plan,
             "run_id": run_id,
@@ -500,6 +507,7 @@ class FakeStartedTerrariumStageEngine:
         }
         self.received_channel = None
         self.received_payload = None
+        self.received_metadata = None
         self.start_called = False
         self.stop_called = False
         self.shutdown_called = False
@@ -526,10 +534,11 @@ class FakeStartedTerrariumStageEngine:
 
     async def _emit_execution_done(self, channel, message):
         self.received_channel = channel
-        self.received_payload = json.loads(message.content)
-        plan = self.received_payload.get("plan", self.received_payload)
-        run_id = self.received_payload.get("run_id") or self.default_run_id
-        artifacts_root = self.received_payload.get("artifacts_root")
+        self.received_payload = message.content
+        self.received_metadata = dict(getattr(message, "metadata", {}) or {})
+        plan = parse_reproduction_plan_markdown(message.content)
+        run_id = self.received_metadata.get("run_id") or self.default_run_id
+        artifacts_root = self.received_metadata.get("artifacts_root")
         result = {
             "plan": plan,
             "run_id": run_id,
@@ -815,7 +824,6 @@ def _sample_web_client_plan():
                 "auth": "auto",
                 "label": "web_home",
                 "actions": [
-                    {"type": "goto"},
                     {"type": "screenshot", "label": "web_home"},
                 ],
             },
@@ -1046,8 +1054,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("[/send_message]", prompt)
         self.assertIn("@@channel=plan_ready", prompt)
+        self.assertIn("# ReproductionPlan Markdown v1", prompt)
         self.assertIn("[send_message/]", prompt)
         self.assertIn("not `[/send_message]`", prompt)
+        self.assertNotIn("valid ReproductionPlan JSON", prompt)
         self.assertNotIn('send_message(channel="plan_ready"', prompt)
         self.assertNotIn("output_plan_ready", prompt)
 
@@ -1292,10 +1302,13 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 timeout=1,
             )
 
-            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+            written_plan = parse_reproduction_plan_markdown(
+                (Path(temp_dir) / "plan.md").read_text(encoding="utf-8")
+            )
 
         self.assertEqual(result.status, "plan_ready")
         self.assertEqual(result.metadata["source"], "channel")
+        self.assertEqual(result.output_file, "plan.md")
         self.assertEqual(written_plan, plan)
         self.assertTrue(analysis_agent.cancelled)
 
@@ -1322,11 +1335,14 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 timeout=1,
             )
 
-            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+            written_plan = parse_reproduction_plan_markdown(
+                (Path(temp_dir) / "plan.md").read_text(encoding="utf-8")
+            )
 
         self.assertEqual(result.status, "web_client_plan_ready")
         self.assertEqual(result.metadata["source"], "channel")
         self.assertEqual(result.metadata["channel"], "web_client_plan_ready")
+        self.assertEqual(result.output_file, "plan.md")
         self.assertEqual(written_plan["execution_target"], "web_client")
         self.assertEqual(written_plan["reproduction_steps"][0]["tool"], "browser")
 
@@ -1386,7 +1402,11 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         plan = _sample_plan()
         engine = FakeEngine(
             ["analysis started\n", "REPRODUCTION_PLAN_COMPLETE\n"],
-            channels={"plan_ready": FakeChannel({"content": plan})},
+            channels={
+                "plan_ready": FakeChannel(
+                    {"content": render_reproduction_plan_markdown(plan)}
+                )
+            },
         )
         stream = io.StringIO()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1400,8 +1420,13 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(result.status, "plan_ready")
-            self.assertEqual(result.output_file, "plan.json")
-            self.assertEqual(json.loads((Path(temp_dir) / "plan.json").read_text()), plan)
+            self.assertEqual(result.output_file, "plan.md")
+            self.assertEqual(
+                parse_reproduction_plan_markdown(
+                    (Path(temp_dir) / "plan.md").read_text(encoding="utf-8")
+                ),
+                plan,
+            )
             input_payload = json.loads((Path(temp_dir) / "input.json").read_text())
             self.assertEqual(input_payload["prefetched_issue_thread"]["title"], "Debug issue")
             transcript_payload = _read_stage_transcript(temp_dir)
@@ -1544,7 +1569,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             3,
         )
 
-    async def test_run_analysis_stage_accepts_context_filled_provider_plan(self):
+    async def test_run_analysis_stage_rejects_json_plan_handoff(self):
         plan = _sample_provider_plan_without_target_version()
         engine = FakeEngine(
             ["analysis completed\n"],
@@ -1552,53 +1577,16 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = await run_analysis_stage(
-                "https://github.com/jellyfin/jellyfin/issues/14267",
-                "10.11.8",
-                temp_dir,
-                stream=None,
-                engine_factory=lambda stage: engine,
-                issue_fetcher=_sample_issue_fetcher,
-            )
-
-            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
-
-        self.assertEqual(result.status, "plan_ready")
-        self.assertEqual(result.metadata["source"], "channel")
-        self.assertEqual(written_plan["target_version"], "10.11.8")
-        self.assertEqual(
-            written_plan["issue_url"],
-            "https://github.com/jellyfin/jellyfin/issues/14267",
-        )
-        self.assertEqual(written_plan["issue_title"], "Debug issue")
-        self.assertEqual(
-            written_plan["reproduction_steps"][0]["input"]["command"],
-            "echo ok",
-        )
-        self.assertEqual(
-            written_plan["reproduction_steps"][0]["success_criteria"]["all_of"][0],
-            {"type": "exit_code", "equals": 0},
-        )
-        self.assertEqual(
-            written_plan["reproduction_steps"][1]["input"]["path"],
-            "/Items",
-        )
-        self.assertEqual(
-            written_plan["reproduction_steps"][1]["input"]["params"],
-            {"Recursive": "true"},
-        )
-        self.assertEqual(
-            written_plan["reproduction_steps"][1]["capture"]["item_id"],
-            {"from": "body_json_path", "path": "$.Items[0].Id"},
-        )
-        self.assertEqual(
-            written_plan["reproduction_steps"][1]["success_criteria"]["all_of"][0],
-            {
-                "type": "body_json_path",
-                "path": "$.Items[0].Name",
-                "equals": "Beautiful Planet",
-            },
-        )
+            with self.assertRaises(AnalysisAgentProtocolError):
+                await run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin/issues/14267",
+                    "10.11.8",
+                    temp_dir,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                )
+            self.assertFalse((Path(temp_dir) / "plan.md").exists())
 
     async def test_run_analysis_stage_retries_after_hallucinated_plan_ready(self):
         plan = _sample_plan()
@@ -1624,7 +1612,9 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 timeout=1,
             )
 
-            written_plan = json.loads((Path(temp_dir) / "plan.json").read_text())
+            written_plan = parse_reproduction_plan_markdown(
+                (Path(temp_dir) / "plan.md").read_text(encoding="utf-8")
+            )
             transcript_payload = _read_stage_transcript(temp_dir)
 
         self.assertEqual(result.status, "plan_ready")
@@ -1672,7 +1662,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(engine.analysis_agent.prompts), 3)
             self.assertIn("attempt 2 of 3", engine.analysis_agent.prompts[1])
             self.assertIn("attempt 3 of 3", engine.analysis_agent.prompts[2])
-            self.assertFalse((Path(temp_dir) / "plan.json").exists())
+            self.assertFalse((Path(temp_dir) / "plan.md").exists())
             self.assertFalse((Path(temp_dir) / "stage_result.json").exists())
 
     async def test_run_analysis_stage_rejects_default_output_plan(self):
@@ -1714,7 +1704,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 written_transcript["messages"][1]["content"],
                 written_transcript["output"]["assistant"],
             )
-            self.assertFalse((Path(temp_dir) / "plan.json").exists())
+            self.assertFalse((Path(temp_dir) / "plan.md").exists())
 
     async def test_run_analysis_stage_rejects_conversation_plan_without_channel(self):
         plan = _sample_legacy_printed_plan()
@@ -1752,7 +1742,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stream.getvalue(), "")
             self.assertIn("jellyfin_version", written_transcript["output"]["assistant"])
             self.assertEqual(written_transcript["output"]["sources"][0]["source"], "conversation")
-            self.assertFalse((Path(temp_dir) / "plan.json").exists())
+            self.assertFalse((Path(temp_dir) / "plan.md").exists())
 
     async def test_run_analysis_stage_rejects_printed_send_message_without_delivery(self):
         partial_plan = _sample_gemini_partial_plan()
@@ -1792,7 +1782,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
             transcript_payload = _read_stage_transcript(temp_dir)
             self.assertIn("@@channel=plan_ready", transcript_payload["output"]["assistant"])
-            self.assertFalse((Path(temp_dir) / "plan.json").exists())
+            self.assertFalse((Path(temp_dir) / "plan.md").exists())
 
     async def test_run_analysis_stage_raises_when_plan_ready_is_missing(self):
         engine = FakeEngine(["analysis started\nREPRODUCTION_PLAN_COMPLETE\n"])
@@ -1816,7 +1806,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
             transcript_payload = _read_stage_transcript(temp_dir)
             self.assertIn("analysis started", transcript_payload["output"]["assistant"])
-            self.assertFalse((Path(temp_dir) / "plan.json").exists())
+            self.assertFalse((Path(temp_dir) / "plan.md").exists())
             self.assertFalse((Path(temp_dir) / "stage_result.json").exists())
 
     async def test_run_analysis_stage_raises_on_empty_response(self):
@@ -1844,7 +1834,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(engine.analysis_agent.prompts), 3)
             self.assertIn("attempt 2 of 3", engine.analysis_agent.prompts[1])
             self.assertIn("attempt 3 of 3", engine.analysis_agent.prompts[2])
-            self.assertFalse((Path(temp_dir) / "plan.json").exists())
+            self.assertFalse((Path(temp_dir) / "plan.md").exists())
             self.assertFalse((Path(temp_dir) / "stage_result.json").exists())
 
     def test_run_execution_stage_reads_plan_and_writes_result_handoff(self):
@@ -1854,7 +1844,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             result = run_execution_stage(
                 input_dir,
@@ -1877,11 +1870,15 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(stage_result_path.is_file())
             self.assertEqual(engine.received_channel, "plan_ready")
-            self.assertEqual(engine.received_payload["run_id"], "run-1")
-            self.assertEqual(engine.received_payload["plan"], plan)
+            self.assertIn("# ReproductionPlan Markdown v1", engine.received_payload)
+            self.assertEqual(engine.received_metadata["run_id"], "run-1")
             self.assertEqual(
-                engine.received_payload["artifacts_root"],
+                engine.received_metadata["artifacts_root"],
                 str((temp_path / "execution").resolve()),
+            )
+            self.assertEqual(
+                parse_reproduction_plan_markdown(engine.received_payload),
+                plan,
             )
             self.assertTrue(engine.stopped)
 
@@ -1893,7 +1890,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             result = run_execution_stage(
                 input_dir,
@@ -1911,7 +1911,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             with self.assertRaises(PipelineTimeoutError):
                 run_execution_stage(
@@ -1930,7 +1933,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             with self.assertRaisesRegex(RuntimeError, "stage engine failed"):
                 run_execution_stage(
@@ -1948,7 +1954,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             result = run_web_client_stage(
                 input_dir,
@@ -1966,8 +1975,12 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["plan"], plan)
             self.assertTrue((temp_path / "web-client" / "result.json").is_file())
             self.assertEqual(engine.received_channel, "web_client_plan_ready")
-            self.assertEqual(engine.received_payload["run_id"], "web-run-1")
-            self.assertEqual(engine.received_payload["plan"], plan)
+            self.assertIn("# ReproductionPlan Markdown v1", engine.received_payload)
+            self.assertEqual(engine.received_metadata["run_id"], "web-run-1")
+            self.assertEqual(
+                parse_reproduction_plan_markdown(engine.received_payload),
+                plan,
+            )
             self.assertTrue(engine.stopped)
 
     def test_run_web_client_stage_writes_provider_transcript(self):
@@ -1980,7 +1993,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                     "request_id": "start-1",
                     "run_id": "web-run-transcript",
                     "artifacts_root": "/tmp/artifacts",
-                    "plan_path": "/tmp/artifacts/plan.json",
+                    "plan_markdown_path": "/tmp/artifacts/plan.md",
                 }
             )
             + "\n"
@@ -1999,7 +2012,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             result = run_web_client_stage(
                 input_dir,
@@ -2020,7 +2036,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transcript_payload["stage"], "web-client")
         self.assertEqual(transcript_payload["status"], "execution_done")
         self.assertEqual(transcript_payload["input"]["channel"], "web_client_plan_ready")
-        self.assertEqual(transcript_payload["input"]["plan"], plan)
+        self.assertEqual(
+            parse_reproduction_plan_markdown(transcript_payload["input"]["plan_markdown"]),
+            plan,
+        )
         self.assertIn(
             "Channel: web_client_plan_ready",
             transcript_payload["input"]["prompt"],
@@ -2060,7 +2079,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             with self.assertRaisesRegex(RuntimeError, "web-client provider crashed"):
                 run_web_client_stage(
@@ -2093,7 +2115,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             result = run_web_client_stage(
                 input_dir,
@@ -2104,7 +2129,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(result.status, "reproduced")
             self.assertEqual(engine.received_channel, "web_client_plan_ready")
-            self.assertEqual(engine.received_payload["run_id"], "web-run-started")
+            self.assertEqual(engine.received_metadata["run_id"], "web-run-started")
             self.assertFalse(engine.start_called)
             self.assertFalse(engine.stop_called)
             self.assertTrue(engine.shutdown_called)
@@ -2116,7 +2141,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             with self.assertLogs(LOGGER_NAME, level="DEBUG") as logs:
                 run_web_client_stage(
@@ -2140,7 +2168,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             result = run_web_client_stage(
                 input_dir,
@@ -2171,7 +2202,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             result = asyncio.run(call_stage(input_dir, temp_path / "web-client"))
 
@@ -2196,7 +2230,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             input_dir = temp_path / "analysis"
             input_dir.mkdir()
-            (input_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (input_dir / "plan.md").write_text(
+                render_reproduction_plan_markdown(plan),
+                encoding="utf-8",
+            )
 
             result = asyncio.run(call_stage(input_dir, temp_path / "execution"))
 

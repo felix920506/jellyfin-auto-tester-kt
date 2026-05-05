@@ -15,11 +15,15 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Iterable, TextIO
+from typing import Any, Callable, Iterable, Mapping, TextIO
 from urllib.parse import urlparse
 
 from stage1_model_blacklist import is_stage1_model_blacklisted
 from tools.async_compat import run_sync_away_from_loop
+from tools.reproduction_plan_markdown import (
+    parse_reproduction_plan_markdown,
+    ReproductionPlanMarkdownError,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -50,7 +54,7 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_LOG_STDERR = "auto"
 ANALYSIS_PLAN_MAX_ATTEMPTS = 3
 STAGE_HANDOFF_FILES = {
-    "analysis": ("plan.json", "reproduction_plan.json"),
+    "analysis": ("plan.md",),
     "execution": ("result.json", "execution_result.json"),
     "web-client": ("result.json", "execution_result.json"),
     "report": ("result.json", "execution_result.json"),
@@ -784,7 +788,7 @@ async def run_analysis_stage(
     Output files:
     - ``input.json``: issue URL and target version used for the run.
     - ``transcript.json``: machine-readable prompt and assistant response.
-    - ``plan.json``: ReproductionPlan payload for Stage 2 when available.
+    - ``plan.md``: ReproductionPlan Markdown payload for Stage 2 when available.
     - ``insufficient_information.md``: readable early-stop summary when no
       executable plan can be produced.
     - ``stage_result.json``: machine-readable metadata for the debug run.
@@ -838,8 +842,8 @@ async def run_analysis_stage(
         transcript_capture = (
             transcript_capture_state[0] if transcript_capture_state is not None else None
         )
-        channel_plan: dict[str, Any] | None = None
-        plan: dict[str, Any] | None = None
+        channel_plan_markdown: str | None = None
+        plan_markdown: str | None = None
         plan_source: str | None = None
         plan_channel: str | None = None
         transcript = ""
@@ -868,21 +872,20 @@ async def run_analysis_stage(
                 )
                 if plan_task in done:
                     (
-                        channel_plan,
+                        channel_plan_markdown,
                         _channel_error,
                         channel_name,
-                    ) = _completed_channel_plan_with_channel(
+                    ) = _completed_channel_plan_markdown_with_channel(
                         plan_task,
-                        issue_url=issue_url,
-                        container_version=container_version,
-                        issue_thread=issue_thread,
                     )
-                    if channel_plan is not None:
+                    if channel_plan_markdown is not None:
                         plan_channel = channel_name
-                    await _stop_analysis_agent(analysis_agent)
-                    if not chat_task.done():
-                        chat_task.cancel()
-                        await _cancel_task(chat_task)
+                        await _stop_analysis_agent(analysis_agent)
+                        if not chat_task.done():
+                            chat_task.cancel()
+                            await _cancel_task(chat_task)
+                    elif not chat_task.done():
+                        await chat_task
                 else:
                     await chat_task
                 chat_task = None
@@ -939,20 +942,21 @@ async def run_analysis_stage(
                         )
                     )
 
-                plan = channel_plan
-                plan_source = "channel" if channel_plan is not None else None
-                if plan is None:
-                    plan, plan_source, resolved_channel = await _resolve_analysis_stage_plan(
+                plan_markdown = channel_plan_markdown
+                plan_source = "channel" if channel_plan_markdown is not None else None
+                if plan_markdown is None:
+                    (
+                        plan_markdown,
+                        plan_source,
+                        resolved_channel,
+                    ) = await _resolve_analysis_stage_plan(
                         plan_task,
                         transcript,
-                        issue_url=issue_url,
-                        container_version=container_version,
-                        issue_thread=issue_thread,
                         timeout_s=timeout_s,
                     )
-                    if plan is not None:
+                    if plan_markdown is not None:
                         plan_channel = resolved_channel
-                if plan is not None:
+                if plan_markdown is not None:
                     break
 
                 if attempt >= ANALYSIS_PLAN_MAX_ATTEMPTS:
@@ -965,17 +969,14 @@ async def run_analysis_stage(
                 )
                 if plan_task.done():
                     (
-                        channel_plan,
+                        channel_plan_markdown,
                         _channel_error,
                         channel_name,
-                    ) = _completed_channel_plan_with_channel(
+                    ) = _completed_channel_plan_markdown_with_channel(
                         plan_task,
-                        issue_url=issue_url,
-                        container_version=container_version,
-                        issue_thread=issue_thread,
                     )
-                    if channel_plan is not None:
-                        plan = channel_plan
+                    if channel_plan_markdown is not None:
+                        plan_markdown = channel_plan_markdown
                         plan_source = "channel"
                         plan_channel = channel_name
                         break
@@ -994,7 +995,7 @@ async def run_analysis_stage(
                 await _cancel_task(chat_task)
             _restore_transcript_output(transcript_capture_state)
             _restore_transcript_message_hooks(transcript_message_hooks)
-        if plan is None:
+        if plan_markdown is None:
             transcript_writer.write_snapshot(
                 assistant_output=transcript,
                 output_sources=transcript_sources,
@@ -1012,9 +1013,9 @@ async def run_analysis_stage(
             output_sources=transcript_sources,
             status=plan_channel or "plan_ready",
         )
-        _write_json_file(output_dir / "plan.json", plan)
+        _write_text_file(output_dir / "plan.md", plan_markdown)
         logger.info(
-            "Stage 1 debug run wrote plan.json from %s",
+            "Stage 1 debug run wrote plan.md from %s",
             plan_channel or plan_source,
         )
         return _write_stage_result(
@@ -1022,7 +1023,7 @@ async def run_analysis_stage(
                 stage="analysis",
                 status=plan_channel or "plan_ready",
                 output_dir=str(output_dir),
-                output_file="plan.json",
+                output_file="plan.md",
                 metadata={
                     "transcript": ANALYSIS_TRANSCRIPT_FILE,
                     "source": plan_source,
@@ -1088,8 +1089,9 @@ async def _run_execution_stage_impl(
     logger.info("Starting Stage 2 debug run from %s", input_path)
     output_dir = _prepare_output_dir(out_dir)
     plan_path = _resolve_stage_input_file(input_path, "analysis")
-    plan = _read_json_file(plan_path)
-    _write_json_file(output_dir / "plan.json", plan)
+    plan_markdown = _read_text_file(plan_path)
+    plan = parse_reproduction_plan_markdown(plan_markdown)
+    output_plan_path = _write_text_file(output_dir / "plan.md", plan_markdown)
     logger.debug(
         "Loaded execution Stage 2 plan execution_target=%s steps=%s",
         plan.get("execution_target"),
@@ -1101,12 +1103,12 @@ async def _run_execution_stage_impl(
     engine = await _load_stage_engine("execution", engine_factory=engine_factory)
     route_channel = _execution_stage_plan_channel(plan)
     max_iterations, max_turns = apply_execution_turn_budget(engine, plan)
-    message: dict[str, Any] = {
-        "plan": dict(plan),
+    metadata: dict[str, Any] = {
         "artifacts_root": str(output_dir),
+        "plan_markdown_path": str(output_plan_path),
     }
     if run_id:
-        message["run_id"] = run_id
+        metadata["run_id"] = run_id
 
     logger.debug(
         "Routing execution Stage 2 plan through KT agent channel=%s run_id=%s "
@@ -1119,7 +1121,8 @@ async def _run_execution_stage_impl(
     result = await _run_stage_agent_handoff(
         engine,
         route_channel=route_channel,
-        message=message,
+        message=plan_markdown,
+        metadata=metadata,
         timeout_s=timeout_s,
         sender="execution_stage_debug",
         stage_label="execution",
@@ -1200,8 +1203,9 @@ async def _run_web_client_stage_impl(
     logger.info("Starting web-client Stage 2 debug run from %s", input_path)
     output_dir = _prepare_output_dir(out_dir)
     plan_path = _resolve_stage_input_file(input_path, "analysis")
-    plan = _read_json_file(plan_path)
-    _write_json_file(output_dir / "plan.json", plan)
+    plan_markdown = _read_text_file(plan_path)
+    plan = parse_reproduction_plan_markdown(plan_markdown)
+    output_plan_path = _write_text_file(output_dir / "plan.md", plan_markdown)
     logger.debug(
         "Resolved web-client Stage 2 handoff input=%s output_dir=%s",
         plan_path,
@@ -1219,14 +1223,12 @@ async def _run_web_client_stage_impl(
     engine = await _load_stage_engine("web-client", engine_factory=engine_factory)
     route_channel = _web_client_stage_plan_channel(plan)
     run_id_value = run_id or f"web-client-{uuid.uuid4()}"
-    message_plan = dict(plan)
-    message: Any = {
-        "plan": message_plan,
-        "plan_path": str(output_dir / "plan.json"),
+    metadata: dict[str, Any] = {
+        "plan_markdown_path": str(output_plan_path),
         "artifacts_root": str(output_dir),
         "run_id": run_id_value,
     }
-    prompt = _web_client_stage_prompt(route_channel, message)
+    prompt = _web_client_stage_prompt(route_channel, plan_markdown, metadata)
     web_client_agent = _optional_agent(engine, "web_client_agent")
     system_prompt = (
         _agent_system_prompt_text(web_client_agent)
@@ -1246,9 +1248,9 @@ async def _run_web_client_stage_impl(
         input_metadata={
             "channel": route_channel,
             "input_path": str(plan_path),
-            "plan": plan,
+            "plan_markdown": plan_markdown,
             "run_id": run_id_value,
-            "plan_path": str(output_dir / "plan.json"),
+            "plan_markdown_path": str(output_plan_path),
             "artifacts_root": str(output_dir),
         },
     )
@@ -1280,7 +1282,8 @@ async def _run_web_client_stage_impl(
         result = await _run_web_client_agent_handoff(
             engine,
             route_channel=route_channel,
-            message=message,
+            message=plan_markdown,
+            metadata=metadata,
             timeout_s=timeout_s,
         )
     finally:
@@ -1327,12 +1330,14 @@ async def _run_web_client_agent_handoff(
     *,
     route_channel: str,
     message: Any,
+    metadata: dict[str, Any] | None = None,
     timeout_s: float | None,
 ) -> dict[str, Any]:
     return await _run_stage_agent_handoff(
         engine,
         route_channel=route_channel,
         message=message,
+        metadata=metadata,
         timeout_s=timeout_s,
         sender="web_client_stage_debug",
         stage_label="web-client",
@@ -1344,6 +1349,7 @@ async def _run_stage_agent_handoff(
     *,
     route_channel: str,
     message: Any,
+    metadata: dict[str, Any] | None = None,
     timeout_s: float | None,
     sender: str,
     stage_label: str,
@@ -1360,8 +1366,13 @@ async def _run_stage_agent_handoff(
         await _send_channel_message(
             engine,
             route_channel,
-            json.dumps(message, sort_keys=True, default=str),
+            (
+                message
+                if isinstance(message, str)
+                else json.dumps(message, sort_keys=True, default=str)
+            ),
             sender=sender,
+            metadata=metadata,
         )
         logger.debug("Sent %s Stage 2 plan to %s", stage_label, route_channel)
 
@@ -1483,6 +1494,7 @@ async def _send_channel_message(
     content: str,
     *,
     sender: str,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     channel = _get_channel(engine, channel_name)
     if channel is None:
@@ -1495,7 +1507,7 @@ async def _send_channel_message(
     message = SimpleNamespace(
         sender=sender,
         content=content,
-        metadata={},
+        metadata=dict(metadata or {}),
         timestamp=None,
         message_id=f"stage_debug_{id(content)}",
         reply_to=None,
@@ -1510,13 +1522,26 @@ def _web_client_stage_plan_channel(plan: dict[str, Any]) -> str:
     return "web_client_plan_ready"
 
 
-def _web_client_stage_prompt(route_channel: str, message: Any) -> str:
-    payload = json.dumps(message, ensure_ascii=True, sort_keys=True, default=str)
+def _web_client_stage_prompt(
+    route_channel: str,
+    plan_markdown: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> str:
+    metadata_payload = json.dumps(
+        dict(metadata or {}),
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
     return (
         f"Channel: {route_channel}\n\n"
-        "Web-client Stage 2 handoff JSON:\n"
+        "Web-client Stage 2 handoff Markdown:\n"
+        "```markdown\n"
+        f"{plan_markdown.rstrip()}\n"
+        "```\n\n"
+        "Debug metadata:\n"
         "```json\n"
-        f"{payload}\n"
+        f"{metadata_payload}\n"
         "```"
     )
 
@@ -2230,22 +2255,25 @@ def _analysis_prompt(
 def _analysis_plan_retry_prompt(attempt: int, max_attempts: int) -> str:
     return (
         "REJECTED: Your previous Stage 1 response did not deliver a valid "
-        "`ReproductionPlan` to either `plan_ready` or `web_client_plan_ready`. "
+        "`ReproductionPlan Markdown v1` document to either `plan_ready` or "
+        "`web_client_plan_ready`. "
         "You may have claimed "
         "that the plan was sent, but the runner did not observe a real "
-        "`send_message` delivery to an allowed plan channel with the JSON payload.\n\n"
+        "`send_message` delivery to an allowed plan channel with the Markdown payload.\n\n"
         f"This is attempt {attempt} of {max_attempts}. Send no prose and no "
         "summary. Your entire response must be exactly one `send_message` "
         "tool-call block in this KohakuTerrarium bracket format:\n\n"
         "[/send_message]\n"
         "@@channel=plan_ready\n"
-        "{ ... valid ReproductionPlan JSON ... }\n"
+        "# ReproductionPlan Markdown v1\n"
+        "## Goal\n"
+        "...\n"
         "[send_message/]\n\n"
         "Use `@@channel=web_client_plan_ready` instead when the plan is a pure "
         "Jellyfin Web client bug and has `execution_target: \"web_client\"`.\n\n"
         "The closing tag is `[send_message/]`, not `[/send_message]`. The block "
-        "body must be the raw JSON object serialized as text, not Markdown, not "
-        "a named output block, not Python-call syntax, and not a description. "
+        "body must be the raw Markdown document, not JSON, not a named output "
+        "block, not Python-call syntax, and not a description. "
         "Do not say the plan has been sent. If an executable plan cannot be produced, reply with "
         "`INSUFFICIENT_INFORMATION` and the missing details instead."
     )
@@ -2255,28 +2283,20 @@ async def _resolve_analysis_stage_plan(
     plan_task: asyncio.Task[tuple[str, Any]],
     _transcript: str,
     *,
-    issue_url: str | None = None,
-    container_version: str | None = None,
-    issue_thread: dict[str, Any] | None = None,
     timeout_s: float | None,
-) -> tuple[dict[str, Any] | None, str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     channel_error: BaseException | None = None
     grace_s = _analysis_channel_grace(timeout_s)
 
     if plan_task.done():
-        plan, channel_error = _completed_channel_plan(
-            plan_task,
-            issue_url=issue_url,
-            container_version=container_version,
-            issue_thread=issue_thread,
-        )
-        if plan is not None:
+        plan_markdown, channel_error = _completed_channel_plan_markdown(plan_task)
+        if plan_markdown is not None:
             channel_name = None
             try:
                 channel_name, _message = plan_task.result()
             except Exception:
                 pass
-            return plan, "channel", channel_name
+            return plan_markdown, "channel", channel_name
 
     if not plan_task.done():
         try:
@@ -2284,14 +2304,9 @@ async def _resolve_analysis_stage_plan(
                 asyncio.shield(plan_task),
                 timeout=grace_s,
             )
-            plan = _coerce_reproduction_plan(
-                message,
-                issue_url=issue_url,
-                container_version=container_version,
-                issue_thread=issue_thread,
-            )
-            if plan is not None:
-                return plan, "channel", channel_name
+            plan_markdown = _coerce_plan_markdown_handoff(message)
+            if plan_markdown is not None:
+                return plan_markdown, "channel", channel_name
         except asyncio.TimeoutError:
             pass
         except Exception as exc:
@@ -2322,48 +2337,44 @@ def _raise_analysis_plan_protocol_error(
     raise AnalysisAgentProtocolError(
         f"analysis agent failed to send plan_ready after {attempts} attempts; "
         "final Stage 1 output must use a send_message tool-call block targeting "
-        "`plan_ready` or `web_client_plan_ready`: "
+        "`plan_ready` or `web_client_plan_ready` with ReproductionPlan Markdown: "
         "[/send_message]@@channel=plan_ready... [send_message/]"
     )
 
 
-def _completed_channel_plan(
+def _completed_channel_plan_markdown(
     plan_task: asyncio.Task[tuple[str, Any]],
-    *,
-    issue_url: str | None = None,
-    container_version: str | None = None,
-    issue_thread: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any] | None, BaseException | None]:
-    plan, error, _channel = _completed_channel_plan_with_channel(
+) -> tuple[str | None, BaseException | None]:
+    plan_markdown, error, _channel = _completed_channel_plan_markdown_with_channel(
         plan_task,
-        issue_url=issue_url,
-        container_version=container_version,
-        issue_thread=issue_thread,
     )
-    return plan, error
+    return plan_markdown, error
 
 
-def _completed_channel_plan_with_channel(
+def _completed_channel_plan_markdown_with_channel(
     plan_task: asyncio.Task[tuple[str, Any]],
-    *,
-    issue_url: str | None = None,
-    container_version: str | None = None,
-    issue_thread: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any] | None, BaseException | None, str | None]:
+) -> tuple[str | None, BaseException | None, str | None]:
     try:
         channel_name, message = plan_task.result()
     except Exception as exc:
         return None, exc, None
-    return (
-        _coerce_reproduction_plan(
-            message,
-            issue_url=issue_url,
-            container_version=container_version,
-            issue_thread=issue_thread,
-        ),
-        None,
-        channel_name,
-    )
+    return _coerce_plan_markdown_handoff(message), None, channel_name
+
+
+def _coerce_plan_markdown_handoff(value: Any) -> str | None:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if not isinstance(value, str):
+        return None
+    plan_markdown = value.strip()
+    if not plan_markdown:
+        return None
+    try:
+        parse_reproduction_plan_markdown(plan_markdown)
+    except ReproductionPlanMarkdownError as exc:
+        _logger().debug("invalid Stage 1 Markdown handoff: %s", exc)
+        return None
+    return plan_markdown.rstrip() + "\n"
 
 
 def _extract_reproduction_plan(
@@ -3814,6 +3825,10 @@ def _read_json_file(path: str | Path) -> Any:
         return json.load(handle)
 
 
+def _read_text_file(path: str | Path) -> str:
+    return Path(path).expanduser().read_text(encoding="utf-8")
+
+
 def _write_json_file(path: str | Path, value: Any) -> Path:
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -3822,6 +3837,15 @@ def _write_json_file(path: str | Path, value: Any) -> Path:
         json.dumps(value, indent=2, sort_keys=True, default=str) + "\n",
         encoding="utf-8",
     )
+    temp_path.replace(target)
+    return target
+
+
+def _write_text_file(path: str | Path, value: str) -> Path:
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target.with_name(f".{target.name}.tmp")
+    temp_path.write_text(value.rstrip() + "\n", encoding="utf-8")
     temp_path.replace(target)
     return target
 
@@ -3923,7 +3947,7 @@ def _build_stage_parser(stage: str) -> argparse.ArgumentParser:
         parser.add_argument(
             "--input",
             required=True,
-            help="Stage 1 handoff folder or ReproductionPlan JSON file",
+            help="Stage 1 handoff folder or ReproductionPlan Markdown file",
         )
         parser.add_argument("--out", required=True, help="Output handoff directory")
         parser.add_argument("--run-id", help="Optional deterministic run id")

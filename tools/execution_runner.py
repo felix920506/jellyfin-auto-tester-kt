@@ -28,6 +28,7 @@ from tools.criteria import (
 from tools.browser import BrowserDriver
 from tools.docker_manager import DockerManager
 from tools.jellyfin_http import JellyfinHTTP
+from tools.reproduction_plan_markdown import parse_reproduction_plan_markdown
 from tools.screenshot import Screenshotter
 
 
@@ -192,6 +193,16 @@ class ExecutionRunner:
         _write_json(artifacts_dir / "result.json", result)
         return result
 
+    def execute_markdown_plan(
+        self,
+        plan_markdown: str,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Compile a Markdown handoff, then execute the internal plan."""
+
+        plan = parse_reproduction_plan_markdown(plan_markdown)
+        return self.execute_plan(plan=plan, run_id=run_id)
+
     def start_plan(
         self,
         plan: dict[str, Any],
@@ -276,6 +287,16 @@ class ExecutionRunner:
                     reason=str(exc),
                 )
             return self.finalize_plan()
+
+    def start_markdown_plan(
+        self,
+        plan_markdown: str,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Compile a Markdown handoff, then start the internal plan."""
+
+        plan = parse_reproduction_plan_markdown(plan_markdown)
+        return self.start_plan(plan=plan, run_id=run_id)
 
     def retry_browser_step(
         self,
@@ -931,6 +952,19 @@ def execute_plan(
     )
 
 
+def execute_markdown_plan(
+    plan_markdown: str,
+    run_id: str | None = None,
+    artifacts_root: str | Path | None = None,
+) -> dict[str, Any]:
+    return run_sync_away_from_loop(
+        lambda: ExecutionRunner(artifacts_root=artifacts_root).execute_markdown_plan(
+            plan_markdown=plan_markdown,
+            run_id=run_id,
+        )
+    )
+
+
 def start_plan(
     plan: dict[str, Any],
     run_id: str | None = None,
@@ -940,6 +974,21 @@ def start_plan(
     _DEFAULT_REPAIR_RUNNER = ExecutionRunner(artifacts_root=artifacts_root)
     return run_sync_away_from_loop(
         lambda: _DEFAULT_REPAIR_RUNNER.start_plan(plan=plan, run_id=run_id)
+    )
+
+
+def start_markdown_plan(
+    plan_markdown: str,
+    run_id: str | None = None,
+    artifacts_root: str | Path | None = None,
+) -> dict[str, Any]:
+    global _DEFAULT_REPAIR_RUNNER
+    _DEFAULT_REPAIR_RUNNER = ExecutionRunner(artifacts_root=artifacts_root)
+    return run_sync_away_from_loop(
+        lambda: _DEFAULT_REPAIR_RUNNER.start_markdown_plan(
+            plan_markdown=plan_markdown,
+            run_id=run_id,
+        )
     )
 
 
