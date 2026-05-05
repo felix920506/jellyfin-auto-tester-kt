@@ -20,6 +20,7 @@ from tools.screenshot import (
 
 DEFAULT_VIEWPORT = {"width": 1280, "height": 720}
 DEFAULT_TIMEOUT_S = 30
+DEFAULT_SPECULATIVE_TIMEOUT_S = 8
 CONSOLE_TYPES = {"warning", "error"}
 
 MEDIA_STATE_SCRIPT = """() => Array.from(document.querySelectorAll('audio, video')).map((el) => ({
@@ -63,6 +64,80 @@ DOM_SUMMARY_SCRIPT = """() => {
   };
 }"""
 
+CONTROL_INVENTORY_SCRIPT = """() => {
+  const CONTROL_SELECTOR = [
+    'button',
+    '[role="button"]',
+    'input[type="button"]',
+    'input[type="submit"]',
+    'input[type="checkbox"]',
+    'select',
+    'textarea'
+  ].join(',');
+  const LINK_SELECTOR = 'a[href], [role="link"]';
+  const visible = (el) => {
+    if (!el || !el.isConnected) return false;
+    const style = window.getComputedStyle(el);
+    if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+    if (Number(style.opacity || '1') === 0) return false;
+    if (el.closest('[hidden], .hide, .hidden, [aria-hidden="true"]')) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+  const classes = (el) => Array.from(el.classList || []).filter(Boolean).slice(0, 12);
+  const scopeFor = (el) => {
+    if (el.closest('.nowPlayingBar')) return 'player';
+    if (el.closest('.mainDrawer')) return 'drawer';
+    if (el.closest('.skinHeader')) return 'header';
+    return 'page';
+  };
+  const readableName = (el) => {
+    const aria = clean(el.getAttribute('aria-label'));
+    const title = clean(el.getAttribute('title'));
+    const text = clean(el.innerText || el.textContent);
+    const value = clean(el.getAttribute('value'));
+    const dataAction = clean(el.getAttribute('data-action'));
+    return aria || title || text || value || dataAction;
+  };
+  const attrs = (el, kind, index) => {
+    const targetId = `jfat-${kind}-${index}`;
+    el.setAttribute('data-jfat-target-id', targetId);
+    const name = readableName(el);
+    const title = clean(el.getAttribute('title')) || null;
+    const ariaLabel = clean(el.getAttribute('aria-label')) || null;
+    const scope = scopeFor(el);
+    const record = {
+      name,
+      title,
+      aria_label: ariaLabel,
+      classes: classes(el),
+      href: el.href || el.getAttribute('href') || null,
+      data_action: el.getAttribute('data-action'),
+      data_id: el.getAttribute('data-id') || el.getAttribute('data-itemid'),
+      data_isfavorite: el.getAttribute('data-isfavorite'),
+      scope,
+      selector: `[data-jfat-target-id="${targetId}"]`,
+      target: { kind, name }
+    };
+    if (kind === 'control' && scope !== 'page') record.target.scope = scope;
+    return record;
+  };
+  const controls = Array.from(document.querySelectorAll(CONTROL_SELECTOR))
+    .filter(visible)
+    .map((el, index) => attrs(el, 'control', index))
+    .filter((item) => item.name);
+  const links = Array.from(document.querySelectorAll(LINK_SELECTOR))
+    .filter(visible)
+    .map((el, index) => attrs(el, 'link', index))
+    .filter((item) => item.name);
+  return {
+    visible_controls: controls,
+    visible_links: links,
+    player_controls: controls.filter((item) => item.scope === 'player')
+  };
+}"""
+
 MEDIA_WAIT_SCRIPT = """(expected) => {
   const elements = Array.from(document.querySelectorAll('audio, video'));
   if (expected === 'stopped') {
@@ -78,6 +153,14 @@ MEDIA_WAIT_SCRIPT = """(expected) => {
     return false;
   });
 }"""
+
+
+class TargetResolutionError(ValueError):
+    """Raised when a typed browser target cannot be resolved unambiguously."""
+
+    def __init__(self, message: str, details: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = dict(details or {})
 
 
 class BrowserDriver:
@@ -132,7 +215,11 @@ class BrowserDriver:
         if not self.run_id:
             raise ValueError("run_id is required for browser artifacts")
 
-        timeout_s = float(browser_input.get("timeout_s") or DEFAULT_TIMEOUT_S)
+        timeout_s = (
+            float(browser_input["timeout_s"])
+            if browser_input.get("timeout_s") is not None
+            else None
+        )
         viewport = _viewport(browser_input.get("viewport"))
         locale = browser_locale(browser_input.get("locale") or self.locale)
         page = self._ensure_page(viewport, locale)
@@ -249,16 +336,18 @@ class BrowserDriver:
         browser_input: Mapping[str, Any],
         action: Mapping[str, Any],
         action_index: int,
-        timeout_s: float,
+        timeout_s: float | None,
     ) -> dict[str, Any]:
         started = time.monotonic()
         action_type = str(action.get("type") or "")
-        timeout_ms = _timeout_ms(action, timeout_s)
+        timeout_ms = _timeout_ms(action, timeout_s, action_type)
         record: dict[str, Any] = {
             "type": action_type,
             "status": "pass",
             "timestamp": _timestamp(),
         }
+        if isinstance(action.get("target"), Mapping):
+            record["target"] = deepcopy_jsonable(action.get("target"))
         for key in ("selector", "label", "state", "key", "path", "url"):
             if action.get(key) is not None:
                 record[key] = action.get(key)
@@ -317,6 +406,8 @@ class BrowserDriver:
         except Exception as exc:
             record["status"] = "fail"
             record["error"] = str(exc)
+            if isinstance(exc, TargetResolutionError):
+                record["target_diagnostics"] = exc.details
         record["duration_ms"] = _elapsed_ms(started)
         return record
 
@@ -368,17 +459,58 @@ class BrowserDriver:
         action: Mapping[str, Any],
         timeout_ms: int,
     ) -> None:
-        if action.get("selector"):
-            page.locator(str(action["selector"])).click(timeout=timeout_ms)
+        target = action.get("target")
+        if not isinstance(target, Mapping):
+            raise ValueError("click action requires typed target")
+        kind = str(target.get("kind") or "")
+        if kind == "css":
+            selector = str(target.get("selector") or "")
+            if not selector:
+                raise ValueError("css click target requires selector")
+            locator = page.locator(selector)
+            if target.get("index") is not None and hasattr(locator, "nth"):
+                locator = locator.nth(int(target["index"]))
+            _click_single_locator(locator, target, timeout_ms)
             return
-        text = str(action.get("text") or action.get("value") or "")
-        if not text:
-            raise ValueError("click action requires selector or text")
-        if hasattr(page, "get_by_text"):
-            exact = bool(action.get("exact", True))
-            page.get_by_text(text, exact=exact).click(timeout=timeout_ms)
+
+        if kind == "text":
+            text = str(target.get("name") or "")
+            if not text:
+                raise ValueError("text click target requires name")
+            if hasattr(page, "get_by_text"):
+                locator = page.get_by_text(text, exact=True)
+            else:
+                locator = page.locator(f"text={text}")
+            _click_single_locator(locator, target, timeout_ms)
             return
-        page.locator(f"text={text}").click(timeout=timeout_ms)
+
+        if kind in {"control", "link"}:
+            inventory = self._control_inventory(page)
+            records = (
+                inventory.get("visible_controls", [])
+                if kind == "control"
+                else inventory.get("visible_links", [])
+            )
+            matches = _matching_inventory_records(records, target)
+            if len(matches) != 1:
+                raise TargetResolutionError(
+                    _target_resolution_message(kind, target, matches),
+                    {
+                        "target": deepcopy_jsonable(target),
+                        "match_count": len(matches),
+                        "candidates": _inventory_candidates(records),
+                    },
+                )
+            selector = str(matches[0].get("selector") or "")
+            if not selector:
+                raise TargetResolutionError(
+                    f"{kind} target matched an inventory item without a selector",
+                    {"target": deepcopy_jsonable(target), "match": matches[0]},
+                )
+            page.locator(selector).click(timeout=timeout_ms)
+            return
+
+        raise ValueError(f"unsupported click target kind: {kind}")
 
     def _action_wait_for_text(
         self,
@@ -463,6 +595,7 @@ class BrowserDriver:
         title = _safe_call(page.title)
         dom_path, dom_summary, page_text = self._capture_dom(page, browser_input, step_id)
         media_state = self._inspect_media(page)
+        inventory = self._control_inventory(page)
         return {
             "status": "fail" if error else "pass",
             "actions": actions,
@@ -474,6 +607,9 @@ class BrowserDriver:
             "dom_summary": dom_summary,
             "dom_path": dom_path,
             "page_text": page_text,
+            "visible_controls": inventory["visible_controls"],
+            "visible_links": inventory["visible_links"],
+            "player_controls": inventory["player_controls"],
             "media_state": media_state,
             "locale": self._locale or self.locale,
             "error": error,
@@ -557,6 +693,25 @@ class BrowserDriver:
         if isinstance(payload, Mapping):
             return dict(payload)
         return {"elements": [], "state": "none"}
+
+    def _control_inventory(self, page: Any) -> dict[str, list[dict[str, Any]]]:
+        payload = _safe_call(lambda: page.evaluate(CONTROL_INVENTORY_SCRIPT))
+        if not isinstance(payload, Mapping):
+            return _empty_control_inventory()
+        visible_controls = _jsonable_records(payload.get("visible_controls"))
+        visible_links = _jsonable_records(payload.get("visible_links"))
+        player_controls = _jsonable_records(payload.get("player_controls"))
+        if not player_controls:
+            player_controls = [
+                control
+                for control in visible_controls
+                if str(control.get("scope") or "") == "player"
+            ]
+        return {
+            "visible_controls": visible_controls,
+            "visible_links": visible_links,
+            "player_controls": player_controls,
+        }
 
     def _maybe_authenticate(
         self,
@@ -715,8 +870,19 @@ def _viewport(value: Any) -> dict[str, int]:
     return dict(DEFAULT_VIEWPORT)
 
 
-def _timeout_ms(action: Mapping[str, Any], default_timeout_s: float) -> int:
-    timeout_s = float(action.get("timeout_s") or default_timeout_s)
+def _timeout_ms(
+    action: Mapping[str, Any],
+    default_timeout_s: float | None,
+    action_type: str,
+) -> int:
+    if action.get("timeout_s") is not None:
+        timeout_s = float(action["timeout_s"])
+    elif default_timeout_s is not None:
+        timeout_s = float(default_timeout_s)
+    elif action_type in {"goto", "refresh", "wait_for_url", "wait_for_media"}:
+        timeout_s = DEFAULT_TIMEOUT_S
+    else:
+        timeout_s = DEFAULT_SPECULATIVE_TIMEOUT_S
     return max(1, int(timeout_s * 1000))
 
 
@@ -763,6 +929,107 @@ def _safe_value_metadata(value: Any) -> dict[str, Any] | None:
     if isinstance(value, Mapping):
         return {"type": "object", "keys": sorted(str(key) for key in value.keys())}
     return {"type": type(value).__name__}
+
+
+def deepcopy_jsonable(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except Exception:
+        return str(value)
+
+
+def _empty_control_inventory() -> dict[str, list[dict[str, Any]]]:
+    return {"visible_controls": [], "visible_links": [], "player_controls": []}
+
+
+def _jsonable_records(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    records = []
+    for item in value:
+        if isinstance(item, Mapping):
+            records.append(deepcopy_jsonable(dict(item)))
+    return records
+
+
+def _click_single_locator(
+    locator: Any,
+    target: Mapping[str, Any],
+    timeout_ms: int,
+) -> None:
+    count = _locator_count(locator)
+    if count == 0:
+        raise TargetResolutionError(
+            "click target matched no visible elements",
+            {"target": deepcopy_jsonable(target), "match_count": 0},
+        )
+    if count > 1:
+        raise TargetResolutionError(
+            f"click target matched {count} visible elements",
+            {"target": deepcopy_jsonable(target), "match_count": count},
+        )
+    locator.click(timeout=timeout_ms)
+
+
+def _matching_inventory_records(
+    records: list[dict[str, Any]],
+    target: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    target_name = _normalized_target_text(target.get("name"))
+    target_scope = str(target.get("scope") or "").strip().lower()
+    matches = []
+    for record in records:
+        if (
+            target_scope
+            and str(record.get("scope") or "").strip().lower() != target_scope
+        ):
+            continue
+        record_values = [
+            record.get("name"),
+            record.get("title"),
+            record.get("aria_label"),
+        ]
+        record_target = record.get("target")
+        if isinstance(record_target, Mapping):
+            record_values.append(record_target.get("name"))
+        if any(
+            _normalized_target_text(value) == target_name
+            for value in record_values
+        ):
+            matches.append(record)
+    return matches
+
+
+def _normalized_target_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+def _target_resolution_message(
+    kind: str,
+    target: Mapping[str, Any],
+    matches: list[dict[str, Any]],
+) -> str:
+    name = str(target.get("name") or "").strip()
+    scope = str(target.get("scope") or "").strip()
+    suffix = f" in scope {scope!r}" if scope else ""
+    if not matches:
+        return f"no visible {kind} target named {name!r}{suffix}"
+    return f"multiple visible {kind} targets named {name!r}{suffix}"
+
+
+def _inventory_candidates(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = []
+    for record in records[:20]:
+        candidates.append(
+            {
+                "name": record.get("name"),
+                "title": record.get("title"),
+                "aria_label": record.get("aria_label"),
+                "scope": record.get("scope"),
+                "target": record.get("target"),
+            }
+        )
+    return candidates
 
 
 def _format_dom_summary(payload: Mapping[str, Any]) -> str:

@@ -3,7 +3,7 @@
   "$id": "https://jellyfin-auto-tester.local/schemas/web_client_task.json",
   "title": "WebClientTask",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "required": [
     "command",
     "request_id"
@@ -17,6 +17,10 @@
       ]
     },
     "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
       "type": "string",
       "minLength": 1
     },
@@ -203,7 +207,7 @@
     },
     "browser_action": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": [
         "type"
       ],
@@ -226,6 +230,9 @@
             "screenshot"
           ]
         },
+        "target": {
+          "$ref": "#/$defs/click_target"
+        },
         "selector": {
           "type": "string",
           "minLength": 1
@@ -243,10 +250,6 @@
           "type": "string"
         },
         "key": {
-          "type": "string",
-          "minLength": 1
-        },
-        "name": {
           "type": "string",
           "minLength": 1
         },
@@ -293,7 +296,125 @@
         "full_page": {
           "type": "boolean"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "click"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "target"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "selector"
+                  ]
+                },
+                {
+                  "required": [
+                    "text"
+                  ]
+                },
+                {
+                  "required": [
+                    "value"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "click_target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "kind": {
+              "const": "control"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "kind": {
+              "const": "link"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "kind": {
+              "const": "text"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "selector"
+          ],
+          "properties": {
+            "kind": {
+              "const": "css"
+            },
+            "selector": {
+              "type": "string",
+              "minLength": 1
+            },
+            "index": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      ]
     },
     "selector_assertion": {
       "type": "object",

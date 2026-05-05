@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import patch
 
 import tools.web_client_runner as web_client_runner_module
 from tools.async_compat import shutdown_sync_workers
@@ -592,8 +592,170 @@ class WebClientRunnerTests(unittest.TestCase):
             )
 
             self.assertEqual(result["status"], "error")
-            self.assertIn("single browser action object", result["error"])
+            self.assertEqual(result["error_code"], "schema_error")
+            self.assertEqual(result["schema_path"], "$.action")
             self.assertEqual(browser_driver.runs, [])
+
+    def test_session_preflight_schema_error_does_not_start_browser_or_docker(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            docker = FakeDocker()
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=docker,
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+
+            result = runner.session(
+                {
+                    "command": "start",
+                    "request_id": "bad-start",
+                    "run_id": "bad-run",
+                    "artifacts_root": temp_dir,
+                    "base_url": "http://localhost:9000",
+                    "content": "{}",
+                }
+            )
+
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["error_code"], "schema_error")
+            self.assertEqual(result["schema_path"], "$.content")
+            self.assertEqual(docker.pulled, [])
+            self.assertEqual(docker.started, [])
+            self.assertEqual(browser_driver.configures, [])
+            self.assertEqual(browser_driver.runs, [])
+
+    def test_session_schema_error_circuit_breaker_requires_finalize(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "schema-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+
+            first = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "bad-1",
+                    "action": {"type": "click", "selector": "#legacy"},
+                }
+            )
+            second = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "bad-2",
+                    "action": {"type": "click", "text": "Legacy"},
+                }
+            )
+            blocked = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "blocked",
+                    "action": {"type": "goto"},
+                }
+            )
+            final = runner.session(
+                {
+                    "command": "finalize",
+                    "request_id": "finalize-schema",
+                }
+            )
+
+            self.assertEqual(first["error_code"], "schema_error")
+            self.assertEqual(second["error_code"], "schema_error")
+            self.assertTrue(second["requires_finalize"])
+            self.assertEqual(blocked["error_code"], "schema_error")
+            self.assertTrue(blocked["requires_finalize"])
+            self.assertEqual(final["status"], "pass")
+            self.assertEqual(browser_driver.runs, [])
+
+    def test_session_no_progress_blocks_after_repeated_equivalent_failures(self):
+        def failed_browser():
+            return {
+                "status": "fail",
+                "actions": [
+                    {
+                        "type": "click",
+                        "status": "fail",
+                        "error": "no visible control",
+                    }
+                ],
+                "screenshot_paths": [],
+                "final_url": "http://localhost:8097/web",
+                "title": "Jellyfin",
+                "console": [],
+                "failed_network": [],
+                "dom_summary": "title='Jellyfin'",
+                "dom_path": None,
+                "page_text": "Jellyfin Home",
+                "visible_controls": [
+                    {"name": "Play", "scope": "player", "data_action": None}
+                ],
+                "media_state": {"state": "none", "elements": []},
+                "error": "no visible control",
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[failed_browser(), failed_browser(), failed_browser()],
+            )
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "no-progress-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+            request = {
+                "command": "action",
+                "action": {
+                    "type": "click",
+                    "target": {
+                        "kind": "control",
+                        "name": "Add to favorites",
+                        "scope": "player",
+                    },
+                },
+            }
+
+            first = runner.session({**request, "request_id": "click-1"})
+            second = runner.session({**request, "request_id": "click-2"})
+            third = runner.session({**request, "request_id": "click-3"})
+            blocked = runner.session({**request, "request_id": "click-4"})
+
+            self.assertEqual(first["status"], "fail")
+            self.assertNotIn("error_code", first)
+            self.assertEqual(second["error_code"], "no_progress")
+            self.assertTrue(second["no_progress"]["requires_different_strategy"])
+            self.assertEqual(third["error_code"], "no_progress")
+            self.assertTrue(third["requires_finalize"])
+            self.assertEqual(blocked["status"], "error")
+            self.assertEqual(blocked["error_code"], "no_progress")
+            self.assertEqual(len(browser_driver.runs), 3)
 
     def test_session_action_before_start_returns_no_active_session_error(self):
         temp_dir = tempfile.gettempdir()
@@ -678,7 +840,7 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(action["status"], "pass")
             self.assertEqual(action["run_id"], "task-run")
 
-    def test_session_ignores_deprecated_session_id_when_active_session_exists(self):
+    def test_session_rejects_deprecated_session_id_without_browser_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = FakeBrowserDriver(temp_dir)
             runner = WebClientRunner(
@@ -707,9 +869,10 @@ class WebClientRunnerTests(unittest.TestCase):
                 }
             )
 
-            self.assertEqual(result["status"], "pass")
-            self.assertNotIn("session_id", result)
-            self.assertEqual(result["run_id"], "task-run")
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["error_code"], "schema_error")
+            self.assertEqual(result["schema_path"], "$.session_id")
+            self.assertEqual(browser_driver.runs, [])
 
     def test_task_start_returns_session_without_running_browser_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1081,7 +1244,7 @@ class WebClientRunnerTests(unittest.TestCase):
 
 
 class WebClientRunnerToolTests(unittest.TestCase):
-    def test_session_tool_accepts_wrapped_and_raw_payloads(self):
+    def test_session_tool_accepts_only_canonical_request_payload(self):
         request = {
             "command": "start",
             "request_id": "start-1",
@@ -1100,23 +1263,22 @@ class WebClientRunnerToolTests(unittest.TestCase):
             return_value=expected,
         ) as session_tool:
             wrapped = asyncio.run(
+                WebClientSessionTool()._execute({"request": request})
+            )
+            raw = asyncio.run(WebClientSessionTool()._execute(request))
+            content = asyncio.run(
                 WebClientSessionTool()._execute(
                     {"content": json.dumps({"request": request})}
                 )
             )
-            raw = asyncio.run(WebClientSessionTool()._execute(request))
 
         self.assertIsNone(wrapped.error)
         self.assertEqual(json.loads(wrapped.output), expected)
-        self.assertIsNone(raw.error)
-        self.assertEqual(json.loads(raw.output), expected)
-        self.assertEqual(
-            session_tool.call_args_list,
-            [
-                call(request=request),
-                call(request=request),
-            ],
-        )
+        self.assertIsNotNone(raw.error)
+        self.assertIn("schema_error", raw.error)
+        self.assertIsNotNone(content.error)
+        self.assertIn("$.content", content.error)
+        session_tool.assert_called_once_with(request=request)
 
     def test_execute_plan_tool_accepts_wrapped_json_body(self):
         plan = browser_plan()

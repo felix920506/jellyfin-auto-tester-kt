@@ -49,9 +49,12 @@ channel other than `execution_done`.
 - If a step contains `docker run`, `docker pull`, or `docker start`, skip that
   step. Container lifecycle is owned exclusively by Stage 2 setup/teardown.
 - Browser repair may change only the failed browser step input: actions,
-  selectors, path/url, waits, labels, viewport, and explicit `refresh`. It may
-  not change prerequisites, Docker image, non-browser steps, roles, expected
-  outcomes, or success criteria.
+  typed click targets, selectors for non-click waits/fills, path/url, waits,
+  labels, viewport, and explicit `refresh`. Click actions must use
+  `target` (`control`, `link`, `text`, or explicit `css`), not loose click
+  `selector`, `text`, or `value` fields. It may not change prerequisites,
+  Docker image, non-browser steps, roles, expected outcomes, or success
+  criteria.
 
 ## Step Rules
 

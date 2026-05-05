@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from tools.browser import (
     BrowserDriver,
+    CONTROL_INVENTORY_SCRIPT,
     DOM_SUMMARY_SCRIPT,
     MEDIA_STATE_SCRIPT,
     MEDIA_WAIT_SCRIPT,
@@ -50,6 +51,10 @@ class FakeLocator:
 
     def click(self, timeout=None):
         self.page.calls.append(("click", self.selector, timeout))
+
+    def nth(self, index):
+        self.page.calls.append(("nth", self.selector, index))
+        return FakeLocator(self.page, f"{self.selector} >> nth={index}")
 
     def fill(self, value, timeout=None):
         self.page.calls.append(("fill", self.selector, value, timeout))
@@ -113,6 +118,53 @@ class FakePage:
             "inputs": [],
             "media_count": 1,
         }
+        self.control_inventory = {
+            "visible_controls": [
+                {
+                    "name": "Play",
+                    "title": "Play",
+                    "aria_label": None,
+                    "classes": ["mediaButton"],
+                    "href": None,
+                    "data_action": None,
+                    "data_id": None,
+                    "data_isfavorite": None,
+                    "scope": "player",
+                    "selector": "[data-jfat-target-id=\"control-play\"]",
+                    "target": {"kind": "control", "name": "Play", "scope": "player"},
+                }
+            ],
+            "visible_links": [
+                {
+                    "name": "Music",
+                    "title": None,
+                    "aria_label": None,
+                    "classes": ["navMenuOption"],
+                    "href": "#/music",
+                    "data_action": None,
+                    "data_id": "music",
+                    "data_isfavorite": None,
+                    "scope": "drawer",
+                    "selector": "[data-jfat-target-id=\"link-music\"]",
+                    "target": {"kind": "link", "name": "Music"},
+                }
+            ],
+            "player_controls": [
+                {
+                    "name": "Play",
+                    "title": "Play",
+                    "aria_label": None,
+                    "classes": ["mediaButton"],
+                    "href": None,
+                    "data_action": None,
+                    "data_id": None,
+                    "data_isfavorite": None,
+                    "scope": "player",
+                    "selector": "[data-jfat-target-id=\"control-play\"]",
+                    "target": {"kind": "control", "name": "Play", "scope": "player"},
+                }
+            ],
+        }
 
     def on(self, event, handler):
         self.handlers.setdefault(event, []).append(handler)
@@ -160,6 +212,8 @@ class FakePage:
             return dict(self.dom_summary)
         if script == MEDIA_STATE_SCRIPT:
             return list(self.media)
+        if script == CONTROL_INVENTORY_SCRIPT:
+            return dict(self.control_inventory)
         return {"ok": True, "args": args}
 
     def screenshot(self, path, full_page=True):
@@ -245,13 +299,17 @@ class BrowserDriverTests(unittest.TestCase):
     def test_dispatch_requeries_locators_per_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             page = FakePage()
+            page.locator_counts["#name"] = 1
             driver, _ = self.make_driver(temp_dir, page)
 
             result = driver.run(
                 {
                     "auth": "none",
                     "actions": [
-                        {"type": "click", "selector": "#name"},
+                        {
+                            "type": "click",
+                            "target": {"kind": "css", "selector": "#name"},
+                        },
                         {"type": "fill", "selector": "#name", "value": "secret"},
                     ],
                 }
@@ -312,19 +370,166 @@ class BrowserDriverTests(unittest.TestCase):
     def test_click_can_target_visible_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             page = FakePage()
+            page.locator_counts["text=Songs"] = 1
             driver, _ = self.make_driver(temp_dir, page)
 
             result = driver.run(
                 {
                     "actions": [
-                        {"type": "click", "text": "Songs"},
+                        {"type": "click", "target": {"kind": "text", "name": "Songs"}},
                     ],
                 }
             )
 
             self.assertEqual(result["status"], "pass")
             self.assertIn(("get_by_text", "Songs", True), page.calls)
-            self.assertIn(("click", "text=Songs", 30000), page.calls)
+            self.assertIn(("click", "text=Songs", 8000), page.calls)
+
+    def test_click_can_target_inventory_control_and_link(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            page.locator_counts['[data-jfat-target-id="control-play"]'] = 1
+            page.locator_counts['[data-jfat-target-id="link-music"]'] = 1
+            driver, _ = self.make_driver(temp_dir, page)
+
+            result = driver.run(
+                {
+                    "actions": [
+                        {
+                            "type": "click",
+                            "target": {
+                                "kind": "control",
+                                "name": "Play",
+                                "scope": "player",
+                            },
+                        },
+                        {
+                            "type": "click",
+                            "target": {"kind": "link", "name": "Music"},
+                        },
+                    ],
+                }
+            )
+
+            self.assertEqual(result["status"], "pass")
+            self.assertIn(
+                ("click", '[data-jfat-target-id="control-play"]', 8000),
+                page.calls,
+            )
+            self.assertIn(
+                ("click", '[data-jfat-target-id="link-music"]', 8000),
+                page.calls,
+            )
+            self.assertEqual(result["player_controls"][0]["target"]["scope"], "player")
+            self.assertEqual(
+                result["visible_links"][0]["target"],
+                {"kind": "link", "name": "Music"},
+            )
+
+    def test_click_control_target_reports_ambiguous_matches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            page.control_inventory["visible_controls"].append(
+                {
+                    **page.control_inventory["visible_controls"][0],
+                    "selector": "[data-jfat-target-id=\"control-play-2\"]",
+                }
+            )
+            driver, _ = self.make_driver(temp_dir, page)
+
+            result = driver.run(
+                {
+                    "actions": [
+                        {
+                            "type": "click",
+                            "target": {
+                                "kind": "control",
+                                "name": "Play",
+                                "scope": "player",
+                            },
+                        },
+                    ],
+                }
+            )
+
+            self.assertEqual(result["status"], "fail")
+            self.assertIn("multiple visible control targets", result["error"])
+            self.assertEqual(
+                result["actions"][0]["target_diagnostics"]["match_count"],
+                2,
+            )
+
+    def test_stage2web_test6_fixture_exposes_player_favorite_and_stop_targets(self):
+        fixture = (
+            Path(__file__).resolve().parents[1]
+            / "debug"
+            / "stage2web-test6"
+            / "web-client-a3b8c6d9-c9fe-49b6-aa47-10de09479cc8"
+            / "browser_dom"
+            / "step_2_6.html"
+        )
+        html = fixture.read_text(encoding="utf-8")
+        self.assertIn('class="nowPlayingBar"', html)
+        self.assertIn('title="Stop"', html)
+        self.assertIn('title="Add to favorites"', html)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            player_controls = [
+                {
+                    "name": "Add to favorites",
+                    "title": "Add to favorites",
+                    "aria_label": None,
+                    "classes": ["mediaButton", "emby-button"],
+                    "href": None,
+                    "data_action": None,
+                    "data_id": "933e3a903b3ea327b4acfbeb46445b92",
+                    "data_isfavorite": "false",
+                    "scope": "player",
+                    "selector": "[data-jfat-target-id=\"control-favorite\"]",
+                    "target": {
+                        "kind": "control",
+                        "name": "Add to favorites",
+                        "scope": "player",
+                    },
+                },
+                {
+                    "name": "Stop",
+                    "title": "Stop",
+                    "aria_label": None,
+                    "classes": ["stopButton", "mediaButton"],
+                    "href": None,
+                    "data_action": None,
+                    "data_id": None,
+                    "data_isfavorite": None,
+                    "scope": "player",
+                    "selector": "[data-jfat-target-id=\"control-stop\"]",
+                    "target": {"kind": "control", "name": "Stop", "scope": "player"},
+                },
+            ]
+            page.control_inventory = {
+                "visible_controls": player_controls,
+                "visible_links": [],
+                "player_controls": player_controls,
+            }
+            driver, _ = self.make_driver(temp_dir, page)
+
+            result = driver.run(
+                {"actions": [{"type": "screenshot", "label": "fixture"}]}
+            )
+
+            self.assertIn(
+                {
+                    "kind": "control",
+                    "name": "Add to favorites",
+                    "scope": "player",
+                },
+                [control["target"] for control in result["player_controls"]],
+            )
+            self.assertIn(
+                {"kind": "control", "name": "Stop", "scope": "player"},
+                [control["target"] for control in result["player_controls"]],
+            )
 
     def test_wait_for_media_supports_stopped_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:

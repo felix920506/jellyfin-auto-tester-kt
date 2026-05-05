@@ -1,3 +1,4 @@
+import copy
 import json
 import unittest
 from pathlib import Path
@@ -89,6 +90,28 @@ class BrowserContractTests(unittest.TestCase):
         errors = sorted(validator.iter_errors(plan), key=lambda error: error.path)
 
         self.assertTrue(errors)
+
+    def test_reproduction_plan_schema_requires_typed_click_targets(self):
+        validator = Draft202012Validator(load_schema("reproduction_plan.json"))
+        plan = minimal_plan()
+        plan["execution_target"] = "web_client"
+        plan["reproduction_steps"][0]["input"]["actions"] = [
+            {
+                "type": "click",
+                "target": {
+                    "kind": "control",
+                    "name": "Add to favorites",
+                    "scope": "player",
+                },
+            }
+        ]
+        legacy = copy.deepcopy(plan)
+        legacy["reproduction_steps"][0]["input"]["actions"] = [
+            {"type": "click", "selector": ".btnFavorite"}
+        ]
+
+        self.assertEqual(list(validator.iter_errors(plan)), [])
+        self.assertTrue(list(validator.iter_errors(legacy)))
 
     def test_reproduction_plan_schema_accepts_demo_without_docker_image(self):
         validator = Draft202012Validator(load_schema("reproduction_plan.json"))
@@ -238,7 +261,7 @@ class BrowserContractTests(unittest.TestCase):
             action_request,
             finalize_request,
         ):
-            errors.extend(validator.iter_errors(request))
+            errors.extend(validator.iter_errors({"request": request}))
 
         self.assertEqual(sorted(errors, key=lambda error: error.path), [])
 
@@ -265,9 +288,20 @@ class BrowserContractTests(unittest.TestCase):
             "action": [{"type": "goto"}],
         }
 
-        self.assertTrue(list(validator.iter_errors(browser_input_actions)))
-        self.assertTrue(list(validator.iter_errors(top_level_actions)))
-        self.assertTrue(list(validator.iter_errors(action_array)))
+        raw_command = {
+            "command": "start",
+            "request_id": "request-4",
+            "run_id": "run-1",
+            "artifacts_root": "/tmp/artifacts",
+            "plan_path": "/tmp/artifacts/plan.json",
+        }
+        content_wrapper = {"content": json.dumps({"request": raw_command})}
+
+        self.assertTrue(list(validator.iter_errors({"request": browser_input_actions})))
+        self.assertTrue(list(validator.iter_errors({"request": top_level_actions})))
+        self.assertTrue(list(validator.iter_errors({"request": action_array})))
+        self.assertTrue(list(validator.iter_errors(raw_command)))
+        self.assertTrue(list(validator.iter_errors(content_wrapper)))
 
     def test_web_client_result_schema_accepts_browser_result(self):
         result = {

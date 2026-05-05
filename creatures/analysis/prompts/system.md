@@ -193,6 +193,18 @@ web-client agent must wait for the returned result before another browser call.
 Supported action types are `goto`, `refresh`, `click`, `fill`, `press`,
 `select_option`, `check`, `uncheck`, `wait_for`, `wait_for_text`,
 `wait_for_url`, `wait_for_media`, `evaluate`, and `screenshot`.
+Click actions must use a typed `target`, not loose `selector`, `text`, or
+`value` fields. Prefer visible controls and links by name:
+
+```json
+{"type": "click", "target": {"kind": "control", "name": "Play"}}
+```
+
+Use `{"kind": "control", "name": "Add to favorites", "scope": "player"}` for
+the Jellyfin player favorite button and
+`{"kind": "control", "name": "Stop", "scope": "player"}` for the player stop
+button. Use `{"kind": "css", "selector": "...", "index": 0}` only when the
+target cannot be expressed as a visible control, link, or text target.
 
 When a step needs a value produced by an earlier step, declare a `capture` block
 on the producing step and reference the variable as `${name}` inside later

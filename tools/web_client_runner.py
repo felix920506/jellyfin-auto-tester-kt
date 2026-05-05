@@ -75,6 +75,84 @@ DEBUG_LOG_FILE = "web_client_runner.log"
 LOGGER = logging.getLogger(
     "kohakuterrarium.jellyfin_auto_tester.tools.web_client_runner"
 )
+CANONICAL_WEB_CLIENT_SESSION_SHAPE = (
+    '{"request":{"command":"action","request_id":"click-player-favorite",'
+    '"action":{"type":"click","target":{"kind":"control","name":"Add to favorites",'
+    '"scope":"player"}}}}'
+)
+SCHEMA_ERROR_BLOCK_THRESHOLD = 2
+NO_PROGRESS_WARN_THRESHOLD = 2
+NO_PROGRESS_BLOCK_THRESHOLD = 3
+SESSION_ALLOWED_FIELDS = {
+    "command",
+    "request_id",
+    "run_id",
+    "artifacts_root",
+    "plan_path",
+    "base_url",
+    "step_id",
+    "role",
+    "action_label",
+    "browser_input",
+    "action",
+    "success_criteria",
+    "selector_assertions",
+    "capture",
+    "overall_result",
+    "error_summary",
+}
+SESSION_FIELDS_BY_COMMAND = {
+    "start": {
+        "command",
+        "request_id",
+        "run_id",
+        "artifacts_root",
+        "plan_path",
+        "base_url",
+        "step_id",
+        "browser_input",
+    },
+    "action": {
+        "command",
+        "request_id",
+        "step_id",
+        "role",
+        "action_label",
+        "browser_input",
+        "action",
+        "success_criteria",
+        "selector_assertions",
+        "capture",
+    },
+    "finalize": {
+        "command",
+        "request_id",
+        "overall_result",
+        "error_summary",
+    },
+}
+BROWSER_ACTION_FIELDS_BY_TYPE = {
+    "goto": {"type", "path", "url", "timeout_s", "wait_until"},
+    "refresh": {"type", "timeout_s", "wait_until"},
+    "click": {"type", "target", "timeout_s"},
+    "fill": {"type", "selector", "value", "timeout_s"},
+    "press": {"type", "selector", "key", "timeout_s"},
+    "select_option": {"type", "selector", "value", "timeout_s"},
+    "check": {"type", "selector", "timeout_s"},
+    "uncheck": {"type", "selector", "timeout_s"},
+    "wait_for": {"type", "selector", "state", "timeout_s"},
+    "wait_for_text": {"type", "text", "timeout_s"},
+    "wait_for_url": {"type", "pattern", "url", "path", "timeout_s"},
+    "wait_for_media": {"type", "state", "timeout_s"},
+    "evaluate": {"type", "script", "expression", "args", "timeout_s"},
+    "screenshot": {"type", "label", "timeout_s", "full_page"},
+}
+CLICK_TARGET_FIELDS_BY_KIND = {
+    "control": {"kind", "name", "scope"},
+    "link": {"kind", "name"},
+    "text": {"kind", "name"},
+    "css": {"kind", "selector", "index"},
+}
 
 
 @dataclass
@@ -87,6 +165,11 @@ class _TaskBrowserSession:
     browser_input: dict[str, Any]
     step_id: Any
     browser_driver: Any
+    consecutive_schema_errors: int = 0
+    schema_error_blocked: bool = False
+    no_progress_failures: int = 0
+    no_progress_signature: dict[str, Any] | None = None
+    no_progress_blocked: bool = False
 
 
 @dataclass
@@ -109,6 +192,11 @@ class _WebClientSession:
     error_summary: str | None = None
     setup_failed: bool = False
     container_crashed: bool = False
+    consecutive_schema_errors: int = 0
+    schema_error_blocked: bool = False
+    no_progress_failures: int = 0
+    no_progress_signature: dict[str, Any] | None = None
+    no_progress_blocked: bool = False
 
 
 class WebClientRunner:
@@ -559,19 +647,49 @@ class WebClientRunner:
         request_id = str(request_id_value or "unknown")
         command = str(payload.get("command") or "").strip().lower()
 
-        if not request_id_value:
-            return _web_client_error(request_id, "request_id is required")
-
-        legacy_error = _legacy_session_payload_error(payload)
-        if legacy_error:
-            result = _web_client_error(request_id, legacy_error)
-            self._write_session_result_if_possible(payload, result)
+        schema_error = _validate_session_request(payload)
+        if schema_error:
+            result = _web_client_schema_error(
+                request_id=request_id,
+                path=schema_error["path"],
+                message=schema_error["message"],
+            )
+            self._record_web_session_schema_error(command, payload, result)
             return result
 
+        session = self._web_session
+        if session is not None and command != "finalize":
+            if session.schema_error_blocked:
+                result = _web_client_blocked_error(
+                    request_id,
+                    error_code="schema_error",
+                    error=(
+                        "web_client_session is blocked after repeated schema errors; "
+                        "call finalize with overall_result: inconclusive"
+                    ),
+                )
+                self._write_session_result_if_possible(payload, result)
+                return result
+            if session.no_progress_blocked:
+                result = _web_client_blocked_error(
+                    request_id,
+                    error_code="no_progress",
+                    error=(
+                        "web_client_session is blocked after repeated no-progress "
+                        "browser failures; call finalize with overall_result: inconclusive"
+                    ),
+                )
+                self._write_session_result_if_possible(payload, result)
+                return result
+            session.consecutive_schema_errors = 0
+
         if not command:
-            result = _web_client_error(
-                request_id,
-                "web_client_session command is required; use start, action, or finalize",
+            result = _web_client_schema_error(
+                request_id=request_id,
+                path="$.command",
+                message=(
+                    "web_client_session command is required; use start, action, or finalize"
+                ),
             )
             self._write_session_result_if_possible(payload, result)
             return result
@@ -596,6 +714,9 @@ class WebClientRunner:
                 request_id,
                 f"unsupported web_client_session command: {command}",
             )
+            result["error_code"] = "schema_error"
+            result["schema_path"] = "$.command"
+            result["expected"] = CANONICAL_WEB_CLIENT_SESSION_SHAPE
             self._write_session_result_if_possible(payload, result)
             return result
         except Exception as exc:
@@ -975,6 +1096,7 @@ class WebClientRunner:
             )
             result["run_id"] = session.run_id
 
+        self._record_web_session_browser_progress(session, action, result)
         _write_json(
             session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
             result,
@@ -1083,6 +1205,65 @@ class WebClientRunner:
             except Exception as exc:
                 error_summary = error_summary or f"failed to stop container: {exc}"
         return error_summary
+
+    def _record_web_session_schema_error(
+        self,
+        command: str,
+        payload: Mapping[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        session = self._web_session
+        if session is not None and command != "finalize":
+            session.consecutive_schema_errors += 1
+            result["schema_error_count"] = session.consecutive_schema_errors
+            if session.consecutive_schema_errors >= SCHEMA_ERROR_BLOCK_THRESHOLD:
+                session.schema_error_blocked = True
+                result["requires_finalize"] = True
+                result["recommended_overall_result"] = "inconclusive"
+                result["error"] = (
+                    f"{result.get('error')}; repeated schema errors block further "
+                    "actions until finalize"
+                )
+        self._write_session_result_if_possible(payload, result)
+
+    def _record_web_session_browser_progress(
+        self,
+        session: _WebClientSession,
+        action: Mapping[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        if not _browser_result_failed(result):
+            session.no_progress_failures = 0
+            session.no_progress_signature = None
+            return
+
+        browser = result.get("browser")
+        if not isinstance(browser, Mapping):
+            return
+        signature = _no_progress_signature(action, browser)
+        if signature == session.no_progress_signature:
+            session.no_progress_failures += 1
+        else:
+            session.no_progress_signature = signature
+            session.no_progress_failures = 1
+
+        if session.no_progress_failures < NO_PROGRESS_WARN_THRESHOLD:
+            return
+
+        result["error_code"] = "no_progress"
+        result["no_progress"] = {
+            "count": session.no_progress_failures,
+            "signature": signature,
+            "requires_different_strategy": True,
+        }
+        result["error"] = result.get("error") or (
+            "browser action failed without changing URL, visible page, media state, "
+            "or visible controls; choose a different target or strategy"
+        )
+        if session.no_progress_failures >= NO_PROGRESS_BLOCK_THRESHOLD:
+            session.no_progress_blocked = True
+            result["requires_finalize"] = True
+            result["recommended_overall_result"] = "inconclusive"
 
     def _write_session_result_if_possible(
         self,
@@ -1953,31 +2134,29 @@ class WebClientSessionTool(BaseTool):
         return ExecutionMode.DIRECT
 
     def get_parameters_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "additionalProperties": True,
-            "properties": {
-                "request": {
-                    "type": "object",
-                    "description": (
-                        "A WebClientSession request. If omitted, the "
-                        "whole tool payload is treated as the request."
-                    ),
+        try:
+            return _read_json_file(REPO_ROOT / "schemas" / "web_client_session.json")
+        except Exception:
+            return {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["request"],
+                "properties": {
+                    "request": {
+                        "type": "object",
+                        "additionalProperties": False,
+                    },
                 },
-                "content": {
-                    "type": "string",
-                    "description": "Bracket-call JSON body.",
-                },
-            },
-        }
+            }
 
     def prompt_contribution(self) -> str | None:
         return (
-            "Call `web_client_session` with bracket-body JSON: "
-            "`command=start`, then one `command=action` call against the active "
-            "session with exactly one top-level action object per browser move, "
-            "then `command=finalize`. "
-            "Never submit `actions` arrays or an `action` array."
+            "Call `web_client_session` only as "
+            "`{\"request\": {\"command\": \"start\", ...}}`, then one "
+            "`{\"request\": {\"command\": \"action\", \"action\": {...}}}` "
+            "per browser move, then `{\"request\": {\"command\": \"finalize\", ...}}`. "
+            "Never submit raw command JSON, `content`, `actions` arrays, or an "
+            "`action` array."
         )
 
     async def _execute(self, args: dict[str, Any], **_kwargs: Any) -> ToolResult:
@@ -2058,6 +2237,223 @@ class WebClientExecutePlanTool(BaseTool):
         )
 
 
+def _validate_session_request(payload: Mapping[str, Any]) -> dict[str, str] | None:
+    if not isinstance(payload, Mapping):
+        return {
+            "path": "$",
+            "message": "web_client_session request must be an object",
+        }
+    unknown = sorted(set(payload) - SESSION_ALLOWED_FIELDS)
+    if unknown:
+        return _schema_field_error(f"$.{unknown[0]}")
+
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        return {
+            "path": "$.request_id",
+            "message": "request_id is required and must be a non-empty string",
+        }
+
+    command = payload.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return {
+            "path": "$.command",
+            "message": "command is required and must be start, action, or finalize",
+        }
+    command = command.strip().lower()
+    if command not in SESSION_FIELDS_BY_COMMAND:
+        return {
+            "path": "$.command",
+            "message": f"unsupported web_client_session command: {command}",
+        }
+    disallowed = sorted(set(payload) - SESSION_FIELDS_BY_COMMAND[command])
+    if disallowed:
+        return _schema_field_error(f"$.{disallowed[0]}")
+
+    if command == "start":
+        for required in ("run_id", "artifacts_root"):
+            if not isinstance(payload.get(required), str) or not str(
+                payload.get(required)
+            ).strip():
+                return {
+                    "path": f"$.{required}",
+                    "message": f"{required} is required for start",
+                }
+        has_plan_path = isinstance(payload.get("plan_path"), str) and bool(
+            str(payload.get("plan_path")).strip()
+        )
+        has_base_url = isinstance(payload.get("base_url"), str) and bool(
+            str(payload.get("base_url")).strip()
+        )
+        if has_plan_path == has_base_url:
+            return {
+                "path": "$.plan_path",
+                "message": "start requires exactly one of plan_path or base_url",
+            }
+    elif command == "action":
+        action = payload.get("action")
+        if not isinstance(action, Mapping):
+            return {
+                "path": "$.action",
+                "message": "action is required for action command and must be an object",
+            }
+        action_error = _validate_browser_action(action, "$.action")
+        if action_error:
+            return action_error
+    elif command == "finalize" and payload.get("overall_result") is not None:
+        if payload.get("overall_result") not in {
+            "reproduced",
+            "not_reproduced",
+            "inconclusive",
+        }:
+            return {
+                "path": "$.overall_result",
+                "message": (
+                    "overall_result must be reproduced, not_reproduced, or inconclusive"
+                ),
+            }
+
+    browser_input_error = _validate_browser_input_metadata(
+        payload.get("browser_input"),
+        "$.browser_input",
+    )
+    if browser_input_error:
+        return browser_input_error
+    return None
+
+
+def _validate_browser_input_metadata(
+    value: Any,
+    path: str,
+) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        return {"path": path, "message": "browser_input must be an object"}
+    unknown = sorted(set(value) - TASK_BROWSER_METADATA_FIELDS)
+    if unknown:
+        return _schema_field_error(f"{path}.{unknown[0]}")
+    return None
+
+
+def _validate_browser_action(
+    action: Mapping[str, Any],
+    path: str,
+) -> dict[str, str] | None:
+    action_type = action.get("type")
+    if not isinstance(action_type, str) or not action_type.strip():
+        return {"path": f"{path}.type", "message": "browser action requires type"}
+    action_type = action_type.strip()
+    allowed_fields = BROWSER_ACTION_FIELDS_BY_TYPE.get(action_type)
+    if allowed_fields is None:
+        return {
+            "path": f"{path}.type",
+            "message": f"unsupported browser action type: {action_type}",
+        }
+    unknown = sorted(set(action) - allowed_fields)
+    if unknown:
+        return _schema_field_error(f"{path}.{unknown[0]}")
+
+    if action_type == "click":
+        target = action.get("target")
+        if not isinstance(target, Mapping):
+            return {
+                "path": f"{path}.target",
+                "message": "click action requires target object",
+            }
+        return _validate_click_target(target, f"{path}.target")
+    if action_type in {"fill", "select_option"}:
+        if not action.get("selector"):
+            return {
+                "path": f"{path}.selector",
+                "message": f"{action_type} requires selector",
+            }
+        if "value" not in action:
+            return {
+                "path": f"{path}.value",
+                "message": f"{action_type} requires value",
+            }
+    if action_type in {"check", "uncheck", "wait_for"} and not action.get("selector"):
+        return {
+            "path": f"{path}.selector",
+            "message": f"{action_type} requires selector",
+        }
+    if action_type == "press" and not action.get("key"):
+        return {"path": f"{path}.key", "message": "press requires key"}
+    if action_type == "wait_for_text" and not isinstance(action.get("text"), str):
+        return {"path": f"{path}.text", "message": "wait_for_text requires text"}
+    if action_type == "wait_for_media" and action.get("state") not in {
+        None,
+        "playing",
+        "paused",
+        "ended",
+        "errored",
+        "none",
+        "stopped",
+    }:
+        return {"path": f"{path}.state", "message": "unsupported media state"}
+    if action_type == "evaluate" and not (
+        isinstance(action.get("script"), str)
+        or isinstance(action.get("expression"), str)
+    ):
+        return {
+            "path": f"{path}.script",
+            "message": "evaluate requires script or expression",
+        }
+    return None
+
+
+def _validate_click_target(
+    target: Mapping[str, Any],
+    path: str,
+) -> dict[str, str] | None:
+    kind = target.get("kind")
+    if not isinstance(kind, str) or not kind.strip():
+        return {"path": f"{path}.kind", "message": "click target requires kind"}
+    kind = kind.strip()
+    allowed_fields = CLICK_TARGET_FIELDS_BY_KIND.get(kind)
+    if allowed_fields is None:
+        return {
+            "path": f"{path}.kind",
+            "message": f"unsupported click target kind: {kind}",
+        }
+    unknown = sorted(set(target) - allowed_fields)
+    if unknown:
+        return _schema_field_error(f"{path}.{unknown[0]}")
+    if kind in {"control", "link", "text"}:
+        if not isinstance(target.get("name"), str) or not target.get("name").strip():
+            return {"path": f"{path}.name", "message": f"{kind} target requires name"}
+    if kind == "css":
+        if not isinstance(target.get("selector"), str) or not target.get(
+            "selector"
+        ).strip():
+            return {
+                "path": f"{path}.selector",
+                "message": "css target requires selector",
+            }
+        if target.get("index") is not None:
+            try:
+                index = int(target["index"])
+            except (TypeError, ValueError):
+                return {
+                    "path": f"{path}.index",
+                    "message": "css target index must be an integer",
+                }
+            if index < 0:
+                return {
+                    "path": f"{path}.index",
+                    "message": "css target index must be non-negative",
+                }
+    return None
+
+
+def _schema_field_error(path: str) -> dict[str, str]:
+    return {
+        "path": path,
+        "message": f"unsupported field path {path}",
+    }
+
+
 def _execute_plan_tool_args(
     args: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -2101,31 +2497,44 @@ def _execute_plan_tool_args(
 def _session_tool_args(
     args: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    payload, _raw_args, error = _tool_payload_object(
-        args,
-        tool_name="web_client_session",
-    )
-    if error:
-        return None, error
-
-    if "request" in payload:
-        request, request_error = _json_object_value(payload["request"], "request")
-        if request_error:
-            return None, request_error
-        if not _looks_like_web_client_session_request(request):
-            return None, "request must be a WebClientSession command object"
-        return request, None
-
-    request = _without_tool_only_keys(payload)
+    if args is None:
+        return None, _tool_schema_error(
+            "$",
+            "web_client_session arguments must be exactly {\"request\": {...}}",
+        )
+    if not isinstance(args, Mapping):
+        return None, _tool_schema_error(
+            "$",
+            "web_client_session arguments must be an object",
+        )
+    payload = dict(args)
+    unknown = sorted(set(payload) - {"request"})
+    if unknown:
+        return None, _tool_schema_error(
+            f"$.{unknown[0]}",
+            f"unsupported field path $.{unknown[0]}",
+        )
+    if "request" not in payload:
+        return None, _tool_schema_error(
+            "$.request",
+            "web_client_session missing request object",
+        )
+    request, request_error = _json_object_value(payload["request"], "request")
+    if request_error:
+        return None, _tool_schema_error("$.request", request_error)
     if not _looks_like_web_client_session_request(request):
-        return (
-            None,
-            (
-                "web_client_session missing command: expected "
-                "{\"request\": {...}} or raw command JSON"
-            ),
+        return None, _tool_schema_error(
+            "$.request",
+            "request must be a WebClientSession command object",
         )
     return request, None
+
+
+def _tool_schema_error(path: str, message: str) -> str:
+    return (
+        f"schema_error at {path}: {message}; expected canonical shape "
+        f"{CANONICAL_WEB_CLIENT_SESSION_SHAPE}"
+    )
 
 
 def _tool_payload_object(
@@ -2330,6 +2739,69 @@ def _browser_screenshot_map(
         label = str(action.get("label") or step_input.get("label") or "browser")
         screenshots[label] = str(action["screenshot_path"])
     return screenshots
+
+
+def _browser_result_failed(result: Mapping[str, Any]) -> bool:
+    if result.get("status") in {"pass", "error"}:
+        return False
+    browser = result.get("browser")
+    if isinstance(browser, Mapping) and browser.get("status") == "fail":
+        return True
+    return bool(result.get("error"))
+
+
+def _no_progress_signature(
+    action: Mapping[str, Any],
+    browser: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "failed_target": _safe_signature_value(action.get("target") or action),
+        "final_url": browser.get("final_url"),
+        "page_signature": _visible_page_signature(browser),
+        "media_state": _media_signature(browser.get("media_state")),
+        "visible_controls": _controls_signature(browser.get("visible_controls")),
+    }
+
+
+def _visible_page_signature(browser: Mapping[str, Any]) -> str:
+    text = browser.get("page_text") or browser.get("dom_summary") or ""
+    return re.sub(r"\s+", " ", str(text)).strip()[:500]
+
+
+def _media_signature(media_state: Any) -> Any:
+    if not isinstance(media_state, Mapping):
+        return None
+    elements = media_state.get("elements")
+    return {
+        "state": media_state.get("state"),
+        "element_count": len(elements) if isinstance(elements, list) else None,
+    }
+
+
+def _controls_signature(controls: Any) -> list[dict[str, Any]]:
+    if not isinstance(controls, list):
+        return []
+    signature = []
+    for control in controls[:30]:
+        if not isinstance(control, Mapping):
+            continue
+        signature.append(
+            {
+                "name": control.get("name"),
+                "scope": control.get("scope"),
+                "data_action": control.get("data_action"),
+                "data_id": control.get("data_id"),
+                "data_isfavorite": control.get("data_isfavorite"),
+            }
+        )
+    return signature
+
+
+def _safe_signature_value(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, sort_keys=True, default=str))
+    except Exception:
+        return str(value)
 
 
 def _browser_element_selectors(criteria: Any) -> list[str]:
@@ -2537,6 +3009,41 @@ def _web_client_session_result(
 ) -> dict[str, Any]:
     result = _web_client_error(request_id, error, session_id)
     result["status"] = status
+    return result
+
+
+def _web_client_schema_error(
+    *,
+    request_id: str,
+    path: str,
+    message: str,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    result = _web_client_error(
+        request_id,
+        (
+            f"schema_error at {path}: {message}; expected canonical shape "
+            f"{CANONICAL_WEB_CLIENT_SESSION_SHAPE}"
+        ),
+        session_id,
+    )
+    result["error_code"] = "schema_error"
+    result["schema_path"] = path
+    result["expected"] = CANONICAL_WEB_CLIENT_SESSION_SHAPE
+    return result
+
+
+def _web_client_blocked_error(
+    request_id: str,
+    *,
+    error_code: str,
+    error: str,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    result = _web_client_error(request_id, error, session_id)
+    result["error_code"] = error_code
+    result["requires_finalize"] = True
+    result["recommended_overall_result"] = "inconclusive"
     return result
 
 

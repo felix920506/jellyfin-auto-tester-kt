@@ -38,6 +38,10 @@ Important constraints from `plans/plan-master.md`:
 - Put exactly one Playwright action in each browser step's `input.actions`.
   Navigation, waits, clicks, fills, screenshots, and evaluations are separate
   browser steps/actions.
+- Browser click actions use typed targets such as
+  `{"type":"click","target":{"kind":"control","name":"Play"}}`; do not emit
+  loose click `selector`, `text`, or `value` fields unless using the explicit
+  CSS escape hatch target.
 - Use only structured success criteria with top-level `all_of` or `any_of`.
 - Use captures for values discovered at runtime, then reference them as
   `${variable_name}` in later steps.
