@@ -19,12 +19,12 @@ Do not listen to or depend on `plan_ready`, standard `verification_request`,
 
 ## Browser Session Tool
 
-Use only `web_client_session` for browser work. Every tool call must use exactly
-one `@@request={...}` argument in the function block:
+Use only `web_client_session` for browser work. Place the request command JSON
+directly in the block body, with no `@@request=` argument:
 
 ```text
 [/web_client_session]
-@@request={
+{
   "command": "action",
   "request_id": "click-player-favorite",
   "action": {
@@ -39,14 +39,14 @@ one `@@request={...}` argument in the function block:
 [web_client_session/]
 ```
 
-Every browser move is exactly one top-level `action` object inside the
-`@@request` command object.
-Never send JSON as function content, `content`, `@@command` fields, `actions`
-arrays, `browser_input.actions`, or `action` as an array.
-The action command is represented as `"command": "action"` inside the request
-object; do not write `command: "action"` outside `@@request`.
-The finalize command is represented as `"command": "finalize"` inside the
-request object; do not write `command: "finalize"` outside `@@request`.
+The block body is a single top-level JSON object whose `command` is one of
+`start`, `action`, or `finalize`. Every browser move is
+exactly one top-level `action` object inside that command object. Do not nest
+commands inside `actions` arrays or pass `action` as an array. The action
+command is represented as `"command": "action"` inside the body JSON; do not
+write `command: "action"` outside that body JSON object. The finalize command
+is represented as `"command": "finalize"` inside the body JSON; do not write
+`command: "finalize"` outside that body JSON object.
 
 `browser_input` is only for session/default browser metadata: `path`, `url`,
 `auth`, `label`, `timeout_s`, `viewport`, and `locale`.
@@ -81,14 +81,14 @@ For a `web_client_plan_ready` or `web_client_verification_request` message:
    indicators in mind, but choose the next browser action from current page
    state and returned evidence. You may deviate from listed steps when the UI
    requires it.
-4. Call `web_client_session` with `@@request={"command": "action", ...}`,
-   exactly one `action`, and step
-   metadata: `step_id`, `role`, and `action_label`. Include compiled
-   `success_criteria`, `selector_assertions`, or `capture` only when they apply
-   to that one action.
+4. Call `web_client_session` with the body JSON `{"command": "action", ...}`,
+   exactly one `action`, and step metadata: `step_id`, `role`, and
+   `action_label`. Include compiled `success_criteria`,
+   `selector_assertions`, or `capture` only when they apply to that one
+   action.
 5. Wait for the returned JSON before making another browser call. Continue one
    action at a time until enough evidence has been collected.
-6. Call `web_client_session` with `@@request={"command": "finalize", ...}`
+6. Call `web_client_session` with the body JSON `{"command": "finalize", ...}`
    and `overall_result` (`reproduced`, `not_reproduced`, or `inconclusive`).
    Include `error_summary` when the result is blocked or inconclusive.
 7. Send the returned `ExecutionResult` JSON unchanged to `execution_done`.
@@ -106,12 +106,12 @@ at a time against the public demo URL with the supplied demo credentials.
 
 For a `web_client_task` message:
 
-1. Call `web_client_session` with `@@request={"command": "start", ...}`,
+1. Call `web_client_session` with the body JSON `{"command": "start", ...}`,
    using the supplied `run_id`, `base_url`, and `artifacts_root`.
 2. Send each requested browser move as one
-   `@@request={"command": "action", ...}` call.
-3. Call `web_client_session` with
-   `@@request={"command": "finalize", ...}`.
+   `{"command": "action", ...}` body JSON call.
+3. Call `web_client_session` with the body JSON
+   `{"command": "finalize", ...}`.
 4. Send the returned JSON unchanged to `web_client_done`.
 5. Emit `WEB_CLIENT_COMPLETE`.
 

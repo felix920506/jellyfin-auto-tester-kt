@@ -1326,7 +1326,7 @@ class WebClientRunnerTests(unittest.TestCase):
 
 
 class WebClientRunnerToolTests(unittest.TestCase):
-    def test_session_tool_accepts_only_canonical_request_payload(self):
+    def test_session_tool_accepts_canonical_request_payload(self):
         request = {
             "command": "start",
             "request_id": "start-1",
@@ -1348,19 +1348,84 @@ class WebClientRunnerToolTests(unittest.TestCase):
                 WebClientSessionTool()._execute({"request": request})
             )
             raw = asyncio.run(WebClientSessionTool()._execute(request))
-            content = asyncio.run(
-                WebClientSessionTool()._execute(
-                    {"content": json.dumps({"request": request})}
-                )
-            )
 
         self.assertIsNone(wrapped.error)
         self.assertEqual(json.loads(wrapped.output), expected)
         self.assertIsNotNone(raw.error)
         self.assertIn("schema_error", raw.error)
-        self.assertIsNotNone(content.error)
-        self.assertIn("$.content", content.error)
         session_tool.assert_called_once_with(request=request)
+
+    def test_session_tool_accepts_body_style_json(self):
+        request = {
+            "command": "start",
+            "request_id": "start-1",
+            "run_id": "tool-run",
+            "artifacts_root": "/tmp/artifacts",
+            "plan_markdown_path": "/tmp/artifacts/plan.md",
+        }
+        expected = {"request_id": "start-1", "status": "pass"}
+
+        with patch.object(
+            web_client_runner_module,
+            "session",
+            return_value=expected,
+        ) as session_tool:
+            raw_body = asyncio.run(
+                WebClientSessionTool()._execute(
+                    {"content": json.dumps(request)}
+                )
+            )
+            wrapped_body = asyncio.run(
+                WebClientSessionTool()._execute(
+                    {"content": json.dumps({"request": request})}
+                )
+            )
+
+        self.assertIsNone(raw_body.error)
+        self.assertEqual(json.loads(raw_body.output), expected)
+        self.assertIsNone(wrapped_body.error)
+        self.assertEqual(json.loads(wrapped_body.output), expected)
+        self.assertEqual(session_tool.call_count, 2)
+        for call in session_tool.call_args_list:
+            self.assertEqual(call.kwargs["request"], request)
+
+    def test_session_tool_accepts_multiline_at_request_arg(self):
+        request = {
+            "command": "start",
+            "request_id": "start-1",
+            "plan_markdown": "# Plan\\n\\nLine 2",
+        }
+        expected = {"request_id": "start-1", "status": "pass"}
+
+        full_json = json.dumps(request)
+        # The KT bracket parser splits multi-line ``@@request={`` calls into
+        # ``request="{"`` and the JSON tail in ``content``.
+        split_request = "{"
+        split_content = full_json[1:]
+
+        with patch.object(
+            web_client_runner_module,
+            "session",
+            return_value=expected,
+        ) as session_tool:
+            result = asyncio.run(
+                WebClientSessionTool()._execute(
+                    {"request": split_request, "content": split_content}
+                )
+            )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(json.loads(result.output), expected)
+        session_tool.assert_called_once_with(request=request)
+
+    def test_session_tool_rejects_unknown_top_level_field(self):
+        result = asyncio.run(
+            WebClientSessionTool()._execute(
+                {"request": {"command": "start"}, "extra": "nope"}
+            )
+        )
+        self.assertIsNotNone(result.error)
+        self.assertIn("$.extra", result.error)
 
     def test_execute_plan_tool_accepts_wrapped_json_body(self):
         plan = browser_plan()

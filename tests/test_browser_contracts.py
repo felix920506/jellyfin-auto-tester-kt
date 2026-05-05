@@ -289,13 +289,11 @@ class BrowserContractTests(unittest.TestCase):
             "request_id": "request-4",
             "plan_markdown": "# ReproductionPlan Markdown v1\n\n...",
         }
-        content_wrapper = {"content": json.dumps({"request": raw_command})}
 
         self.assertTrue(list(validator.iter_errors({"request": browser_input_actions})))
         self.assertTrue(list(validator.iter_errors({"request": top_level_actions})))
         self.assertTrue(list(validator.iter_errors({"request": action_array})))
         self.assertTrue(list(validator.iter_errors(raw_command)))
-        self.assertTrue(list(validator.iter_errors(content_wrapper)))
 
     def test_web_client_result_schema_accepts_browser_result(self):
         result = {

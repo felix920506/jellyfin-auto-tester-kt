@@ -4,12 +4,26 @@
   "title": "WebClientSessionToolParameters",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "request"
+  "anyOf": [
+    {
+      "required": [
+        "request"
+      ]
+    },
+    {
+      "required": [
+        "content"
+      ]
+    }
   ],
   "properties": {
     "request": {
       "$ref": "#/$defs/session_request"
+    },
+    "content": {
+      "type": "string",
+      "description": "Bracket-call body containing the request command JSON (or, when the parser splits a multi-line @@request= value, the trailing JSON fragment).",
+      "minLength": 1
     }
   },
   "$defs": {

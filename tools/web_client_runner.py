@@ -79,9 +79,11 @@ LOGGER = logging.getLogger(
     "kohakuterrarium.jellyfin_auto_tester.tools.web_client_runner"
 )
 CANONICAL_WEB_CLIENT_SESSION_SHAPE = (
-    '@@request={"command":"action","request_id":"click-player-favorite",'
-    '"action":{"type":"click","target":{"kind":"control","name":"Add to favorites",'
-    '"scope":"player"}}}'
+    "[/web_client_session]\n"
+    '{"command":"action","request_id":"click-player-favorite",'
+    '"action":{"type":"click","target":{"kind":"control",'
+    '"name":"Add to favorites","scope":"player"}}}\n'
+    "[web_client_session/]"
 )
 SCHEMA_ERROR_BLOCK_THRESHOLD = 2
 NO_PROGRESS_WARN_THRESHOLD = 2
@@ -2238,23 +2240,29 @@ class WebClientSessionTool(BaseTool):
             return {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["request"],
+                "anyOf": [
+                    {"required": ["request"]},
+                    {"required": ["content"]},
+                ],
                 "properties": {
                     "request": {
                         "type": "object",
                         "additionalProperties": False,
                     },
+                    "content": {"type": "string", "minLength": 1},
                 },
             }
 
     def prompt_contribution(self) -> str | None:
         return (
-            "Call `web_client_session` with bracket function syntax and exactly "
-            "one `@@request={...}` argument. For full-plan starts, pass the "
-            "received Markdown plan text as `plan_markdown`; do not use local "
-            "filesystem paths. Then send one action command per browser move, "
-            "and finish with finalize. Never submit JSON as function content, "
-            "`content`, `actions` arrays, or an `action` array."
+            "Call `web_client_session` with bracket function syntax. Place the "
+            "request command JSON directly in the block body, for example: "
+            "`[/web_client_session]\\n{\"command\": \"action\", ...}\\n"
+            "[web_client_session/]`. For full-plan starts, pass the received "
+            "Markdown plan text as `plan_markdown`; do not use local "
+            "filesystem paths. Send one action command per browser move, and "
+            "finish with finalize. Do not nest commands inside `actions` "
+            "arrays or pass `action` as an array."
         )
 
     async def _execute(self, args: dict[str, Any], **_kwargs: Any) -> ToolResult:
@@ -2610,7 +2618,7 @@ def _session_tool_args(
     if args is None:
         return None, _tool_schema_error(
             "$",
-            "web_client_session arguments must be exactly {\"request\": {...}}",
+            "web_client_session arguments are required",
         )
     if not isinstance(args, Mapping):
         return None, _tool_schema_error(
@@ -2618,18 +2626,22 @@ def _session_tool_args(
             "web_client_session arguments must be an object",
         )
     payload = dict(args)
-    unknown = sorted(set(payload) - {"request"})
+    payload.pop("_tool_call_id", None)
+    unknown = sorted(set(payload) - {"request", "content"})
     if unknown:
         return None, _tool_schema_error(
             f"$.{unknown[0]}",
             f"unsupported field path $.{unknown[0]}",
         )
-    if "request" not in payload:
+    if "request" not in payload and "content" not in payload:
         return None, _tool_schema_error(
             "$.request",
-            "web_client_session missing request object",
+            "web_client_session missing request object or JSON body",
         )
-    request, request_error = _json_object_value(payload["request"], "request")
+    request, request_error = _decode_session_request(
+        payload.get("request"),
+        payload.get("content"),
+    )
     if request_error:
         return None, _tool_schema_error("$.request", request_error)
     if not _looks_like_web_client_session_request(request):
@@ -2638,6 +2650,75 @@ def _session_tool_args(
             "request must be a WebClientSession command object",
         )
     return request, None
+
+
+def _decode_session_request(
+    request_value: Any,
+    content_value: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Decode a WebClientSession request from KT bracket-call args.
+
+    Accepts the canonical body-style JSON, a single-line ``@@request=...``
+    string, an object ``request``, and the multi-line ``@@request=...`` case
+    where the parser splits the JSON between ``request`` and ``content``.
+    """
+
+    if isinstance(request_value, Mapping):
+        return _maybe_unwrap_request(deepcopy(dict(request_value))), None
+
+    request_str = request_value if isinstance(request_value, str) else None
+    content_str = content_value if isinstance(content_value, str) else None
+
+    if request_str is not None and not request_str.strip():
+        request_str = None
+    if content_str is not None and not content_str.strip():
+        content_str = None
+
+    candidates: list[str] = []
+    if request_str is not None and content_str is not None:
+        candidates.append(request_str + "\n" + content_str)
+        candidates.append(request_str + content_str)
+    if request_str is not None:
+        candidates.append(request_str)
+    if content_str is not None:
+        candidates.append(content_str)
+
+    last_error: json.JSONDecodeError | None = None
+    for candidate in candidates:
+        text = candidate.strip()
+        if not text:
+            continue
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+        if not isinstance(decoded, Mapping):
+            continue
+        return _maybe_unwrap_request(dict(decoded)), None
+
+    if not candidates:
+        return None, "request is required"
+    if last_error is not None:
+        return (
+            None,
+            (
+                f"malformed JSON: {last_error.msg} "
+                f"at line {last_error.lineno} column {last_error.colno}"
+            ),
+        )
+    return None, "request must decode to a JSON object"
+
+
+def _maybe_unwrap_request(decoded: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap an outer ``{"request": {...}}`` envelope when present."""
+
+    if "command" in decoded or "request_id" in decoded:
+        return decoded
+    inner = decoded.get("request")
+    if isinstance(inner, Mapping):
+        return dict(inner)
+    return decoded
 
 
 def _tool_schema_error(path: str, message: str) -> str:
