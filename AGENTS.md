@@ -48,7 +48,7 @@ Tests use `unittest` and fake collaborators for Docker, API, screenshots, and co
 
 Recent commits use concise, imperative summaries such as `Add debug logging to github tool wrappers` and `Centralize stage tools into top-level tools/ package`. Keep the first line specific and under roughly 72 characters when possible. Pull requests should explain the behavior change, list verification commands run, reference related Jellyfin or repo issues, and include sample output or screenshots when report or transcript-viewer behavior changes.
 
-When large changes are made, favor multiple small commits over monolithic large commits. Always commit after changes are made, unless instructed otherwise.
+Favor multiple smaller incremental commits instead of large single commits. For complex changes, commit logically independent steps separately to maintain a clean and reviewable history. Always commit after changes are made, unless instructed otherwise.
 
 ## Security & Configuration Tips
 
