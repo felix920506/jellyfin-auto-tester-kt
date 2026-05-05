@@ -2170,12 +2170,12 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.stage, "web-client")
             self.assertEqual(result.status, "reproduced")
             self.assertEqual(result.output_file, "execution_result.json")
-            self.assertEqual(payload["run_id"], "web-run-1")
+            self.assertEqual(payload["run_id"], "web-agent-run")
             _assert_handoff_metadata(self, payload["plan"], plan)
             self.assertTrue((temp_path / "web-client" / "result.json").is_file())
             self.assertEqual(engine.received_channel, "web_client_plan_ready")
             self.assertIn("# ReproductionPlan Markdown v1", engine.received_payload)
-            self.assertEqual(engine.received_metadata["run_id"], "web-run-1")
+            self.assertEqual(engine.received_metadata, {})
             _assert_handoff_metadata(
                 self,
                 parse_reproduction_plan_markdown(engine.received_payload),
@@ -2187,14 +2187,14 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         plan = _sample_web_client_plan()
         tool_call = (
             "[/web_client_session]\n"
+            + "@@request="
             + json.dumps(
                 {
                     "command": "start",
                     "request_id": "start-1",
-                    "run_id": "web-run-transcript",
-                    "artifacts_root": "/tmp/artifacts",
-                    "plan_markdown_path": "/tmp/artifacts/plan.md",
-                }
+                    "plan_markdown": render_reproduction_plan_markdown(plan),
+                },
+                sort_keys=True,
             )
             + "\n"
             + "[web_client_session/]\n"
@@ -2252,6 +2252,22 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "[/web_client_session]",
+            transcript_payload["messages"][1]["content"],
+        )
+        self.assertIn(
+            "@@request=",
+            transcript_payload["messages"][1]["content"],
+        )
+        self.assertIn(
+            "plan_markdown",
+            transcript_payload["messages"][1]["content"],
+        )
+        self.assertNotIn(
+            "plan_markdown_path",
+            transcript_payload["messages"][1]["content"],
+        )
+        self.assertNotIn(
+            "artifacts_root",
             transcript_payload["messages"][1]["content"],
         )
         self.assertNotIn(
@@ -2339,7 +2355,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(result.status, "reproduced")
             self.assertEqual(engine.received_channel, "web_client_plan_ready")
-            self.assertEqual(engine.received_metadata["run_id"], "web-run-started")
+            self.assertEqual(engine.received_metadata, {})
             self.assertFalse(engine.start_called)
             self.assertFalse(engine.stop_called)
             self.assertTrue(engine.shutdown_called)

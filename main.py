@@ -1232,12 +1232,12 @@ async def _run_web_client_stage_impl(
     engine = await _load_stage_engine("web-client", engine_factory=engine_factory)
     route_channel = _web_client_stage_plan_channel(plan)
     run_id_value = run_id or f"web-client-{uuid.uuid4()}"
-    metadata: dict[str, Any] = {
+    session_defaults: dict[str, Any] = {
         "plan_markdown_path": str(output_plan_path),
         "artifacts_root": str(output_dir),
         "run_id": run_id_value,
     }
-    prompt = _web_client_stage_prompt(route_channel, plan_markdown, metadata)
+    prompt = _web_client_stage_prompt(route_channel, plan_markdown)
     web_client_agent = _optional_agent(engine, "web_client_agent")
     system_prompt = (
         _agent_system_prompt_text(web_client_agent)
@@ -1258,9 +1258,9 @@ async def _run_web_client_stage_impl(
             "channel": route_channel,
             "input_path": str(plan_path),
             "plan_markdown": plan_markdown,
-            "run_id": run_id_value,
-            "plan_markdown_path": str(output_plan_path),
-            "artifacts_root": str(output_dir),
+            "run_id": session_defaults["run_id"],
+            "plan_markdown_path": session_defaults["plan_markdown_path"],
+            "artifacts_root": session_defaults["artifacts_root"],
         },
     )
     transcript_writer.initialize()
@@ -1287,15 +1287,25 @@ async def _run_web_client_stage_impl(
         route_channel,
         run_id,
     )
+    from tools.web_client_runner import (
+        configure_session_defaults,
+        restore_session_defaults,
+    )
+
+    previous_session_defaults = configure_session_defaults(
+        artifacts_root=output_dir,
+        run_id=run_id_value,
+    )
     try:
         result = await _run_web_client_agent_handoff(
             engine,
             route_channel=route_channel,
             message=plan_markdown,
-            metadata=metadata,
+            metadata=None,
             timeout_s=timeout_s,
         )
     finally:
+        restore_session_defaults(previous_session_defaults)
         _restore_transcript_output(transcript_capture_state)
         _restore_transcript_message_hooks(transcript_message_hooks)
     _write_json_file(output_dir / "execution_result.json", result)
@@ -1537,22 +1547,9 @@ def _web_client_stage_prompt(
     plan_markdown: str,
     metadata: Mapping[str, Any] | None = None,
 ) -> str:
-    metadata_payload = json.dumps(
-        dict(metadata or {}),
-        ensure_ascii=True,
-        sort_keys=True,
-        default=str,
-    )
     return (
         f"Channel: {route_channel}\n\n"
-        "Web-client Stage 2 handoff Markdown:\n"
-        "```markdown\n"
-        f"{plan_markdown.rstrip()}\n"
-        "```\n\n"
-        "Debug metadata:\n"
-        "```json\n"
-        f"{metadata_payload}\n"
-        "```"
+        f"{plan_markdown.rstrip()}"
     )
 
 

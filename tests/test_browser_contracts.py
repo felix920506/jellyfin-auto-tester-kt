@@ -227,15 +227,11 @@ class BrowserContractTests(unittest.TestCase):
         start_plan_request = {
             "command": "start",
             "request_id": "request-1",
-            "run_id": "run-1",
-            "artifacts_root": "/tmp/artifacts",
-            "plan_markdown_path": "/tmp/artifacts/plan.md",
+            "plan_markdown": "# ReproductionPlan Markdown v1\n\n...",
         }
         start_task_request = {
             "command": "start",
             "request_id": "request-2",
-            "run_id": "run-2",
-            "artifacts_root": "/tmp/artifacts",
             "base_url": "http://localhost:8096",
         }
         action_request = {
@@ -291,9 +287,7 @@ class BrowserContractTests(unittest.TestCase):
         raw_command = {
             "command": "start",
             "request_id": "request-4",
-            "run_id": "run-1",
-            "artifacts_root": "/tmp/artifacts",
-            "plan_markdown_path": "/tmp/artifacts/plan.md",
+            "plan_markdown": "# ReproductionPlan Markdown v1\n\n...",
         }
         content_wrapper = {"content": json.dumps({"request": raw_command})}
 
@@ -457,7 +451,8 @@ class BrowserContractTests(unittest.TestCase):
         self.assertIn("web_client_session", web_client_prompt)
         self.assertIn('command: "action"', web_client_prompt)
         self.assertIn("exactly one top-level `action` object", web_client_prompt)
-        self.assertIn("Do not echo the plan body into a tool call", web_client_prompt)
+        self.assertIn("plan_markdown", web_client_prompt)
+        self.assertIn("Do not use local filesystem paths", web_client_prompt)
         self.assertIn('command: "finalize"', web_client_prompt)
         self.assertIn("There is only one active web-client session", web_client_prompt)
         self.assertNotIn("session_id", web_client_prompt)

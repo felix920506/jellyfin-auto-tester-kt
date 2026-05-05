@@ -57,6 +57,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACTS_ROOT = Path(
     os.environ.get("JF_AUTO_TESTER_ARTIFACTS_ROOT", REPO_ROOT / "artifacts")
 ).resolve()
+_SESSION_DEFAULT_ARTIFACTS_ROOT: str | None = None
+_SESSION_DEFAULT_RUN_ID: str | None = None
 FORBIDDEN_DOCKER_OPS_RE = re.compile(r"\bdocker\s+(?:run|pull|start)\b")
 DEMO_SERVER_URLS = {
     "stable": "https://demo.jellyfin.org/stable",
@@ -77,9 +79,9 @@ LOGGER = logging.getLogger(
     "kohakuterrarium.jellyfin_auto_tester.tools.web_client_runner"
 )
 CANONICAL_WEB_CLIENT_SESSION_SHAPE = (
-    '{"request":{"command":"action","request_id":"click-player-favorite",'
+    '@@request={"command":"action","request_id":"click-player-favorite",'
     '"action":{"type":"click","target":{"kind":"control","name":"Add to favorites",'
-    '"scope":"player"}}}}'
+    '"scope":"player"}}}'
 )
 SCHEMA_ERROR_BLOCK_THRESHOLD = 2
 NO_PROGRESS_WARN_THRESHOLD = 2
@@ -91,6 +93,7 @@ SESSION_ALLOWED_FIELDS = {
     "artifacts_root",
     "plan_path",
     "plan_markdown_path",
+    "plan_markdown",
     "base_url",
     "step_id",
     "role",
@@ -111,6 +114,7 @@ SESSION_FIELDS_BY_COMMAND = {
         "artifacts_root",
         "plan_path",
         "plan_markdown_path",
+        "plan_markdown",
         "base_url",
         "step_id",
         "browser_input",
@@ -810,15 +814,12 @@ class WebClientRunner:
             self._write_session_result_if_possible(payload, result)
             return result
 
-        run_id = str(payload.get("run_id") or "")
-        artifacts_root_value = payload.get("artifacts_root")
-        if not run_id or not artifacts_root_value:
-            result = _web_client_error(
-                request_id,
-                "run_id and artifacts_root are required for start",
-            )
-            self._write_session_result_if_possible(payload, result)
-            return result
+        run_id = str(
+            payload.get("run_id") or _SESSION_DEFAULT_RUN_ID or self.uuid_factory()
+        ).strip()
+        artifacts_root_value = (
+            payload.get("artifacts_root") or _SESSION_DEFAULT_ARTIFACTS_ROOT
+        )
 
         browser_input, metadata_error = _task_browser_metadata(
             payload.get("browser_input")
@@ -828,8 +829,20 @@ class WebClientRunner:
             self._write_session_result_if_possible(payload, result)
             return result
 
-        artifacts_root = Path(str(artifacts_root_value)).expanduser().resolve()
+        artifacts_root = (
+            Path(str(artifacts_root_value)).expanduser().resolve()
+            if artifacts_root_value
+            else self.artifacts_root
+        )
         self.artifacts_root = artifacts_root
+        for collaborator in (
+            self.docker,
+            self.api,
+            self.screenshotter,
+            self.browser_driver,
+        ):
+            if hasattr(collaborator, "artifacts_root"):
+                collaborator.artifacts_root = artifacts_root
         artifacts_dir = artifacts_root / run_id
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         _write_json(
@@ -845,8 +858,31 @@ class WebClientRunner:
         setup_failed = False
         error_summary: str | None = None
 
-        if payload.get("plan_path") or payload.get("plan_markdown_path"):
-            if payload.get("plan_markdown_path"):
+        if (
+            payload.get("plan_markdown")
+            or payload.get("plan_path")
+            or payload.get("plan_markdown_path")
+        ):
+            if payload.get("plan_markdown"):
+                plan_markdown = str(payload["plan_markdown"])
+                try:
+                    plan = parse_reproduction_plan_markdown(plan_markdown)
+                except Exception as exc:
+                    message = (
+                        "plan_markdown must be a valid ReproductionPlan "
+                        f"Markdown document: {exc}"
+                    )
+                    result = _web_client_error(
+                        request_id,
+                        message,
+                    )
+                    self._write_session_result_if_possible(payload, result)
+                    return result
+                (artifacts_dir / "plan.md").write_text(
+                    plan_markdown.rstrip() + "\n",
+                    encoding="utf-8",
+                )
+            elif payload.get("plan_markdown_path"):
                 plan_path = (
                     Path(str(payload["plan_markdown_path"])).expanduser().resolve()
                 )
@@ -962,7 +998,7 @@ class WebClientRunner:
         else:
             result = _web_client_error(
                 request_id,
-                "start requires either plan_path or base_url",
+                "start requires plan_markdown, plan_path, plan_markdown_path, or base_url",
             )
             self._write_session_result_if_possible(payload, result)
             return result
@@ -2118,6 +2154,35 @@ def execute_plan(
     )
 
 
+def configure_session_defaults(
+    *,
+    artifacts_root: str | Path | None = None,
+    run_id: str | None = None,
+) -> dict[str, str | None]:
+    """Set hidden defaults for agent-facing web_client_session start calls."""
+
+    global _SESSION_DEFAULT_ARTIFACTS_ROOT, _SESSION_DEFAULT_RUN_ID
+    previous = {
+        "artifacts_root": _SESSION_DEFAULT_ARTIFACTS_ROOT,
+        "run_id": _SESSION_DEFAULT_RUN_ID,
+    }
+    _SESSION_DEFAULT_ARTIFACTS_ROOT = (
+        str(Path(artifacts_root).expanduser().resolve())
+        if artifacts_root is not None
+        else None
+    )
+    _SESSION_DEFAULT_RUN_ID = str(run_id).strip() if run_id is not None else None
+    return previous
+
+
+def restore_session_defaults(previous: Mapping[str, str | None]) -> None:
+    """Restore defaults returned by configure_session_defaults."""
+
+    global _SESSION_DEFAULT_ARTIFACTS_ROOT, _SESSION_DEFAULT_RUN_ID
+    _SESSION_DEFAULT_ARTIFACTS_ROOT = previous.get("artifacts_root")
+    _SESSION_DEFAULT_RUN_ID = previous.get("run_id")
+
+
 def session(
     request: dict[str, Any] | None = None,
     **kwargs: Any,
@@ -2184,12 +2249,12 @@ class WebClientSessionTool(BaseTool):
 
     def prompt_contribution(self) -> str | None:
         return (
-            "Call `web_client_session` only as "
-            "`{\"request\": {\"command\": \"start\", ...}}`, then one "
-            "`{\"request\": {\"command\": \"action\", \"action\": {...}}}` "
-            "per browser move, then `{\"request\": {\"command\": \"finalize\", ...}}`. "
-            "Never submit raw command JSON, `content`, `actions` arrays, or an "
-            "`action` array."
+            "Call `web_client_session` with bracket function syntax and exactly "
+            "one `@@request={...}` argument. For full-plan starts, pass the "
+            "received Markdown plan text as `plan_markdown`; do not use local "
+            "filesystem paths. Then send one action command per browser move, "
+            "and finish with finalize. Never submit JSON as function content, "
+            "`content`, `actions` arrays, or an `action` array."
         )
 
     async def _execute(self, args: dict[str, Any], **_kwargs: Any) -> ToolResult:
@@ -2304,14 +2369,6 @@ def _validate_session_request(payload: Mapping[str, Any]) -> dict[str, str] | No
         return _schema_field_error(f"$.{disallowed[0]}")
 
     if command == "start":
-        for required in ("run_id", "artifacts_root"):
-            if not isinstance(payload.get(required), str) or not str(
-                payload.get(required)
-            ).strip():
-                return {
-                    "path": f"$.{required}",
-                    "message": f"{required} is required for start",
-                }
         has_plan_path = isinstance(payload.get("plan_path"), str) and bool(
             str(payload.get("plan_path")).strip()
         )
@@ -2319,19 +2376,27 @@ def _validate_session_request(payload: Mapping[str, Any]) -> dict[str, str] | No
             payload.get("plan_markdown_path"),
             str,
         ) and bool(str(payload.get("plan_markdown_path")).strip())
+        has_plan_markdown = isinstance(payload.get("plan_markdown"), str) and bool(
+            str(payload.get("plan_markdown")).strip()
+        )
         has_base_url = isinstance(payload.get("base_url"), str) and bool(
             str(payload.get("base_url")).strip()
         )
         supplied_targets = sum(
             1
-            for supplied in (has_plan_path, has_plan_markdown_path, has_base_url)
+            for supplied in (
+                has_plan_path,
+                has_plan_markdown_path,
+                has_plan_markdown,
+                has_base_url,
+            )
             if supplied
         )
         if supplied_targets != 1:
             return {
                 "path": "$.plan_path",
                 "message": (
-                    "start requires exactly one of plan_path, "
+                    "start requires exactly one of plan_markdown, plan_path, "
                     "plan_markdown_path, or base_url"
                 ),
             }

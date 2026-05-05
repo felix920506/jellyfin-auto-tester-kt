@@ -398,6 +398,42 @@ class WebClientRunnerTests(unittest.TestCase):
                 }
             )
 
+    def test_session_start_with_inline_plan_markdown_uses_generated_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            docker = FakeDocker()
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=docker,
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "inline-plan-run",
+            )
+
+            start = runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-inline",
+                    "plan_markdown": render_reproduction_plan_markdown(browser_plan()),
+                }
+            )
+            final = runner.session(
+                {
+                    "command": "finalize",
+                    "request_id": "finalize-inline",
+                    "overall_result": "reproduced",
+                }
+            )
+
+            self.assertEqual(start["status"], "pass")
+            self.assertEqual(start["run_id"], "inline-plan-run")
+            self.assertTrue(start["plan_loaded"])
+            self.assertEqual(docker.pulled, [("jellyfin/jellyfin:10.9.7", "inline-plan-run")])
+            self.assertTrue(Path(temp_dir, "inline-plan-run", "plan.md").is_file())
+            self.assertTrue(Path(temp_dir, "inline-plan-run", "plan.json").is_file())
+            self.assertEqual(final["overall_result"], "reproduced")
+
     def test_session_action_runs_exactly_one_plan_backed_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = FakeBrowserDriver(temp_dir)
@@ -1132,6 +1168,46 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(action["status"], "pass")
             self.assertNotIn("session_id", action)
             self.assertEqual(len(browser_driver.runs), 1)
+
+    def test_module_level_session_uses_hidden_start_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+                uuid_factory=lambda: "fallback-run",
+            )
+            previous_runner = web_client_runner_module._DEFAULT_SESSION_RUNNER
+            previous_defaults = web_client_runner_module.configure_session_defaults(
+                artifacts_root=temp_dir,
+                run_id="ambient-run",
+            )
+            web_client_runner_module._DEFAULT_SESSION_RUNNER = runner
+            try:
+                start = web_client_runner_module.session(
+                    {
+                        "command": "start",
+                        "request_id": "ambient-start",
+                        "base_url": "http://localhost:9000",
+                    }
+                )
+                final = web_client_runner_module.session(
+                    {
+                        "command": "finalize",
+                        "request_id": "ambient-finalize",
+                    }
+                )
+            finally:
+                web_client_runner_module._DEFAULT_SESSION_RUNNER = previous_runner
+                web_client_runner_module.restore_session_defaults(previous_defaults)
+
+            self.assertEqual(start["status"], "pass")
+            self.assertEqual(start["run_id"], "ambient-run")
+            self.assertTrue(Path(temp_dir, "ambient-run").is_dir())
+            self.assertEqual(final["status"], "pass")
 
     def test_module_level_session_task_mode_uses_same_worker_thread_inside_event_loop(self):
         main_thread = threading.get_ident()

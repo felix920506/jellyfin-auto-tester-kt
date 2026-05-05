@@ -48,6 +48,10 @@
           "type": "string",
           "minLength": 1
         },
+        "plan_markdown": {
+          "type": "string",
+          "minLength": 1
+        },
         "base_url": {
           "type": "string",
           "minLength": 1
@@ -142,10 +146,6 @@
             ]
           },
           "then": {
-            "required": [
-              "run_id",
-              "artifacts_root"
-            ],
             "oneOf": [
               {
                 "required": [
@@ -156,6 +156,11 @@
                     {
                       "required": [
                         "plan_markdown_path"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "plan_markdown"
                       ]
                     },
                     {
@@ -175,6 +180,35 @@
                     {
                       "required": [
                         "plan_path"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "plan_markdown"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "base_url"
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "plan_markdown"
+                ],
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "plan_path"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "plan_markdown_path"
                       ]
                     },
                     {
@@ -199,6 +233,11 @@
                     {
                       "required": [
                         "plan_markdown_path"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "plan_markdown"
                       ]
                     }
                   ]
