@@ -150,7 +150,7 @@ Use exactly these top-level sections, in this order:
 8. `Confidence`
 9. `Ambiguities`
 
-The Markdown is the Stage 1 to Stage 2 handoff for an AI execution agent. Make
+The Markdown is a test execution handoff for Jellyfin issue reproduction. Make
 it readable Markdown, not a JSON wrapper. Do not emit the full plan as a single
 JSON object, and do not put routine plan fields such as environment, actions,
 captures, or success criteria inside fenced JSON blocks.
@@ -188,22 +188,24 @@ tool call block, wait for its result, then reassess the gate in the next turn.
 
 ### Baseline Docker Server State
 
-For Docker-backed plans, steps begin after Stage 2 health checks against an
-already configured Jellyfin server.
+For Docker-backed plans, reproduction steps start from a healthy, already
+configured Jellyfin server.
 
-- Stage 2 unconditionally handles pulling the image, starting the container,
-  waiting for `/health`, baseline server setup, and admin authentication.
-- Assume admin authentication is available through Stage 2 with `auth: "auto"`.
+- Docker lifecycle, health checks, baseline server setup, and admin
+  authentication are outside the reproduction steps.
+- Assume the execution environment provides admin authentication through
+  `auth: "auto"`.
 - Assume existing libraries contain at least one playable video item and at
   least one playable audio/music item.
 - Treat generic video and audio availability as baseline environment, not as a
   prerequisite.
 
 Never include steps like "pull image", "docker run", "start Jellyfin", or "wait
-for health" in `reproduction_steps`; they will be executed a second time and can
-cause port conflicts or duplicate containers.
+for health" in `reproduction_steps`; they are outside the reproduction plan and
+can cause port conflicts or duplicate containers.
 
-Each step must have a `Tool` bullet specifying how Stage 2 should execute it:
+Each step must have a `Tool` bullet specifying the tool category required for
+the step:
 
 - `bash`: shell command on the host, such as file preparation or ffmpeg.
 - `http_request`: raw Jellyfin HTTP request, including intentionally
@@ -268,9 +270,8 @@ becomes the `message` value and must be the raw `ReproductionPlan Markdown v1`
 document: no outer Markdown fence, no prose, no wrapper object, and no named
 output block. Do not write Python-call syntax such as
 `send_message(channel="plan_ready", ...)`; it will not execute.
-After the `send_message` call is made, stop; the runner treats the
-`plan_ready` or `web_client_plan_ready` channel message as the completion
-signal.
+After the `send_message` call is made, stop; the `plan_ready` or
+`web_client_plan_ready` channel message is the completion signal.
 
 Use this Markdown shape:
 
@@ -294,9 +295,8 @@ Short factual context from the issue and supporting sources.
 - Original Run ID: null
 
 ## Environment
-- Stage 2 manages Docker lifecycle, waits for Jellyfin health, and provides an
-  already configured Jellyfin server with admin auth plus playable video and
-  audio/music content.
+- Docker-backed reproduction starts from a healthy, already configured
+  Jellyfin server with admin auth and playable video/audio content.
 - Host Port: 8096
 - Container Port: 8096
 - Volumes: none
@@ -334,13 +334,13 @@ plans.
 
 - Never invent steps the issue does not support. Put ambiguity in
   `ambiguities`, not in steps.
-- Step observations must be concrete enough for Stage 2 to compile into
-  deterministic criteria. Write them as plain Markdown bullets, not JSON.
+- Step observations must be concrete enough to evaluate deterministically. Write
+  them as plain Markdown bullets, not JSON.
 - Prefer `http_request` over browser automation for API-level bugs. It is a raw
   HTTP transport, not a Jellyfin SDK. Every `http_request` input must include
-  `method`, `path`, and `auth`. Use `auth: "auto"` for the Stage 2 admin token,
-  `auth: "none"` for anonymous or deliberately unauthenticated requests, and
-  `auth: "token"` with `token` for a specific token.
+  `method`, `path`, and `auth`. Use `auth: "auto"` for provided admin
+  authentication, `auth: "none"` for anonymous or deliberately unauthenticated
+  requests, and `auth: "token"` with `token` for a specific token.
 - Prefer `browser` over `screenshot` for multi-action Jellyfin Web flows where
   selectors, waits, playback state, or a UI trigger must be driven before
   evidence is captured. Use browser criteria such as `browser_element`,
@@ -362,9 +362,8 @@ plans.
   creation, generic media generation, and generic library creation unless the
   issue specifically requires custom state.
 - Exactly one reproduction step must have `role: "trigger"`.
-- Trigger-step observations describe the bug symptom. Stage 2 compiles those
-  observations into criteria where a passing trigger step means the defect
-  manifested as expected.
+- Trigger-step observations describe the bug symptom. A passing trigger step
+  means the defect manifested as expected.
 - Top-level `reproduction_goal` is human-readable context only and must not be
   used as a substitute for concrete step observations.
 - Never emit a separate completion keyword after the plan. `plan_ready` or

@@ -1,4 +1,4 @@
-"""Human-readable Markdown handoff helpers for Stage 1 plans."""
+"""Human-readable Markdown helpers for reproduction plans."""
 
 from __future__ import annotations
 
@@ -49,8 +49,8 @@ class ReproductionPlanMarkdownError(ValueError):
 def parse_reproduction_plan_markdown(markdown: str) -> dict[str, Any]:
     """Inspect and lint a ``ReproductionPlan Markdown v1`` handoff.
 
-    The Stage 1 handoff is intentionally written for a human or AI Stage 2
-    agent. This function therefore validates the document contract and extracts
+    The Markdown plan is intentionally written for a human or execution agent.
+    This function therefore validates the document contract and extracts
     enough routing metadata for the pipeline fabric, but it does not compile the
     full deterministic runner schema.
     """
@@ -250,7 +250,7 @@ def render_reproduction_plan_markdown(plan: Mapping[str, Any]) -> str:
 
 
 def validate_reproduction_plan(plan: Mapping[str, Any]) -> None:
-    """Validate the internal ReproductionPlan shape needed by Stage 2."""
+    """Validate the internal ReproductionPlan shape needed for execution."""
 
     if not isinstance(plan, Mapping):
         raise ReproductionPlanMarkdownError("plan must be an object")
@@ -733,16 +733,16 @@ def _render_environment(plan: Mapping[str, Any]) -> list[str]:
     if isinstance(server_target, Mapping) and server_target.get("mode") == "demo":
         return [
             f"- Use the public Jellyfin demo server at {server_target.get('base_url')}.",
-            "- Stage 2 should not start Docker, run the startup wizard, or require admin access.",
+            "- Docker startup, first-run setup, and admin access are not part of this plan.",
         ]
 
     environment = _normalize_environment(plan.get("environment"), field="environment")
     ports = environment["ports"]
     lines = [
         (
-            "- Stage 2 manages Docker lifecycle, waits for Jellyfin health, and "
-            "provides an already configured Jellyfin server with admin auth plus "
-            "playable video and audio/music content."
+            "- Docker-backed reproduction starts from a healthy, already "
+            "configured Jellyfin server with admin auth and playable "
+            "video/audio content."
         ),
         f"- Host Port: {ports['host']}",
         f"- Container Port: {ports['container']}",

@@ -1,8 +1,8 @@
 # Analysis Agent Context
 
-The Stage 1 output is consumed by an execution agent and may also be reviewed by
-a human. Keep it concrete and executable, but write the handoff as readable
-Markdown instead of runner JSON.
+The analysis output is a Jellyfin test plan that may be executed automatically
+and reviewed by a human. Keep it concrete and executable, but write the plan as
+readable Markdown instead of internal JSON.
 
 Important constraints from `plans/plan-master.md`:
 
@@ -30,7 +30,7 @@ Important constraints from `plans/plan-master.md`:
   server-side assertions.
 - Do not include container startup, image pull, or health-check steps in
   `reproduction_steps`.
-- For Docker-backed plans, assume Stage 2 starts from an already configured
+- For Docker-backed plans, assume reproduction starts from an already configured
   Jellyfin server baseline with admin authentication plus at least one playable
   video item and one playable audio/music item in existing libraries. Treat
   generic video/audio availability as baseline environment, not a prerequisite.
@@ -50,8 +50,8 @@ Important constraints from `plans/plan-master.md`:
   evaluations are separate browser steps/actions.
 - Browser click actions should name visible controls, links, text targets, or an
   explicit CSS escape hatch selector.
-- Write observations as plain Markdown bullets that Stage 2 can compile into
-  deterministic criteria.
+- Write observations as plain Markdown bullets that are concrete enough to
+  evaluate deterministically.
 - Use captures for values discovered at runtime, then reference them as
   `${variable_name}` in later steps.
 - Include exactly one step with `role: "trigger"`; that step's criteria should

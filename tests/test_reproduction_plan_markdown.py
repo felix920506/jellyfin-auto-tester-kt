@@ -8,9 +8,11 @@ from tools.reproduction_plan_markdown import (
 
 
 DOCKER_BASELINE_ENVIRONMENT_LINE = (
-    "- Stage 2 manages Docker lifecycle, waits for Jellyfin health, and provides "
-    "an already configured Jellyfin server with admin auth plus playable video "
-    "and audio/music content."
+    "- Docker-backed reproduction starts from a healthy, already configured "
+    "Jellyfin server with admin auth and playable video/audio content."
+)
+DEMO_ENVIRONMENT_LINE = (
+    "- Docker startup, first-run setup, and admin access are not part of this plan."
 )
 
 
@@ -111,6 +113,7 @@ class ReproductionPlanMarkdownTests(unittest.TestCase):
         self.assertNotIn("#### Input", markdown)
         self.assertNotIn("#### Success Criteria", markdown)
         self.assertNotIn("```json", markdown)
+        self.assertNotIn("Stage 2", markdown)
         self.assertIn(DOCKER_BASELINE_ENVIRONMENT_LINE, markdown)
         self.assertEqual(parsed["execution_target"], "standard")
         self.assertEqual(parsed["docker_image"], "jellyfin/jellyfin:10.9.7")
@@ -141,6 +144,8 @@ class ReproductionPlanMarkdownTests(unittest.TestCase):
 
         self.assertNotIn("```json", markdown)
         self.assertNotIn("Docker Image", markdown)
+        self.assertNotIn("Stage 2", markdown)
+        self.assertIn(DEMO_ENVIRONMENT_LINE, markdown)
         self.assertEqual(parsed["server_target"]["mode"], "demo")
         self.assertEqual(parsed["server_target"]["password"], "")
 
