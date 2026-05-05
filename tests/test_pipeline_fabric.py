@@ -27,6 +27,7 @@ from main import (
     _default_log_level,
     _default_log_stderr,
     _normalize_stage_argv,
+    _normalize_transcript_messages,
     _parse_stage_choice,
     _stage1_config_path_from_recipe,
     _stage1_model_identifier_from_config,
@@ -167,6 +168,25 @@ class SendMessagePlanReadyAnalysisAgent:
     async def chat(self, prompt):
         self.prompts.append(prompt)
         self.plan_channel.send(render_reproduction_plan_markdown(self.plan))
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        if False:
+            yield ""
+
+
+class RawMarkdownPlanReadyAnalysisAgent:
+    def __init__(self, plan_channel, markdown):
+        self.plan_channel = plan_channel
+        self.markdown = markdown
+        self.prompts = []
+        self.cancelled = False
+
+    async def chat(self, prompt):
+        self.prompts.append(prompt)
+        self.plan_channel.send(self.markdown)
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -836,6 +856,69 @@ def _sample_web_client_plan():
     return plan
 
 
+def _sample_demo_markdown_without_expected_outcome():
+    return """# ReproductionPlan Markdown v1
+
+## Goal
+- Issue URL: https://github.com/jellyfin/jellyfin-web/issues/7852
+- Issue Title: Newly added favorite is lost if music player is stopped
+- Reproduction Goal: Confirm that a playing song loses its favorite state after Stop.
+
+## Issue Context
+The bug is reported as a Jellyfin Web favorite-state reset after playback stops.
+
+## Execution Target
+- Execution Target: web_client
+- Target Version: 10.11.8
+- Server Mode: demo
+- Demo Release Track: stable
+- Demo Base URL: https://demo.jellyfin.org/stable
+- Demo Username: demo
+- Demo Password: ""
+- Demo Requires Admin: false
+- Is Verification: false
+- Original Run ID: null
+
+## Environment
+```json
+{}
+```
+
+## Prerequisites
+```json
+[
+  "The demo catalog contains one playable song."
+]
+```
+
+## Steps
+### Step 1: Stop playback and observe the favorite state reset
+- Step ID: 1
+- Role: trigger
+- Action: Stop playback while the current song is marked favorite.
+- Tool: browser
+
+#### Input
+```json
+{"actions":[{"type":"click","target":{"kind":"control","name":"Stop","scope":"player"}}]}
+```
+
+#### Success Criteria
+```json
+{"all_of":[{"type":"browser_element","selector":"button[aria-label='Add to favorites']","exists":true}]}
+```
+
+## Failure Indicators
+- The favorite mark disappears after playback stops.
+
+## Confidence
+medium
+
+## Ambiguities
+- Browser engine differences may affect reproducibility.
+"""
+
+
 def _sample_legacy_printed_plan():
     return {
         "issue_url": "https://github.com/jellyfin/jellyfin/issues/14267",
@@ -1346,6 +1429,44 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(written_plan["execution_target"], "web_client")
         self.assertEqual(written_plan["reproduction_steps"][0]["tool"], "browser")
 
+    async def test_run_analysis_stage_accepts_practical_demo_markdown(self):
+        plan_channel = FakeOnSendChannel("web_client_plan_ready")
+        analysis_agent = RawMarkdownPlanReadyAnalysisAgent(
+            plan_channel,
+            _sample_demo_markdown_without_expected_outcome(),
+        )
+        engine = FakeEngine(
+            [],
+            channels={"web_client_plan_ready": plan_channel},
+            analysis_agent=analysis_agent,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = await asyncio.wait_for(
+                run_analysis_stage(
+                    "https://github.com/jellyfin/jellyfin-web/issues/7852",
+                    "10.11.8",
+                    temp_dir,
+                    stream=None,
+                    engine_factory=lambda stage: engine,
+                    issue_fetcher=_sample_issue_fetcher,
+                ),
+                timeout=1,
+            )
+
+            written_plan = parse_reproduction_plan_markdown(
+                (Path(temp_dir) / "plan.md").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result.status, "web_client_plan_ready")
+        self.assertEqual(len(analysis_agent.prompts), 1)
+        self.assertTrue(analysis_agent.cancelled)
+        self.assertEqual(written_plan["environment"]["ports"]["host"], 8096)
+        self.assertEqual(
+            written_plan["reproduction_steps"][0]["expected_outcome"],
+            "Stop playback while the current song is marked favorite.",
+        )
+
     async def test_run_issue_stops_on_insufficient_information(self):
         engine = FakeEngine(["INSUFFICIENT_INFORMATION\nmissing steps\n"])
 
@@ -1397,6 +1518,33 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel_name, "final_report")
         self.assertEqual(message, payload)
         self.assertEqual(channel.callbacks, [])
+
+    def test_transcript_normalization_strips_provider_reasoning_payloads(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "final answer"},
+                    {"type": "reasoning.summary", "summary": "hidden"},
+                ],
+                "reasoning": "hidden reasoning",
+                "reasoning_details": [{"data": "x" * 1000}],
+                "additional_kwargs": {
+                    "reasoning": "hidden nested reasoning",
+                    "tool_calls": [{"name": "send_message"}],
+                },
+            }
+        ]
+
+        normalized = _normalize_transcript_messages(messages)
+        payload = json.dumps(normalized)
+
+        self.assertEqual(normalized[0]["role"], "assistant")
+        self.assertNotIn("reasoning", normalized[0])
+        self.assertNotIn("reasoning_details", normalized[0])
+        self.assertNotIn("hidden", payload)
+        self.assertNotIn("x" * 100, payload)
+        self.assertIn("tool_calls", normalized[0]["additional_kwargs"])
 
     async def test_run_analysis_stage_writes_plan_handoff_folder(self):
         plan = _sample_plan()

@@ -459,16 +459,13 @@ class BrowserDriverTests(unittest.TestCase):
                 2,
             )
 
-    def test_stage2web_test6_fixture_exposes_player_favorite_and_stop_targets(self):
-        fixture = (
-            Path(__file__).resolve().parents[1]
-            / "debug"
-            / "stage2web-test6"
-            / "web-client-a3b8c6d9-c9fe-49b6-aa47-10de09479cc8"
-            / "browser_dom"
-            / "step_2_6.html"
+    def test_player_inventory_exposes_player_favorite_and_stop_targets(self):
+        html = (
+            '<div class="nowPlayingBar">'
+            '<button title="Stop"></button>'
+            '<button title="Add to favorites"></button>'
+            "</div>"
         )
-        html = fixture.read_text(encoding="utf-8")
         self.assertIn('class="nowPlayingBar"', html)
         self.assertIn('title="Stop"', html)
         self.assertIn('title="Add to favorites"', html)

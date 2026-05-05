@@ -3416,8 +3416,39 @@ def _normalize_transcript_messages(messages: Any) -> list[dict[str, Any]]:
         message["role"] = str(role)
         if "content" not in message:
             message["content"] = ""
-        result.append(_json_safe_value(message))
+        result.append(_json_safe_value(_sanitize_transcript_message(message)))
     return result
+
+
+_TRANSCRIPT_NOISY_KEYS = {
+    "reasoning",
+    "reasoning_details",
+    "reasoning_content",
+    "reasoning_metadata",
+    "reasoning_summary",
+    "reasoning_text",
+}
+
+
+def _sanitize_transcript_message(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in _TRANSCRIPT_NOISY_KEYS or key_text.startswith("reasoning_"):
+                continue
+            sanitized[key] = _sanitize_transcript_message(item)
+        return sanitized
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            if isinstance(item, dict):
+                item_type = str(item.get("type") or "")
+                if item_type.startswith("reasoning"):
+                    continue
+            result.append(_sanitize_transcript_message(item))
+        return result
+    return value
 
 
 def _json_safe_value(value: Any) -> Any:

@@ -29,6 +29,11 @@ DEMO_SERVER_URLS = {
     "stable": "https://demo.jellyfin.org/stable",
     "unstable": "https://demo.jellyfin.org/unstable",
 }
+DEFAULT_ENVIRONMENT = {
+    "ports": {"host": 8096, "container": 8096},
+    "volumes": [],
+    "env_vars": {},
+}
 
 _SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _STEP_RE = re.compile(r"^###\s+Step\s+(\d+)(?::\s*(.*?))?\s*$", re.MULTILINE)
@@ -147,6 +152,10 @@ def render_reproduction_plan_markdown(plan: Mapping[str, Any]) -> str:
     """Render a plan dict as ``ReproductionPlan Markdown v1``."""
 
     plan_dict = deepcopy(dict(plan))
+    plan_dict["environment"] = _normalize_environment(
+        plan_dict.get("environment"),
+        field="environment",
+    )
     validate_reproduction_plan(plan_dict)
 
     lines: list[str] = [
@@ -345,13 +354,19 @@ def _parse_scalar(value: str) -> Any:
         return None
     if re.fullmatch(r"-?\d+", text):
         return int(text)
+    if text.startswith('"') or text.startswith("'"):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if isinstance(parsed, (str, bool, int, float)) or parsed is None:
+            return parsed
     return text
 
 
 def _parse_environment_section(text: str) -> dict[str, Any]:
     environment = _parse_json_object_section(text, "Environment")
-    _validate_environment(environment)
-    return environment
+    return _normalize_environment(environment, field="environment")
 
 
 def _parse_json_array_section(text: str, label: str) -> list[Any]:
@@ -456,12 +471,14 @@ def _parse_step(body: str, heading_id: int, heading_action: str) -> dict[str, An
         "action": str(fields.get("action") or heading_action).strip(),
         "tool": str(fields.get("tool") or "").strip(),
         "input": _parse_json_object_section(input_section, f"Step {step_id} Input"),
-        "expected_outcome": str(fields.get("expected_outcome") or "").strip(),
         "success_criteria": _parse_json_object_section(
             criteria_section,
             f"Step {step_id} Success Criteria",
         ),
     }
+    step["expected_outcome"] = str(
+        fields.get("expected_outcome") or step["action"] or "Step completes"
+    ).strip()
     capture_section = subsections.get("Capture")
     if capture_section and capture_section.strip():
         step["capture"] = _parse_json_object_section(
@@ -515,21 +532,88 @@ def _validate_demo_server_target(server_target: Mapping[str, Any]) -> None:
 
 
 def _validate_environment(value: Any) -> None:
+    _normalize_environment(value, field="environment")
+
+
+def _normalize_environment(value: Any, *, field: str) -> dict[str, Any]:
+    if value is None:
+        environment: dict[str, Any] = {}
+    elif isinstance(value, Mapping):
+        environment = dict(value)
+    else:
+        raise ReproductionPlanMarkdownError(f"{field} must be an object")
+
+    normalized = dict(environment)
+    normalized["ports"] = _normalize_environment_ports(
+        environment.get("ports"),
+        field=f"{field}.ports",
+    )
+    normalized["volumes"] = _normalize_environment_volumes(
+        environment.get("volumes"),
+        field=f"{field}.volumes",
+    )
+    normalized["env_vars"] = _normalize_environment_env_vars(
+        environment.get("env_vars"),
+        field=f"{field}.env_vars",
+    )
+    return normalized
+
+
+def _normalize_environment_ports(value: Any, *, field: str) -> dict[str, int]:
+    if value is None:
+        return dict(DEFAULT_ENVIRONMENT["ports"])
     if not isinstance(value, Mapping):
-        raise ReproductionPlanMarkdownError("environment must be an object")
-    ports = value.get("ports")
-    if not isinstance(ports, Mapping):
-        raise ReproductionPlanMarkdownError("environment.ports must be an object")
-    for key in ("host", "container"):
-        port = ports.get(key)
-        if not isinstance(port, int) or port < 1 or port > 65535:
-            raise ReproductionPlanMarkdownError(
-                f"environment.ports.{key} must be an integer port"
-            )
-    if not isinstance(value.get("volumes"), list):
-        raise ReproductionPlanMarkdownError("environment.volumes must be a list")
-    if not isinstance(value.get("env_vars"), Mapping):
-        raise ReproductionPlanMarkdownError("environment.env_vars must be an object")
+        raise ReproductionPlanMarkdownError(f"{field} must be an object")
+
+    if "host" in value or "container" in value:
+        host = _normalize_port(value.get("host", 8096), f"{field}.host")
+        container = _normalize_port(
+            value.get("container", 8096),
+            f"{field}.container",
+        )
+        return {"host": host, "container": container}
+
+    if value:
+        container, host = next(iter(value.items()))
+        return {
+            "host": _normalize_port(host, f"{field}.host"),
+            "container": _normalize_port(
+                str(container).split("/", 1)[0],
+                f"{field}.container",
+            ),
+        }
+
+    return dict(DEFAULT_ENVIRONMENT["ports"])
+
+
+def _normalize_port(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise ReproductionPlanMarkdownError(f"{field} must be an integer port")
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ReproductionPlanMarkdownError(
+            f"{field} must be an integer port"
+        ) from exc
+    if port < 1 or port > 65535:
+        raise ReproductionPlanMarkdownError(f"{field} must be an integer port")
+    return port
+
+
+def _normalize_environment_volumes(value: Any, *, field: str) -> list[Any]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ReproductionPlanMarkdownError(f"{field} must be a list")
+    return list(value)
+
+
+def _normalize_environment_env_vars(value: Any, *, field: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ReproductionPlanMarkdownError(f"{field} must be an object")
+    return dict(value)
 
 
 def _validate_string_list(value: Any, field: str) -> None:

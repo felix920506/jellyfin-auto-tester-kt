@@ -125,6 +125,80 @@ class ReproductionPlanMarkdownTests(unittest.TestCase):
         self.assertNotIn("docker_image", parsed)
         self.assertEqual(parsed["server_target"]["mode"], "demo")
 
+    def test_demo_plan_accepts_empty_environment_and_missing_expected_outcome(self):
+        markdown = """# ReproductionPlan Markdown v1
+
+## Goal
+- Issue URL: https://github.com/jellyfin/jellyfin-web/issues/7852
+- Issue Title: Newly added favorite is lost if music player is stopped
+- Reproduction Goal: Confirm that favoriting a playing song persists after stopping playback.
+
+## Issue Context
+The reported symptom is visible in Jellyfin Web after playback stops.
+
+## Execution Target
+- Execution Target: web_client
+- Target Version: 10.11.8
+- Server Mode: demo
+- Demo Release Track: stable
+- Demo Base URL: https://demo.jellyfin.org/stable
+- Demo Username: demo
+- Demo Password: ""
+- Demo Requires Admin: false
+- Is Verification: false
+- Original Run ID: null
+
+## Environment
+```json
+{}
+```
+
+## Prerequisites
+```json
+[
+  "The demo catalog contains one playable song."
+]
+```
+
+## Steps
+### Step 1: Stop playback and observe the favorite state reset
+- Step ID: 1
+- Role: trigger
+- Action: Stop the music player while the song is favorited.
+- Tool: browser
+
+#### Input
+```json
+{"actions":[{"type":"click","target":{"kind":"control","name":"Stop","scope":"player"}}]}
+```
+
+#### Success Criteria
+```json
+{"all_of":[{"type":"browser_element","selector":"button[aria-label='Add to favorites']","exists":true}]}
+```
+
+## Failure Indicators
+- The favorite mark disappears after stopping playback.
+
+## Confidence
+medium
+
+## Ambiguities
+- Browser engine differences may affect reproducibility.
+"""
+
+        parsed = parse_reproduction_plan_markdown(markdown)
+
+        self.assertEqual(
+            parsed["environment"],
+            {"ports": {"host": 8096, "container": 8096}, "volumes": [], "env_vars": {}},
+        )
+        self.assertEqual(parsed["server_target"]["password"], "")
+        self.assertEqual(
+            parsed["reproduction_steps"][0]["expected_outcome"],
+            "Stop the music player while the song is favorited.",
+        )
+
     def test_rejects_multiple_trigger_steps(self):
         plan = standard_plan()
         plan["reproduction_steps"][0]["role"] = "trigger"
