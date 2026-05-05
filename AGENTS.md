@@ -51,3 +51,7 @@ Recent commits use concise, imperative summaries such as `Add debug logging to g
 ## Security & Configuration Tips
 
 Do not commit `.env`, provider API keys, run artifacts, or debug outputs. Prefer `kt login <provider>` for KohakuTerrarium credentials; only place provider keys in `.env` when this process should supply auth. Use `GITHUB_TOKEN` locally to avoid low GitHub rate limits.
+
+## Backwards compatibility
+
+This project is in the prototype stage. There is no need for backwards compatibility.
