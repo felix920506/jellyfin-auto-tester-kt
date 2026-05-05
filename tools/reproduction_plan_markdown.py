@@ -147,7 +147,7 @@ def parse_reproduction_plan_markdown(markdown: str) -> dict[str, Any]:
             "release_track": release_track,
             "base_url": base_url,
             "username": str(target.get("demo_username") or "demo"),
-            "password": str(target.get("demo_password") or ""),
+            "password": _demo_password_value(target.get("demo_password")),
             "requires_admin": requires_admin,
         }
     else:
@@ -428,6 +428,13 @@ def _parse_scalar(value: str) -> Any:
     return text
 
 
+def _demo_password_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"<blank>", "blank", "(blank)", "<empty>", "empty", "none"}:
+        return ""
+    return text
+
+
 def _parse_environment_notes(text: str) -> dict[str, Any]:
     environment = deepcopy(DEFAULT_ENVIRONMENT)
     fields = _parse_key_value_bullets(text)
@@ -542,10 +549,7 @@ def _validate_handoff_step(step: Mapping[str, Any], display_index: int) -> None:
             f"step {display_index} step_id must be a positive integer"
         )
     role = step.get("role")
-    if role not in ALLOWED_STEP_ROLES:
-        raise ReproductionPlanMarkdownError(
-            f"step {step_id} role must be setup, trigger, or verify"
-        )
+    _require_non_empty_string(role, f"step {step_id} role")
     _require_non_empty_string(step.get("action"), f"step {step_id} action")
     tool = step.get("tool")
     if tool not in ALLOWED_STEP_TOOLS:

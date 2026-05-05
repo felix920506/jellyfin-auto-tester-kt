@@ -188,6 +188,70 @@ medium
             "Stop the music player while the song is favorited.",
         )
 
+    def test_demo_plan_accepts_observe_role_and_blank_password_label(self):
+        markdown = """# ReproductionPlan Markdown v1
+
+## Goal
+- Issue URL: https://github.com/jellyfin/jellyfin-web/issues/7852
+- Issue Title: Newly added favorite is lost if music player is stopped
+- Reproduction Goal: Confirm favorite state after stopping playback.
+
+## Issue Context
+The reported symptom is visible in Jellyfin Web after playback stops.
+
+## Execution Target
+- Execution Target: web_client
+- Target Version: stable
+- Server Mode: demo
+- Demo Release Track: stable
+- Demo Base URL: https://demo.jellyfin.org/stable
+- Demo Username: demo
+- Demo Password: <blank>
+- Demo Requires Admin: false
+- Is Verification: false
+- Original Run ID: null
+
+## Environment
+- Use the public Jellyfin demo server.
+
+## Prerequisites
+- The demo catalog contains one playable song.
+
+## Steps
+### Step 1: Stop playback
+- Step ID: 1
+- Role: trigger
+- Action: Click the player stop control named Stop.
+- Tool: browser
+- Expected Outcome: The favorite indicator should remain active.
+- Reproduced When: the favorite indicator turns off.
+
+### Step 2: Revisit the Songs list
+- Step ID: 2
+- Role: observe
+- Action: Return to the Songs list and locate the same song.
+- Tool: browser
+- Expected Outcome: The song is still marked favorite.
+- Reproduced When: the song is no longer shown as favorited.
+
+## Failure Indicators
+- The favorite mark disappears after stopping playback.
+
+## Confidence
+medium
+
+## Ambiguities
+- The exact demo catalog contents are unknown.
+"""
+
+        parsed = parse_reproduction_plan_markdown(markdown)
+
+        self.assertEqual(parsed["server_target"]["password"], "")
+        self.assertEqual(
+            [step["role"] for step in parsed["reproduction_steps"]],
+            ["trigger", "observe"],
+        )
+
     def test_rejects_routine_json_blocks(self):
         markdown = render_reproduction_plan_markdown(standard_plan()).replace(
             "- Stage 2 manages Docker lifecycle and waits for Jellyfin health.\n"
