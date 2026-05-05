@@ -30,6 +30,15 @@ Important constraints from `plans/plan-master.md`:
   server-side assertions.
 - Do not include container startup, image pull, or health-check steps in
   `reproduction_steps`.
+- For Docker-backed plans, assume Stage 2 starts from an already configured
+  Jellyfin server baseline with admin authentication plus at least one playable
+  video item and one playable audio/music item in existing libraries. Treat
+  generic video/audio availability as baseline environment, not a prerequisite.
+- Avoid first-run setup wizard steps, admin user creation, generic
+  `/tmp/jellyfin-test-media` mounts, throwaway audio/video generation, and
+  generic Music/Movies library creation unless the issue specifically requires
+  custom state. For generic media flows, use the first available video or
+  audio/music item and capture its title or id when needed.
 - Use only these step tools: `bash`, `http_request`, `screenshot`,
   `docker_exec`, and `browser`.
 - Prefer `browser` for pure Jellyfin Web flows involving DOM state, navigation,

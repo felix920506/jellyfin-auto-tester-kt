@@ -186,8 +186,19 @@ Before emitting the plan, perform a final research gate:
 If any item above is false, do not emit the plan yet. Output only the necessary
 tool call block, wait for its result, then reassess the gate in the next turn.
 
-Steps begin after the container is already healthy. Stage 2 unconditionally
-handles pulling the image, starting the container, and waiting for `/health`.
+### Baseline Docker Server State
+
+For Docker-backed plans, steps begin after Stage 2 health checks against an
+already configured Jellyfin server.
+
+- Stage 2 unconditionally handles pulling the image, starting the container,
+  waiting for `/health`, baseline server setup, and admin authentication.
+- Assume admin authentication is available through Stage 2 with `auth: "auto"`.
+- Assume existing libraries contain at least one playable video item and at
+  least one playable audio/music item.
+- Treat generic video and audio availability as baseline environment, not as a
+  prerequisite.
+
 Never include steps like "pull image", "docker run", "start Jellyfin", or "wait
 for health" in `reproduction_steps`; they will be executed a second time and can
 cause port conflicts or duplicate containers.
@@ -200,6 +211,18 @@ Each step must have a `Tool` bullet specifying how Stage 2 should execute it:
 - `screenshot`: capture browser state at this step.
 - `docker_exec`: command inside the already-running container.
 - `browser`: Playwright browser flow for Jellyfin Web UI interactions.
+
+Do not add generic setup-only steps unless the issue specifically requires that
+custom state:
+
+- Do not include first-run setup wizard steps.
+- Do not include admin user creation steps.
+- Do not mount `/tmp/jellyfin-test-media` or generate throwaway audio/video
+  solely to make generic media available.
+- Do not create generic Music or Movies libraries unless the issue depends on
+  custom library state.
+- For generic media flows, use the first available video or audio/music item in
+  the existing libraries and capture its title or id when later steps need it.
 
 Prefer `browser` when the issue depends on Jellyfin Web behavior, React-style UI
 state, media playback controls/state, or client/server interaction that cannot
@@ -271,7 +294,9 @@ Short factual context from the issue and supporting sources.
 - Original Run ID: null
 
 ## Environment
-- Stage 2 manages Docker lifecycle and waits for Jellyfin health.
+- Stage 2 manages Docker lifecycle, waits for Jellyfin health, and provides an
+  already configured Jellyfin server with admin auth plus playable video and
+  audio/music content.
 - Host Port: 8096
 - Container Port: 8096
 - Volumes: none
@@ -332,6 +357,10 @@ plans.
 - Docker image must be `jellyfin/jellyfin:<version>` using the
   maintainer-specified version for Docker-backed plans. Demo-backed plans do
   not need `docker_image`.
+- For Docker-backed plans, assume the already configured Jellyfin server has
+  admin auth and generic video/audio content. Avoid first-run setup, admin
+  creation, generic media generation, and generic library creation unless the
+  issue specifically requires custom state.
 - Exactly one reproduction step must have `role: "trigger"`.
 - Trigger-step observations describe the bug symptom. Stage 2 compiles those
   observations into criteria where a passing trigger step means the defect

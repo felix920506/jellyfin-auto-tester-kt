@@ -739,7 +739,11 @@ def _render_environment(plan: Mapping[str, Any]) -> list[str]:
     environment = _normalize_environment(plan.get("environment"), field="environment")
     ports = environment["ports"]
     lines = [
-        "- Stage 2 manages Docker lifecycle and waits for Jellyfin health.",
+        (
+            "- Stage 2 manages Docker lifecycle, waits for Jellyfin health, and "
+            "provides an already configured Jellyfin server with admin auth plus "
+            "playable video and audio/music content."
+        ),
         f"- Host Port: {ports['host']}",
         f"- Container Port: {ports['container']}",
     ]

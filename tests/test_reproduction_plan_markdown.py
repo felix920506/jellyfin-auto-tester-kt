@@ -7,6 +7,13 @@ from tools.reproduction_plan_markdown import (
 )
 
 
+DOCKER_BASELINE_ENVIRONMENT_LINE = (
+    "- Stage 2 manages Docker lifecycle, waits for Jellyfin health, and provides "
+    "an already configured Jellyfin server with admin auth plus playable video "
+    "and audio/music content."
+)
+
+
 def standard_plan():
     return {
         "issue_url": "https://github.com/jellyfin/jellyfin/issues/1",
@@ -104,8 +111,17 @@ class ReproductionPlanMarkdownTests(unittest.TestCase):
         self.assertNotIn("#### Input", markdown)
         self.assertNotIn("#### Success Criteria", markdown)
         self.assertNotIn("```json", markdown)
+        self.assertIn(DOCKER_BASELINE_ENVIRONMENT_LINE, markdown)
         self.assertEqual(parsed["execution_target"], "standard")
         self.assertEqual(parsed["docker_image"], "jellyfin/jellyfin:10.9.7")
+        self.assertEqual(
+            parsed["environment"],
+            {
+                "ports": {"host": 8096, "container": 8096},
+                "volumes": [],
+                "env_vars": {},
+            },
+        )
         self.assertEqual(parsed["reproduction_steps"][1]["tool"], "http_request")
 
     def test_web_client_docker_plan_renders_without_json_fragments(self):
@@ -254,7 +270,7 @@ medium
 
     def test_rejects_routine_json_blocks(self):
         markdown = render_reproduction_plan_markdown(standard_plan()).replace(
-            "- Stage 2 manages Docker lifecycle and waits for Jellyfin health.\n"
+            f"{DOCKER_BASELINE_ENVIRONMENT_LINE}\n"
             "- Host Port: 8096\n"
             "- Container Port: 8096\n"
             "- Volumes: none\n"

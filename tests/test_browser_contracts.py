@@ -406,6 +406,29 @@ class BrowserContractTests(unittest.TestCase):
         self.assertIn("blank password", analysis_prompt)
         self.assertIn("specific old version", analysis_prompt)
 
+    def test_stage1_prompts_describe_baseline_docker_server_state(self):
+        prompts = {
+            "system": (
+                REPO_ROOT / "creatures" / "analysis" / "prompts" / "system.md"
+            ).read_text(encoding="utf-8"),
+            "context": (
+                REPO_ROOT / "creatures" / "analysis" / "prompts" / "context.md"
+            ).read_text(encoding="utf-8"),
+        }
+
+        for name, prompt in prompts.items():
+            with self.subTest(prompt=name):
+                normalized = " ".join(prompt.split())
+                self.assertIn("already configured Jellyfin server", normalized)
+                self.assertIn("playable video", normalized)
+                self.assertIn("playable audio/music", normalized)
+                self.assertIn("baseline environment", normalized)
+                self.assertIn("first-run setup", normalized)
+                self.assertIn(
+                    "unless the issue specifically requires",
+                    normalized,
+                )
+
     def test_web_client_and_report_prompts_describe_demo_verification_routing(self):
         web_client_prompt = (
             REPO_ROOT / "creatures" / "web_client" / "prompts" / "system.md"
