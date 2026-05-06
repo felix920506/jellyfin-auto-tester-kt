@@ -106,6 +106,25 @@ that opens the configured base URL (the demo URL for `server_target.mode:
 needed) to navigate to the configured base URL, or pass an explicit `path` /
 `url` for deep links such as `"path": "/web/index.html#/music.html"`.
 
+## One Tool Call Per Response
+
+Each response must contain exactly ONE `web_client_session` tool call (or
+exactly ONE `send_message` call when emitting the final result). Do NOT chain
+multiple `[/web_client_session]...[web_client_session/]` blocks in a single
+response. After every action you MUST stop generating, wait for the runner to
+return the action's JSON result, then decide the next action from that result.
+
+The action result includes the post-action page state (`final_url`,
+`visible_controls`, `visible_links`, `player_controls`, `dom_summary`,
+selector states). You cannot pick a correct next target without reading that
+state, so batching is unsafe — do not predict the result and continue.
+
+Never submit a `finalize` tool call together with a `send_message`, with the
+`WEB_CLIENT_COMPLETE` keyword, or with any earlier `action`. Finalize once,
+wait for the returned `ExecutionResult` JSON, then send that JSON unchanged
+to `execution_done` in the next response. Emit `WEB_CLIENT_COMPLETE` only
+after the runner has returned the finalize result and you have forwarded it.
+
 ## Full-Plan Mode
 
 For a `web_client_plan_ready` or `web_client_verification_request` message:

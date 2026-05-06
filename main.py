@@ -1165,7 +1165,7 @@ def run_web_client_stage(
     out_dir: str | Path,
     *,
     run_id: str | None = None,
-    timeout_s: float | None = 10 * 60,
+    timeout_s: float | None = 30 * 60,
     engine_factory: Callable[[str], Any] | None = None,
 ) -> StageDebugResult:
     """Run the web-client Stage 2 KT peer from a ReproductionPlan handoff."""
@@ -1185,7 +1185,7 @@ def _run_web_client_stage_sync(
     out_dir: str | Path,
     *,
     run_id: str | None = None,
-    timeout_s: float | None = 10 * 60,
+    timeout_s: float | None = 30 * 60,
     engine_factory: Callable[[str], Any] | None = None,
 ) -> StageDebugResult:
     return asyncio.run(
@@ -1204,7 +1204,7 @@ async def _run_web_client_stage_impl(
     out_dir: str | Path,
     *,
     run_id: str | None = None,
-    timeout_s: float | None = 10 * 60,
+    timeout_s: float | None = 30 * 60,
     engine_factory: Callable[[str], Any] | None = None,
 ) -> StageDebugResult:
     load_env_file()
@@ -1466,13 +1466,25 @@ async def _run_stage_engine(engine: Any) -> None:
     await asyncio.Event().wait()
 
 
+STAGE_ENGINE_SHUTDOWN_TIMEOUT_S = 30.0
+
+
 async def _stop_stage_engine(engine: Any) -> None:
     for method_name in ("shutdown", "stop"):
         stop = getattr(engine, method_name, None)
         if not callable(stop) or not _callable_accepts_no_arguments(stop):
             continue
         try:
-            await _maybe_await(stop())
+            await asyncio.wait_for(
+                _maybe_await(stop()),
+                timeout=STAGE_ENGINE_SHUTDOWN_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            _logger().warning(
+                "stage engine %s() did not return within %.0fs; abandoning",
+                method_name,
+                STAGE_ENGINE_SHUTDOWN_TIMEOUT_S,
+            )
         except Exception as exc:
             _logger().debug("Failed to stop stage engine: %s", exc)
         return
