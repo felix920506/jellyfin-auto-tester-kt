@@ -1043,6 +1043,12 @@ class WebClientRunner:
         result["run_id"] = run_id
         result["plan_loaded"] = plan is not None
         result["base_url"] = base_url
+        if not setup_failed:
+            result["next_step_hint"] = (
+                "browser is at about:blank; issue an action with "
+                '{"type": "goto"} to navigate to base_url before any '
+                "click/wait_for/fill action"
+            )
         _write_json(
             artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
             result,
@@ -2464,9 +2470,13 @@ def _validate_browser_action(
     action_type = action_type.strip()
     allowed_fields = BROWSER_ACTION_FIELDS_BY_TYPE.get(action_type)
     if allowed_fields is None:
+        supported = ", ".join(sorted(BROWSER_ACTION_FIELDS_BY_TYPE))
         return {
             "path": f"{path}.type",
-            "message": f"unsupported browser action type: {action_type}",
+            "message": (
+                f"unsupported browser action type: {action_type}; "
+                f"supported types are {supported}"
+            ),
         }
     unknown = sorted(set(action) - allowed_fields)
     if unknown:

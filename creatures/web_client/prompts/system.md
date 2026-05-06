@@ -69,6 +69,43 @@ target exists. For Jellyfin playback controls, use:
 - Player favorite: `{"kind": "control", "name": "Add to favorites", "scope": "player"}`
 - Player stop: `{"kind": "control", "name": "Stop", "scope": "player"}`
 
+## Browser Action Types
+
+The `action.type` field must be one of these supported types. There is no
+`navigate`, `wait`, or `sleep` action — use `goto` and the `wait_for*` family
+instead.
+
+- `goto` (open or change URL): `{"type": "goto", "url": "..."}` or
+  `{"type": "goto", "path": "/web"}`. Omit both to open the configured base
+  URL; supply `wait_until` to override the default load wait.
+- `refresh`: `{"type": "refresh"}` to reload the current page.
+- `click`: `{"type": "click", "target": {...typed target...}}`.
+- `fill`: `{"type": "fill", "selector": "...", "value": "..."}`.
+- `press`: `{"type": "press", "key": "Enter"}` (optionally with `selector`).
+- `select_option`: `{"type": "select_option", "selector": "...", "value": "..."}`.
+- `check` / `uncheck`: `{"type": "check", "selector": "..."}`.
+- `wait_for`: `{"type": "wait_for", "selector": "...", "state": "visible"}`.
+  Allowed `state` values are `visible`, `hidden`, `attached`, `detached`.
+- `wait_for_text`: `{"type": "wait_for_text", "text": "..."}`.
+- `wait_for_url`: `{"type": "wait_for_url", "pattern": "..."}` or
+  `{"type": "wait_for_url", "url": "..."}` /
+  `{"type": "wait_for_url", "path": "..."}`.
+- `wait_for_media`: `{"type": "wait_for_media", "state": "playing"}`.
+  Allowed `state` values are `playing`, `paused`, `ended`, `errored`,
+  `stopped`, `none`.
+- `evaluate`: `{"type": "evaluate", "script": "..."}` or
+  `{"type": "evaluate", "expression": "..."}`.
+- `screenshot`: `{"type": "screenshot", "label": "home"}`.
+
+## Initial Navigation
+
+`start` configures the browser session but does not load any URL — the page
+begins at `about:blank`. The very first action after `start` must be a `goto`
+that opens the configured base URL (the demo URL for `server_target.mode:
+"demo"`, the Docker server otherwise). Pass `{"type": "goto"}` (no `url`/`path`
+needed) to navigate to the configured base URL, or pass an explicit `path` /
+`url` for deep links such as `"path": "/web/index.html#/music.html"`.
+
 ## Full-Plan Mode
 
 For a `web_client_plan_ready` or `web_client_verification_request` message:
