@@ -1253,7 +1253,7 @@ class WebClientRunner:
             session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
             result,
         )
-        return result
+        return _trim_finalize_result(result)
 
     def _close_web_client_session_resources(self, session: _WebClientSession) -> str | None:
         error_summary: str | None = None
@@ -2885,6 +2885,67 @@ def _inject_browser_auth(
     if updated.get("auth") in (None, "auto"):
         updated["auth"] = deepcopy(browser_auth)
     return updated
+
+
+VERBOSE_BROWSER_FIELDS = (
+    "dom_summary",
+    "dom_path",
+    "page_text",
+    "visible_controls",
+    "visible_links",
+    "player_controls",
+    "console",
+    "failed_network",
+    "media_state",
+)
+
+
+def _trim_finalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy of the finalize result without the verbose browser fields.
+
+    The full result is already written to ``<artifacts_dir>/result.json``;
+    the trimmed copy is what the agent forwards on the channel so its
+    response stays within the model's output budget.
+    """
+
+    trimmed = deepcopy(dict(result))
+    log = trimmed.get("execution_log")
+    if isinstance(log, list):
+        trimmed["execution_log"] = [_trim_execution_entry(entry) for entry in log]
+    return trimmed
+
+
+def _trim_execution_entry(entry: Any) -> Any:
+    if not isinstance(entry, Mapping):
+        return entry
+    new_entry = dict(entry)
+    browser = new_entry.get("browser")
+    if isinstance(browser, Mapping):
+        new_entry["browser"] = _trim_browser_evidence(browser)
+    return new_entry
+
+
+def _trim_browser_evidence(browser: Mapping[str, Any]) -> dict[str, Any]:
+    trimmed = {key: deepcopy(value) for key, value in browser.items() if key not in VERBOSE_BROWSER_FIELDS}
+    actions = trimmed.get("actions")
+    if isinstance(actions, list):
+        trimmed["actions"] = [_trim_action_record(action) for action in actions]
+    return trimmed
+
+
+def _trim_action_record(action: Any) -> Any:
+    if not isinstance(action, Mapping):
+        return action
+    trimmed = dict(action)
+    diagnostics = trimmed.get("target_diagnostics")
+    if isinstance(diagnostics, Mapping):
+        candidates = diagnostics.get("candidates")
+        if isinstance(candidates, list) and len(candidates) > 5:
+            trimmed_diag = dict(diagnostics)
+            trimmed_diag["candidates"] = candidates[:5]
+            trimmed_diag["candidates_truncated"] = len(candidates)
+            trimmed["target_diagnostics"] = trimmed_diag
+    return trimmed
 
 
 def _demo_browser_blocker(execution_log: list[dict[str, Any]]) -> str | None:
