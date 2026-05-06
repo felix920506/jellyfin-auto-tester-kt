@@ -4039,7 +4039,7 @@ def _build_stage_parser(stage: str) -> argparse.ArgumentParser:
         parser.add_argument(
             "--timeout-s",
             type=float,
-            default=10 * 60,
+            default=30 * 60 if stage == "web-client" else 10 * 60,
             help="Seconds to wait for execution_done",
         )
     elif stage == "report":
