@@ -1476,5 +1476,79 @@ class WebClientRunnerToolTests(unittest.TestCase):
         execute_plan.assert_not_called()
 
 
+class FinalizeResultTrimTests(unittest.TestCase):
+    def test_trim_strips_verbose_browser_evidence(self):
+        result = {
+            "plan": {"reproduction_steps": []},
+            "run_id": "run-1",
+            "execution_log": [
+                {
+                    "step_id": 1,
+                    "browser": {
+                        "status": "pass",
+                        "final_url": "http://localhost/web",
+                        "actions": [{"type": "click", "status": "pass"}],
+                        "dom_summary": "x" * 5000,
+                        "page_text": "y" * 5000,
+                        "visible_controls": [{"name": str(i)} for i in range(50)],
+                        "visible_links": [{"name": str(i)} for i in range(50)],
+                        "player_controls": [{"name": str(i)} for i in range(20)],
+                        "console": [{"text": "z"}],
+                        "failed_network": [],
+                        "media_state": {"state": "none", "elements": []},
+                        "dom_path": "/tmp/dom.html",
+                    },
+                }
+            ],
+        }
+
+        trimmed = web_client_runner_module._trim_finalize_result(result)
+        browser = trimmed["execution_log"][0]["browser"]
+        self.assertEqual(browser["status"], "pass")
+        self.assertEqual(browser["final_url"], "http://localhost/web")
+        self.assertEqual(browser["actions"], [{"type": "click", "status": "pass"}])
+        for stripped in (
+            "dom_summary",
+            "page_text",
+            "visible_controls",
+            "visible_links",
+            "player_controls",
+            "console",
+            "failed_network",
+            "media_state",
+            "dom_path",
+        ):
+            self.assertNotIn(stripped, browser)
+        self.assertIsNot(trimmed, result)
+        self.assertIn("dom_summary", result["execution_log"][0]["browser"])
+
+    def test_trim_caps_target_diagnostics_candidates(self):
+        many = [{"name": f"candidate-{i}"} for i in range(20)]
+        result = {
+            "execution_log": [
+                {
+                    "browser": {
+                        "actions": [
+                            {
+                                "type": "click",
+                                "status": "fail",
+                                "target_diagnostics": {
+                                    "candidates": many,
+                                    "match_count": len(many),
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+
+        trimmed = web_client_runner_module._trim_finalize_result(result)
+        action = trimmed["execution_log"][0]["browser"]["actions"][0]
+        diag = action["target_diagnostics"]
+        self.assertEqual(len(diag["candidates"]), 5)
+        self.assertEqual(diag["candidates_truncated"], 20)
+
+
 if __name__ == "__main__":
     unittest.main()
