@@ -131,6 +131,45 @@ Every `web_client_session` run writes replay artifacts under
 Run the generated script to re-execute accepted browser actions, or inspect the
 trace with `playwright show-trace`.
 
+### Browser Replay Utility
+
+Browser replay is for manual verification of a `web_client_session` run. It
+does not read `transcript.json`; it replays accepted browser actions from
+`browser_replay/replay_manifest.json` in one fresh Playwright browser session.
+Schema-invalid calls, `start`, `advance_step`, and `finalize` are printed as
+skipped audit events.
+
+Use the generated script from a completed run:
+
+```bash
+.venv/bin/python artifacts/RUN_ID/browser_replay/replay_browser_session.py \
+  --base-url http://localhost:8096 \
+  --headless true \
+  --slow-mo-ms 250 \
+  --stop-on-failure
+```
+
+Or call the utility module directly with an explicit manifest:
+
+```bash
+.venv/bin/python -m utils.browser_replay \
+  artifacts/RUN_ID/browser_replay/replay_manifest.json \
+  --base-url http://localhost:8096
+```
+
+If `--base-url` is omitted, replay uses the manifest's original base URL. The
+target Jellyfin server must already be running and reachable. Replay output is
+written to `browser_replay/replay-runs/<timestamp>/` with
+`action_result_log.json`, fresh screenshots/DOM captures under that replay run,
+`replay_result.json`, and `replay_trace.zip` when tracing is available.
+
+To inspect the original visual trace instead of re-executing actions:
+
+```bash
+.venv/bin/python -m playwright show-trace \
+  artifacts/RUN_ID/browser_replay/original_trace.zip
+```
+
 ```bash
 .venv/bin/python main.py --stage analysis URL VERSION --out debug/stage1
 

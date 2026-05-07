@@ -635,3 +635,7 @@ def _write_json(path: Path, payload: Any) -> None:
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
