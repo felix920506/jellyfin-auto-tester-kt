@@ -1,9 +1,11 @@
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from tools import report_writer
+from tools.execution_result_handoff import compact_execution_result
 
 
 def sample_plan():
@@ -198,6 +200,19 @@ class ReportWriterTests(unittest.TestCase):
             self.assertNotIn("DEBUG noisy line", report)
             self.assertIn("![Step 3 screenshot](screenshots/playback_error.png)", report)
 
+    def test_generate_hydrates_compact_execution_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sample_result(temp_dir)
+            result_path = Path(result["artifacts_dir"]) / "result.json"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            compact = compact_execution_result(result)
+
+            metadata = report_writer.generate(compact, artifacts_base=temp_dir)
+
+            report = Path(metadata["path"]).read_text(encoding="utf-8")
+            self.assertIn("# Reproduction Report: PlaybackInfo returns 500", report)
+            self.assertIn("**Result:** Reproduced", report)
+
     def test_generate_includes_browser_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             result = sample_result(temp_dir)
@@ -343,11 +358,14 @@ class ReportWriterTests(unittest.TestCase):
     def test_build_verification_plan_preserves_environment_and_links_original_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original = sample_result(temp_dir, run_id="run-1")
+            result_path = Path(original["artifacts_dir"]) / "result.json"
+            result_path.write_text(json.dumps(original), encoding="utf-8")
+            compact = compact_execution_result(original)
             original_plan = copy.deepcopy(original["plan"])
             written_steps = [copy.deepcopy(original["plan"]["reproduction_steps"][1])]
 
             verification_plan = report_writer.build_verification_plan(
-                original,
+                compact,
                 written_steps,
             )
 

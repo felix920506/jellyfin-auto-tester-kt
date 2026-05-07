@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from tools.execution_result_handoff import hydrate_execution_result
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACTS_ROOT = Path(
@@ -41,6 +43,12 @@ def generate(
 
     if not isinstance(execution_result, dict):
         raise TypeError("execution_result must be a dict")
+    execution_result = hydrate_execution_result(execution_result)
+    if verification_result is not None:
+        if not isinstance(verification_result, dict):
+            raise TypeError("verification_result must be a dict")
+        verification_result = hydrate_execution_result(verification_result)
+
     run_id = _require_text(execution_result, "run_id")
     output_run_id = (
         _require_text(execution_result, "original_run_id")
@@ -79,6 +87,7 @@ def build_verification_plan(
 
     if not isinstance(original_result, dict):
         raise TypeError("original_result must be a dict")
+    original_result = hydrate_execution_result(original_result)
     if not isinstance(written_steps, list) or not written_steps:
         raise ValueError("written_steps must be a non-empty list")
 

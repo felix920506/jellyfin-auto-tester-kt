@@ -27,6 +27,7 @@ from tools.criteria import (
 )
 from tools.browser import BrowserDriver
 from tools.docker_manager import DockerManager
+from tools.execution_result_handoff import compact_if_execution_result
 from tools.jellyfin_http import JellyfinHTTP
 from tools.reproduction_plan_markdown import parse_reproduction_plan_markdown
 from tools.screenshot import Screenshotter
@@ -950,10 +951,12 @@ def execute_plan(
     run_id: str | None = None,
     artifacts_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    return run_sync_away_from_loop(
-        lambda: ExecutionRunner(artifacts_root=artifacts_root).execute_plan(
-            plan=plan,
-            run_id=run_id,
+    return compact_if_execution_result(
+        run_sync_away_from_loop(
+            lambda: ExecutionRunner(artifacts_root=artifacts_root).execute_plan(
+                plan=plan,
+                run_id=run_id,
+            )
         )
     )
 
@@ -963,10 +966,12 @@ def execute_markdown_plan(
     run_id: str | None = None,
     artifacts_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    return run_sync_away_from_loop(
-        lambda: ExecutionRunner(artifacts_root=artifacts_root).execute_markdown_plan(
-            plan_markdown=plan_markdown,
-            run_id=run_id,
+    return compact_if_execution_result(
+        run_sync_away_from_loop(
+            lambda: ExecutionRunner(artifacts_root=artifacts_root).execute_markdown_plan(
+                plan_markdown=plan_markdown,
+                run_id=run_id,
+            )
         )
     )
 
@@ -978,8 +983,10 @@ def start_plan(
 ) -> dict[str, Any]:
     global _DEFAULT_REPAIR_RUNNER
     _DEFAULT_REPAIR_RUNNER = ExecutionRunner(artifacts_root=artifacts_root)
-    return run_sync_away_from_loop(
-        lambda: _DEFAULT_REPAIR_RUNNER.start_plan(plan=plan, run_id=run_id)
+    return compact_if_execution_result(
+        run_sync_away_from_loop(
+            lambda: _DEFAULT_REPAIR_RUNNER.start_plan(plan=plan, run_id=run_id)
+        )
     )
 
 
@@ -990,10 +997,12 @@ def start_markdown_plan(
 ) -> dict[str, Any]:
     global _DEFAULT_REPAIR_RUNNER
     _DEFAULT_REPAIR_RUNNER = ExecutionRunner(artifacts_root=artifacts_root)
-    return run_sync_away_from_loop(
-        lambda: _DEFAULT_REPAIR_RUNNER.start_markdown_plan(
-            plan_markdown=plan_markdown,
-            run_id=run_id,
+    return compact_if_execution_result(
+        run_sync_away_from_loop(
+            lambda: _DEFAULT_REPAIR_RUNNER.start_markdown_plan(
+                plan_markdown=plan_markdown,
+                run_id=run_id,
+            )
         )
     )
 
@@ -1003,17 +1012,21 @@ def retry_browser_step(
     browser_input: dict[str, Any],
 ) -> dict[str, Any]:
     runner = _repair_runner()
-    return run_sync_away_from_loop(
-        lambda: runner.retry_browser_step(
-            step_id=step_id,
-            browser_input=browser_input,
+    return compact_if_execution_result(
+        run_sync_away_from_loop(
+            lambda: runner.retry_browser_step(
+                step_id=step_id,
+                browser_input=browser_input,
+            )
         )
     )
 
 
 def finalize_plan() -> dict[str, Any]:
     runner = _repair_runner()
-    return run_sync_away_from_loop(lambda: runner.finalize_plan())
+    return compact_if_execution_result(
+        run_sync_away_from_loop(lambda: runner.finalize_plan())
+    )
 
 
 def _repair_runner() -> ExecutionRunner:

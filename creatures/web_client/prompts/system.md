@@ -121,9 +121,11 @@ state, so batching is unsafe — do not predict the result and continue.
 
 Never submit a `finalize` tool call together with a `send_message`, with the
 `WEB_CLIENT_COMPLETE` keyword, or with any earlier `action`. Finalize once,
-wait for the returned `ExecutionResult` JSON, then send that JSON unchanged
-to `execution_done` in the next response. Emit `WEB_CLIENT_COMPLETE` only
-after the runner has returned the finalize result and you have forwarded it.
+wait for the returned compact execution payload, then send that JSON unchanged
+to `execution_done` in the next response. The full `ExecutionResult` is written
+under artifacts; do not copy the input plan into the channel payload. Emit
+`WEB_CLIENT_COMPLETE` only after the runner has returned the finalize result and
+you have forwarded it.
 
 ## Full-Plan Mode
 
@@ -152,7 +154,8 @@ For a `web_client_plan_ready` or `web_client_verification_request` message:
 8. Call `web_client_session` with the body JSON `{"command": "finalize", ...}`
    and `overall_result` (`reproduced`, `not_reproduced`, or `inconclusive`).
    Include `error_summary` when the result is blocked or inconclusive.
-9. Send the returned `ExecutionResult` JSON unchanged to `execution_done`.
+9. Send the returned compact execution payload unchanged to `execution_done`.
+   Do not add the input plan to that payload.
 10. Emit `WEB_CLIENT_COMPLETE`.
 
 For Docker-backed full plans, the runner owns Docker image pull/start/stop,
@@ -181,12 +184,12 @@ Never start, stop, inspect, or modify Docker containers in task mode.
 
 ## Output Formats
 
-Send full-plan results to `execution_done`:
+Send full-plan compact results to `execution_done`:
 
 ```text
 [/send_message]
 @@channel=execution_done
-{ ... raw ExecutionResult JSON ... }
+{ ... compact execution payload JSON ... }
 [send_message/]
 ```
 

@@ -759,7 +759,15 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(final["overall_result"], "reproduced")
             self.assertEqual(final["run_id"], "plan-run")
             self.assertEqual(len(final["execution_log"]), 1)
-            self.assertTrue(Path(temp_dir, "plan-run", "result.json").is_file())
+            self.assertNotIn("plan", final)
+            self.assertEqual(
+                Path(final["result_path"]).resolve(),
+                Path(temp_dir, "plan-run", "result.json").resolve(),
+            )
+            full_result = json.loads(
+                Path(temp_dir, "plan-run", "result.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("plan", full_result)
             self.assertTrue(browser_driver.closed)
             self.assertEqual(docker.stopped, [("container-1", "plan-run")])
 
@@ -1962,6 +1970,7 @@ class FinalizeResultTrimTests(unittest.TestCase):
         }
 
         trimmed = web_client_runner_module._trim_finalize_result(result)
+        self.assertNotIn("plan", trimmed)
         browser = trimmed["execution_log"][0]["browser"]
         self.assertEqual(browser["status"], "pass")
         self.assertEqual(browser["final_url"], "http://localhost/web")

@@ -20,6 +20,10 @@ from urllib.parse import urlparse
 
 from stage1_model_blacklist import is_stage1_model_blacklisted
 from tools.async_compat import run_sync_away_from_loop
+from tools.execution_result_handoff import (
+    compact_execution_result,
+    hydrate_execution_result,
+)
 from tools.reproduction_plan_markdown import (
     parse_reproduction_plan_markdown,
     ReproductionPlanMarkdownError,
@@ -1127,7 +1131,7 @@ async def _run_execution_stage_impl(
         max_iterations,
         max_turns,
     )
-    result = await _run_stage_agent_handoff(
+    channel_payload = await _run_stage_agent_handoff(
         engine,
         route_channel=route_channel,
         message=plan_markdown,
@@ -1136,6 +1140,8 @@ async def _run_execution_stage_impl(
         sender="execution_stage_debug",
         stage_label="execution",
     )
+    _write_json_file(output_dir / "execution_done_payload.json", channel_payload)
+    result = hydrate_execution_result(channel_payload, fallback_plan=plan)
     _write_json_file(output_dir / "execution_result.json", result)
     _write_json_file(output_dir / "result.json", result)
     logger.debug(
@@ -1297,7 +1303,7 @@ async def _run_web_client_stage_impl(
         run_id=run_id_value,
     )
     try:
-        result = await _run_web_client_agent_handoff(
+        channel_payload = await _run_web_client_agent_handoff(
             engine,
             route_channel=route_channel,
             message=plan_markdown,
@@ -1308,6 +1314,8 @@ async def _run_web_client_stage_impl(
         restore_session_defaults(previous_session_defaults)
         _restore_transcript_output(transcript_capture_state)
         _restore_transcript_message_hooks(transcript_message_hooks)
+    _write_json_file(output_dir / "execution_done_payload.json", channel_payload)
+    result = hydrate_execution_result(channel_payload, fallback_plan=plan)
     _write_json_file(output_dir / "execution_result.json", result)
     _write_json_file(output_dir / "result.json", result)
     conversation_output = _assistant_conversation_text(web_client_agent)
@@ -1630,17 +1638,23 @@ async def _run_report_stage_impl(
     logger.info("Starting Stage 3 debug run from %s", input_path)
     output_dir = _prepare_output_dir(out_dir)
     result_path = _resolve_stage_input_file(input_path, "execution")
-    execution_result = _read_json_file(result_path)
-    verification_result = (
+    execution_payload = _read_json_file(result_path)
+    verification_payload = (
         _read_json_file(_resolve_stage_input_file(verification_result_path, "execution"))
         if verification_result_path is not None
         else None
     )
 
-    if not isinstance(execution_result, dict):
+    if not isinstance(execution_payload, dict):
         raise TypeError("Stage 3 input must be an ExecutionResult JSON object")
-    if verification_result is not None and not isinstance(verification_result, dict):
+    if verification_payload is not None and not isinstance(verification_payload, dict):
         raise TypeError("verification result must be an ExecutionResult JSON object")
+    execution_result = hydrate_execution_result(execution_payload)
+    verification_result = (
+        hydrate_execution_result(verification_payload)
+        if verification_payload is not None
+        else None
+    )
 
     _write_json_file(output_dir / "execution_result.json", execution_result)
     _ensure_execution_result_artifact_file(execution_result)
@@ -1660,8 +1674,10 @@ async def _run_report_stage_impl(
     )
     route, route_payload, verification_injected = await _run_report_agent_handoff(
         engine,
-        execution_result,
-        verification_result,
+        compact_execution_result(execution_result),
+        compact_execution_result(verification_result)
+        if verification_result is not None
+        else None,
         timeout_s=timeout_s,
     )
 
@@ -1745,7 +1761,7 @@ async def _run_report_agent_handoff(
             json.dumps(execution_result, sort_keys=True, default=str),
             sender="report_stage_debug",
         )
-        logger.debug("Sent first-run ExecutionResult to report agent")
+        logger.debug("Sent first-run execution payload to report agent")
 
         while True:
             tasks: set[asyncio.Task[Any]] = {terminal_task, engine_task}

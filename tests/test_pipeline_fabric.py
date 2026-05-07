@@ -47,6 +47,10 @@ from tools.reproduction_plan_markdown import (
     parse_reproduction_plan_markdown,
     render_reproduction_plan_markdown,
 )
+from tools.execution_result_handoff import (
+    compact_execution_result,
+    hydrate_execution_result,
+)
 
 
 class FakeAnalysisAgent:
@@ -394,10 +398,23 @@ class FakeStage2AgentEngine:
             "jellyfin_logs": "",
             "error_summary": None,
         }
+        payload = result
+        if artifacts_root:
+            artifacts_dir = Path(result["artifacts_dir"])
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            (artifacts_dir / "plan.json").write_text(
+                json.dumps(plan),
+                encoding="utf-8",
+            )
+            (artifacts_dir / "result.json").write_text(
+                json.dumps(result),
+                encoding="utf-8",
+            )
+            payload = compact_execution_result(result)
         await self.channels["execution_done"].send(
             types.SimpleNamespace(
                 sender=self.agent_sender,
-                content=json.dumps(result),
+                content=json.dumps(payload),
                 metadata={},
                 message_id="execution-done",
                 reply_to=None,
@@ -576,10 +593,23 @@ class FakeStartedTerrariumStageEngine:
             "jellyfin_logs": "",
             "error_summary": None,
         }
+        payload = result
+        if artifacts_root:
+            artifacts_dir = Path(result["artifacts_dir"])
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            (artifacts_dir / "plan.json").write_text(
+                json.dumps(plan),
+                encoding="utf-8",
+            )
+            (artifacts_dir / "result.json").write_text(
+                json.dumps(result),
+                encoding="utf-8",
+            )
+            payload = compact_execution_result(result)
         await self.channels["execution_done"].send(
             types.SimpleNamespace(
                 sender=self.agent_sender,
-                content=json.dumps(result),
+                content=json.dumps(payload),
                 metadata={},
                 message_id="execution-done",
                 reply_to=None,
@@ -619,7 +649,9 @@ class FakeReportStageEngine:
     async def run(self):
         self.run_thread = threading.get_ident()
         first_message = await self.channels["execution_done"].receive()
-        self.first_execution_result = json.loads(first_message.content)
+        self.first_execution_result = hydrate_execution_result(
+            json.loads(first_message.content)
+        )
         plan = self.first_execution_result["plan"]
         verification_plan = dict(plan)
         verification_plan["is_verification"] = True
@@ -640,17 +672,16 @@ class FakeReportStageEngine:
         )
 
         if self.auto_execute_verification:
+            verification_result = _sample_execution_result(
+                verification_plan,
+                Path(self.first_execution_result["artifacts_dir"]).parent
+                / self.default_verification_run_id,
+                run_id=self.default_verification_run_id,
+            )
             await self.channels["execution_done"].send(
                 types.SimpleNamespace(
                     sender="execution_agent",
-                    content=json.dumps(
-                        _sample_execution_result(
-                            verification_plan,
-                            Path(self.first_execution_result["artifacts_dir"]).parent
-                            / self.default_verification_run_id,
-                            run_id=self.default_verification_run_id,
-                        )
-                    ),
+                    content=json.dumps(compact_execution_result(verification_result)),
                     metadata={},
                     message_id="verification-done",
                     reply_to=None,
@@ -659,7 +690,9 @@ class FakeReportStageEngine:
             )
 
         verification_message = await self.channels["execution_done"].receive()
-        self.verification_result = json.loads(verification_message.content)
+        self.verification_result = hydrate_execution_result(
+            json.loads(verification_message.content)
+        )
         verified = (
             self.verification_result.get("overall_result")
             == self.first_execution_result.get("overall_result")
@@ -817,7 +850,7 @@ def _sample_plan():
 def _sample_execution_result(plan, artifacts_dir, *, run_id="run-1"):
     artifacts_dir = Path(artifacts_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    return {
+    result = {
         "plan": plan,
         "run_id": run_id,
         "is_verification": bool(plan.get("is_verification", False)),
@@ -829,6 +862,11 @@ def _sample_execution_result(plan, artifacts_dir, *, run_id="run-1"):
         "jellyfin_logs": "server log\n",
         "error_summary": None,
     }
+    (artifacts_dir / "result.json").write_text(
+        json.dumps(result),
+        encoding="utf-8",
+    )
+    return result
 
 
 def _sample_web_client_plan():
@@ -2056,12 +2094,20 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
 
             execution_result_path = temp_path / "execution" / "execution_result.json"
             result_path = temp_path / "execution" / "result.json"
+            channel_payload_path = (
+                temp_path / "execution" / "execution_done_payload.json"
+            )
             stage_result_path = temp_path / "execution" / "stage_result.json"
             payload = json.loads(execution_result_path.read_text(encoding="utf-8"))
+            channel_payload = json.loads(
+                channel_payload_path.read_text(encoding="utf-8")
+            )
             self.assertEqual(result.status, "reproduced")
             self.assertEqual(result.output_file, "execution_result.json")
             self.assertEqual(payload["run_id"], "run-1")
             _assert_handoff_metadata(self, payload["plan"], plan)
+            self.assertNotIn("plan", channel_payload)
+            self.assertEqual(channel_payload["run_id"], "run-1")
             self.assertEqual(
                 json.loads(result_path.read_text(encoding="utf-8")),
                 payload,
@@ -2166,12 +2212,16 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
 
             result_path = temp_path / "web-client" / "execution_result.json"
+            channel_payload_path = (
+                temp_path / "web-client" / "execution_done_payload.json"
+            )
             payload = json.loads(result_path.read_text(encoding="utf-8"))
             self.assertEqual(result.stage, "web-client")
             self.assertEqual(result.status, "reproduced")
             self.assertEqual(result.output_file, "execution_result.json")
             self.assertEqual(payload["run_id"], "web-agent-run")
             _assert_handoff_metadata(self, payload["plan"], plan)
+            self.assertTrue(channel_payload_path.is_file())
             self.assertTrue((temp_path / "web-client" / "result.json").is_file())
             self.assertEqual(engine.received_channel, "web_client_plan_ready")
             self.assertIn("# ReproductionPlan Markdown v1", engine.received_payload)

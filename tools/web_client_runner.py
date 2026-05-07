@@ -53,6 +53,10 @@ from tools.criteria import (
     resolve_references,
 )
 from tools.docker_manager import DockerManager
+from tools.execution_result_handoff import (
+    compact_execution_result,
+    compact_if_execution_result,
+)
 from tools.jellyfin_http import JellyfinHTTP
 from tools.reproduction_plan_markdown import parse_reproduction_plan_markdown
 from tools.screenshot import Screenshotter
@@ -2928,8 +2932,8 @@ class WebClientSessionTool(BaseTool):
             "Run one command in the active Jellyfin Web browser session. start "
             "opens a plan-backed or task browser session, action executes "
             "exactly one browser action, advance_step moves the runner-owned "
-            "plan cursor, and finalize closes resources and returns the raw "
-            "result JSON."
+            "plan cursor, and finalize closes resources and returns compact "
+            "channel JSON. The full ExecutionResult is written to artifacts."
         )
 
     @property
@@ -2965,8 +2969,10 @@ class WebClientSessionTool(BaseTool):
             "Markdown plan text as `plan_markdown`; do not use local "
             "filesystem paths. Send one action command per browser move, use "
             "`advance_step` when the current plan step is satisfied or "
-            "blocked, and finish with finalize. Do not nest commands inside "
-            "`actions` arrays or pass `action` as an array."
+            "blocked, and finish with finalize. Finalize returns compact "
+            "channel JSON; the full result is written under artifacts. Do not "
+            "nest commands inside `actions` arrays or pass `action` as an "
+            "array."
         )
 
     async def _execute(self, args: dict[str, Any], **_kwargs: Any) -> ToolResult:
@@ -3042,7 +3048,11 @@ class WebClientExecutePlanTool(BaseTool):
         except Exception as exc:
             return ToolResult(error=f"web_client_execute_plan failed: {exc}")
         return ToolResult(
-            output=json.dumps(result, ensure_ascii=False, indent=2),
+            output=json.dumps(
+                compact_if_execution_result(result),
+                ensure_ascii=False,
+                indent=2,
+            ),
             exit_code=0,
         )
 
@@ -3618,7 +3628,7 @@ VERBOSE_BROWSER_FIELDS = (
 
 
 def _trim_finalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a copy of the finalize result without the verbose browser fields.
+    """Return a compact finalize payload without plan or verbose browser fields.
 
     The full result is already written to ``<artifacts_dir>/result.json``;
     the trimmed copy is what the agent forwards on the channel so its
@@ -3629,7 +3639,7 @@ def _trim_finalize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     log = trimmed.get("execution_log")
     if isinstance(log, list):
         trimmed["execution_log"] = [_trim_execution_entry(entry) for entry in log]
-    return trimmed
+    return compact_execution_result(trimmed)
 
 
 def _trim_execution_entry(entry: Any) -> Any:

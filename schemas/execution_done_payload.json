@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jellyfin-auto-tester.local/schemas/execution_done_payload.json",
+  "title": "ExecutionDonePayload",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "run_id",
+    "is_verification",
+    "original_run_id",
+    "container_id",
+    "execution_log",
+    "overall_result",
+    "artifacts_dir",
+    "jellyfin_logs",
+    "error_summary",
+    "result_path"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "is_verification": {
+      "type": "boolean"
+    },
+    "original_run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "container_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "execution_log": {
+      "type": "array"
+    },
+    "overall_result": {
+      "enum": [
+        "reproduced",
+        "not_reproduced",
+        "inconclusive"
+      ]
+    },
+    "artifacts_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "jellyfin_logs": {
+      "type": "string"
+    },
+    "error_summary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "result_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plan_json_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plan_markdown_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plan": false
+  }
+}
