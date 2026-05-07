@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.browser_replay import BrowserReplayRecorder, replay_manifest
+from utils.browser_replay import BrowserReplayRecorder, replay_manifest
 
 
 class FakeReplayDriver:

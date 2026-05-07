@@ -196,7 +196,7 @@ REPO_ROOT = Path({repo_root_literal})
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.browser_replay import main
+from utils.browser_replay import main
 
 if __name__ == "__main__":
     raise SystemExit(

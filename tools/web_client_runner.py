@@ -38,11 +38,6 @@ except Exception:
 
 from tools.async_compat import run_sync_away_from_loop
 from tools.browser import BrowserDriver
-from tools.browser_replay import (
-    BrowserReplayRecorder,
-    ORIGINAL_TRACE_NAME,
-    REPLAY_DIR_NAME,
-)
 from tools.browser_errors import browser_infrastructure_error
 from tools.criteria import (
     CaptureError,
@@ -60,6 +55,11 @@ from tools.execution_result_handoff import (
 from tools.jellyfin_http import JellyfinHTTP
 from tools.reproduction_plan_markdown import parse_reproduction_plan_markdown
 from tools.screenshot import Screenshotter
+from utils.browser_replay import (
+    BrowserReplayRecorder,
+    ORIGINAL_TRACE_NAME,
+    REPLAY_DIR_NAME,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
