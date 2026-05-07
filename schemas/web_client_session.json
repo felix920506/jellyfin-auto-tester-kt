@@ -38,6 +38,7 @@
           "enum": [
             "start",
             "action",
+            "advance_step",
             "finalize"
           ]
         },
@@ -80,18 +81,6 @@
             }
           ]
         },
-        "role": {
-          "enum": [
-            "setup",
-            "trigger",
-            "verify",
-            null
-          ]
-        },
-        "action_label": {
-          "type": "string",
-          "minLength": 1
-        },
         "browser_input": {
           "$ref": "#/$defs/browser_input"
         },
@@ -131,6 +120,17 @@
             "type": "object",
             "additionalProperties": true
           }
+        },
+        "outcome": {
+          "enum": [
+            "pass",
+            "fail",
+            "skip"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
         },
         "overall_result": {
           "enum": [
@@ -273,7 +273,94 @@
           "then": {
             "required": [
               "action"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "step_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "outcome"
+                  ]
+                },
+                {
+                  "required": [
+                    "reason"
+                  ]
+                },
+                {
+                  "required": [
+                    "overall_result"
+                  ]
+                },
+                {
+                  "required": [
+                    "error_summary"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "command": {
+                "const": "advance_step"
+              }
+            },
+            "required": [
+              "command"
             ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "step_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "browser_input"
+                  ]
+                },
+                {
+                  "required": [
+                    "action"
+                  ]
+                },
+                {
+                  "required": [
+                    "success_criteria"
+                  ]
+                },
+                {
+                  "required": [
+                    "selector_assertions"
+                  ]
+                },
+                {
+                  "required": [
+                    "capture"
+                  ]
+                },
+                {
+                  "required": [
+                    "overall_result"
+                  ]
+                },
+                {
+                  "required": [
+                    "error_summary"
+                  ]
+                }
+              ]
+            }
           }
         }
       ]

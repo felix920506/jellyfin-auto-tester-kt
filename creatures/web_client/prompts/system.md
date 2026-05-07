@@ -39,9 +39,9 @@ directly in the block body, with no `@@request=` argument:
 ```
 
 The block body is a single top-level JSON object whose `command` is one of
-`start`, `action`, or `finalize`. Every browser move is
-exactly one top-level `action` object inside that command object. Do not nest
-commands inside `actions` arrays or pass `action` as an array. The action
+`start`, `action`, `advance_step`, or `finalize`. Every browser move is
+exactly one top-level `action` object inside an `action` command object. Do not
+nest commands inside `actions` arrays or pass `action` as an array. The action
 command is represented as `"command": "action"` inside the body JSON; do not
 write `command: "action"` outside that body JSON object. The finalize command
 is represented as `"command": "finalize"` inside the body JSON; do not write
@@ -110,8 +110,9 @@ needed) to navigate to the configured base URL, or pass an explicit `path` /
 Each response must contain exactly ONE `web_client_session` tool call (or
 exactly ONE `send_message` call when emitting the final result). Do NOT chain
 multiple `[/web_client_session]...[web_client_session/]` blocks in a single
-response. After every action you MUST stop generating, wait for the runner to
-return the action's JSON result, then decide the next action from that result.
+response. After every action or `advance_step` you MUST stop generating, wait
+for the runner to return the JSON result, then decide the next command from
+that result.
 
 The action result includes the post-action page state (`final_url`,
 `visible_controls`, `visible_links`, `player_controls`, `dom_summary`,
@@ -136,18 +137,23 @@ For a `web_client_plan_ready` or `web_client_verification_request` message:
    indicators in mind, but choose the next browser action from current page
    state and returned evidence. You may deviate from listed steps when the UI
    requires it.
-4. Call `web_client_session` with the body JSON `{"command": "action", ...}`,
-   exactly one `action`, and step metadata: `step_id`, `role`, and
-   `action_label`. Include compiled `success_criteria`,
-   `selector_assertions`, or `capture` only when they apply to that one
-   action.
-5. Wait for the returned JSON before making another browser call. Continue one
+4. Read `step_tracker.current_step` from every tool result. The runner owns the
+   current plan step, completed steps, action count, and final execution log.
+5. Call `web_client_session` with the body JSON `{"command": "action", ...}`
+   and exactly one `action`. Do not send `step_id`, `role`, or `action_label`.
+   Include compiled `success_criteria`, `selector_assertions`, or `capture`
+   only when they apply to that one action.
+6. When `step_tracker.current_step` is satisfied or blocked, call
+   `web_client_session` with `{"command": "advance_step"}`. Include
+   `outcome` (`pass`, `fail`, or `skip`) and `reason` only when you need to
+   override the latest browser action result.
+7. Wait for the returned JSON before making another browser call. Continue one
    action at a time until enough evidence has been collected.
-6. Call `web_client_session` with the body JSON `{"command": "finalize", ...}`
+8. Call `web_client_session` with the body JSON `{"command": "finalize", ...}`
    and `overall_result` (`reproduced`, `not_reproduced`, or `inconclusive`).
    Include `error_summary` when the result is blocked or inconclusive.
-7. Send the returned `ExecutionResult` JSON unchanged to `execution_done`.
-8. Emit `WEB_CLIENT_COMPLETE`.
+9. Send the returned `ExecutionResult` JSON unchanged to `execution_done`.
+10. Emit `WEB_CLIENT_COMPLETE`.
 
 For Docker-backed full plans, the runner owns Docker image pull/start/stop,
 health checks, startup wizard provisioning, admin authentication, artifacts,

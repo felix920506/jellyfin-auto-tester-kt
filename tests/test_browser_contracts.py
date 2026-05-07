@@ -235,10 +235,11 @@ class BrowserContractTests(unittest.TestCase):
         action_request = {
             "command": "action",
             "action": {"type": "screenshot", "label": "home"},
-            "step_id": 1,
-            "role": "trigger",
-            "action_label": "Capture home",
             "selector_assertions": [{"selector": "body", "state": "visible"}],
+        }
+        advance_request = {
+            "command": "advance_step",
+            "outcome": "pass",
         }
         finalize_request = {
             "command": "finalize",
@@ -256,6 +257,7 @@ class BrowserContractTests(unittest.TestCase):
             start_plan_request,
             start_task_request,
             action_request,
+            advance_request,
             finalize_request,
             explicit_request,
         ):
@@ -291,16 +293,23 @@ class BrowserContractTests(unittest.TestCase):
             "request_id": "request-3",
             "action": [{"type": "goto"}],
         }
+        action_step_metadata = {
+            "command": "action",
+            "request_id": "request-4",
+            "step_id": 1,
+            "action": {"type": "goto"},
+        }
 
         raw_command = {
             "command": "start",
-            "request_id": "request-4",
+            "request_id": "request-5",
             "plan_markdown": "# ReproductionPlan Markdown v1\n\n...",
         }
 
         self.assertTrue(list(validator.iter_errors({"request": browser_input_actions})))
         self.assertTrue(list(validator.iter_errors({"request": top_level_actions})))
         self.assertTrue(list(validator.iter_errors({"request": action_array})))
+        self.assertTrue(list(validator.iter_errors({"request": action_step_metadata})))
         self.assertTrue(list(validator.iter_errors(raw_command)))
 
     def test_web_client_result_schema_accepts_browser_result(self):
@@ -457,11 +466,12 @@ class BrowserContractTests(unittest.TestCase):
         self.assertIn("web_client_session", web_client_prompt)
         self.assertIn('command: "action"', web_client_prompt)
         self.assertIn("exactly one top-level `action` object", web_client_prompt)
+        self.assertIn("advance_step", web_client_prompt)
+        self.assertIn("Do not send `step_id`, `role`, or `action_label`", web_client_prompt)
         self.assertIn("plan_markdown", web_client_prompt)
         self.assertIn("Do not use local filesystem paths", web_client_prompt)
         self.assertIn('command: "finalize"', web_client_prompt)
         self.assertIn("There is only one active web-client session", web_client_prompt)
-        self.assertNotIn("request_id", web_client_prompt)
         self.assertNotIn("session_id", web_client_prompt)
 
     def test_web_client_tool_contract_uses_valid_tool_names(self):

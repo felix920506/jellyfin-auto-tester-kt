@@ -97,13 +97,13 @@ SESSION_ALLOWED_FIELDS = {
     "plan_markdown",
     "base_url",
     "step_id",
-    "role",
-    "action_label",
     "browser_input",
     "action",
     "success_criteria",
     "selector_assertions",
     "capture",
+    "outcome",
+    "reason",
     "overall_result",
     "error_summary",
 }
@@ -123,14 +123,17 @@ SESSION_FIELDS_BY_COMMAND = {
     "action": {
         "command",
         "request_id",
-        "step_id",
-        "role",
-        "action_label",
         "browser_input",
         "action",
         "success_criteria",
         "selector_assertions",
         "capture",
+    },
+    "advance_step": {
+        "command",
+        "request_id",
+        "outcome",
+        "reason",
     },
     "finalize": {
         "command",
@@ -181,6 +184,93 @@ class _TaskBrowserSession:
 
 
 @dataclass
+class _TrackedBrowserAction:
+    request_id: str
+    action_index: int
+    step_index: int
+    step_id: Any
+    role: str | None
+    plan_action: str | None
+    action: dict[str, Any]
+    browser_input: dict[str, Any]
+    result: dict[str, Any]
+    criteria: dict[str, Any] | None
+    started_at: str
+    ended_at: str
+    duration_ms: int
+
+    @property
+    def outcome(self) -> str:
+        return "pass" if self.result.get("status") == "pass" else "fail"
+
+    @property
+    def reason(self) -> str | None:
+        if self.outcome == "pass":
+            return None
+        return str(self.result.get("error") or "browser action failed")
+
+
+@dataclass
+class _WebClientStepTracker:
+    steps: list[dict[str, Any]]
+    current_index: int = 0
+    action_counter: int = 0
+    completed_indices: list[int] = field(default_factory=list)
+    actions_by_step: dict[int, list[_TrackedBrowserAction]] = field(
+        default_factory=dict
+    )
+
+    def current_step(self) -> dict[str, Any] | None:
+        if 0 <= self.current_index < len(self.steps):
+            return self.steps[self.current_index]
+        return None
+
+    def current_actions(self) -> list[_TrackedBrowserAction]:
+        return self.actions_by_step.get(self.current_index, [])
+
+    def record_action(
+        self,
+        *,
+        request_id: str,
+        action: dict[str, Any],
+        browser_input: dict[str, Any],
+        result: dict[str, Any],
+        criteria: dict[str, Any] | None,
+        started_at: str,
+        ended_at: str,
+        duration_ms: int,
+    ) -> _TrackedBrowserAction:
+        step = self.current_step()
+        if step is None:
+            raise ValueError("all plan steps are already completed")
+        self.action_counter += 1
+        tracked = _TrackedBrowserAction(
+            request_id=request_id,
+            action_index=self.action_counter,
+            step_index=self.current_index,
+            step_id=step.get("step_id"),
+            role=step.get("role"),
+            plan_action=step.get("action"),
+            action=deepcopy(action),
+            browser_input=deepcopy(browser_input),
+            result=deepcopy(result),
+            criteria=deepcopy(criteria) if criteria is not None else None,
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_ms=duration_ms,
+        )
+        self.actions_by_step.setdefault(self.current_index, []).append(tracked)
+        return tracked
+
+    def advance(self) -> None:
+        if self.current_step() is None:
+            return
+        if self.current_index not in self.completed_indices:
+            self.completed_indices.append(self.current_index)
+        self.current_index += 1
+
+
+@dataclass
 class _WebClientSession:
     request_id: str
     run_id: str
@@ -200,6 +290,7 @@ class _WebClientSession:
     error_summary: str | None = None
     setup_failed: bool = False
     container_crashed: bool = False
+    step_tracker: _WebClientStepTracker | None = None
     consecutive_schema_errors: int = 0
     schema_error_blocked: bool = False
     no_progress_failures: int = 0
@@ -710,7 +801,7 @@ class WebClientRunner:
                 request_id=request_id,
                 path="$.command",
                 message=(
-                    "web_client_session command is required; use start, action, or finalize"
+                    "web_client_session command is required; use start, action, advance_step, or finalize"
                 ),
             )
             self._write_session_result_if_possible(payload, result)
@@ -724,6 +815,11 @@ class WebClientRunner:
                 )
             if command == "action":
                 return self._run_web_client_session_action(
+                    request_id=request_id,
+                    payload=payload,
+                )
+            if command == "advance_step":
+                return self._advance_web_client_session_step(
                     request_id=request_id,
                     payload=payload,
                 )
@@ -1050,6 +1146,11 @@ class WebClientRunner:
                 browser_driver.configure(base_url=base_url, run_id=run_id)
         else:
             browser_driver = self._task_browser_driver(artifacts_root, base_url, run_id)
+        step_tracker = (
+            _WebClientStepTracker(deepcopy(plan.get("reproduction_steps", [])))
+            if plan is not None
+            else None
+        )
         session = _WebClientSession(
             request_id=request_id,
             run_id=run_id,
@@ -1064,6 +1165,7 @@ class WebClientRunner:
             container_id=container_id,
             error_summary=error_summary,
             setup_failed=setup_failed,
+            step_tracker=step_tracker,
         )
         if setup_failed and plan is not None:
             session.execution_log = self._skip_all_steps(
@@ -1080,6 +1182,8 @@ class WebClientRunner:
         result["run_id"] = run_id
         result["plan_loaded"] = plan is not None
         result["base_url"] = base_url
+        if step_tracker is not None:
+            result["step_tracker"] = _step_tracker_payload(step_tracker)
         if not setup_failed:
             result["next_step_hint"] = (
                 "browser is at about:blank; issue an action with "
@@ -1162,37 +1266,19 @@ class WebClientRunner:
 
         browser_input = dict(session.browser_input)
         browser_input.update(override_input)
-        browser_input["actions"] = [deepcopy(action)]
         if session.browser_auth is not None:
             browser_input = _inject_browser_auth(browser_input, session.browser_auth)
 
         if session.plan is not None:
-            step = _session_action_step(payload, browser_input, action)
-            entry = self._execute_step(
-                step=step,
-                run_id=session.run_id,
-                container_id=session.container_id,
-                variables=session.variables,
-                screenshots=session.screenshots,
-                browser_auth=session.browser_auth,
+            result = self._run_tracked_web_client_action(
+                request_id=request_id,
+                session=session,
+                payload=payload,
+                browser_input=browser_input,
+                action=action,
             )
-            session.execution_log.append(entry)
-            result = {
-                "request_id": request_id,
-                "status": str(entry.get("outcome") or "fail"),
-                "run_id": session.run_id,
-                "browser": entry.get("browser"),
-                "screenshot_path": entry.get("screenshot_path"),
-                "browser_screenshots": (
-                    _browser_screenshot_map(browser_input, entry.get("browser"))
-                    if isinstance(entry.get("browser"), Mapping)
-                    else {}
-                ),
-                "criteria_evaluation": entry.get("criteria_evaluation"),
-                "execution_entry": entry,
-                "error": entry.get("reason") if entry.get("outcome") == "fail" else None,
-            }
         else:
+            browser_input["actions"] = [deepcopy(action)]
             result = self._run_browser_action_attempt(
                 request_id=request_id,
                 session=session,
@@ -1204,6 +1290,177 @@ class WebClientRunner:
             result["run_id"] = session.run_id
 
         self._record_web_session_browser_progress(session, action, result)
+        _write_json(
+            session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
+            result,
+        )
+        return result
+
+    def _run_tracked_web_client_action(
+        self,
+        *,
+        request_id: str,
+        session: _WebClientSession,
+        payload: dict[str, Any],
+        browser_input: dict[str, Any],
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        tracker = session.step_tracker
+        if tracker is None:
+            return _web_client_error(
+                request_id,
+                "plan-backed web_client_session is missing a step tracker",
+            )
+        current_step = tracker.current_step()
+        if current_step is None:
+            result = _web_client_error(
+                request_id,
+                "all plan steps are completed; call finalize",
+            )
+            result["run_id"] = session.run_id
+            result["step_tracker"] = _step_tracker_payload(tracker)
+            return result
+
+        try:
+            resolved_action = resolve_references(action, session.variables)
+            resolved_browser_input = resolve_references(browser_input, session.variables)
+            resolved_payload = dict(payload)
+            for key in ("success_criteria", "selector_assertions", "capture"):
+                if key in resolved_payload:
+                    resolved_payload[key] = resolve_references(
+                        resolved_payload.get(key),
+                        session.variables,
+                    )
+        except UnboundVariableError as exc:
+            result = _web_client_error(request_id, str(exc))
+            result["run_id"] = session.run_id
+            result["step_tracker"] = _step_tracker_payload(tracker)
+            return result
+
+        started = datetime.now(timezone.utc)
+        result = self._run_browser_action_attempt(
+            request_id=request_id,
+            session=session,
+            browser_input=resolved_browser_input,
+            action=resolved_action,
+            step_id=current_step.get("step_id"),
+            payload=resolved_payload,
+        )
+        ended = datetime.now(timezone.utc)
+        result["run_id"] = session.run_id
+
+        session.screenshots.update(result.get("browser_screenshots") or {})
+        if result.get("status") == "pass" and isinstance(
+            result.get("capture_values"),
+            Mapping,
+        ):
+            session.variables.update(result["capture_values"])
+
+        criteria = (
+            deepcopy(dict(resolved_payload["success_criteria"]))
+            if isinstance(resolved_payload.get("success_criteria"), Mapping)
+            else None
+        )
+        tracked = tracker.record_action(
+            request_id=request_id,
+            action=resolved_action,
+            browser_input=resolved_browser_input,
+            result=result,
+            criteria=criteria,
+            started_at=started.isoformat(),
+            ended_at=ended.isoformat(),
+            duration_ms=_duration_ms(started, ended),
+        )
+        result["tracked_action"] = _tracked_action_payload(tracked)
+        result["step_tracker"] = _step_tracker_payload(tracker)
+        self._write_browser_action_history(session)
+        return result
+
+    def _advance_web_client_session_step(
+        self,
+        *,
+        request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        session = self._web_session
+        if session is None:
+            result = _web_client_error(
+                request_id,
+                "no active web_client_session; call start before advance_step",
+            )
+            self._write_session_result_if_possible(payload, result)
+            return result
+        if session.plan is None or session.step_tracker is None:
+            result = _web_client_error(
+                request_id,
+                "advance_step is only supported for plan-backed web_client_session runs",
+            )
+            self._write_session_result_if_possible(payload, result)
+            return result
+        if session.setup_failed:
+            result = _web_client_error(
+                request_id,
+                session.error_summary or "session setup failed",
+            )
+            self._write_session_result_if_possible(payload, result)
+            return result
+
+        _write_json(
+            session.artifacts_dir / f"web_client_session_{_safe_label(request_id)}.json",
+            payload,
+        )
+        tracker = session.step_tracker
+        current_step = tracker.current_step()
+        if current_step is None:
+            result = _web_client_error(
+                request_id,
+                "all plan steps are already completed",
+            )
+            result["run_id"] = session.run_id
+            result["step_tracker"] = _step_tracker_payload(tracker)
+            _write_json(
+                session.artifacts_dir
+                / f"web_client_result_{_safe_label(request_id)}.json",
+                result,
+            )
+            return result
+
+        outcome = payload.get("outcome")
+        reason = payload.get("reason")
+        actions = tracker.current_actions()
+        if not actions and outcome is None:
+            result = _web_client_error(
+                request_id,
+                "cannot advance current step before recording an action unless outcome is supplied",
+            )
+            result["run_id"] = session.run_id
+            result["step_tracker"] = _step_tracker_payload(tracker)
+            _write_json(
+                session.artifacts_dir
+                / f"web_client_result_{_safe_label(request_id)}.json",
+                result,
+            )
+            return result
+
+        entry = self._tracked_step_entry(
+            session=session,
+            step=current_step,
+            actions=actions,
+            outcome=str(outcome) if outcome is not None else None,
+            reason=str(reason) if reason is not None else None,
+        )
+        session.execution_log.append(entry)
+        tracker.advance()
+        self._write_browser_action_history(session)
+        result = {
+            "request_id": request_id,
+            "status": "pass",
+            "run_id": session.run_id,
+            "advanced_step": _step_summary(current_step),
+            "execution_entry": entry,
+            "step_tracker": _step_tracker_payload(tracker),
+            "error": None,
+        }
         _write_json(
             session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
             result,
@@ -1252,6 +1509,8 @@ class WebClientRunner:
                 session.jellyfin_logs,
                 encoding="utf-8",
             )
+        if session.step_tracker is not None and not session.setup_failed:
+            self._finalize_tracked_steps(session)
 
         requested_result = str(payload.get("overall_result") or "").strip()
         if requested_result not in {"reproduced", "not_reproduced", "inconclusive"}:
@@ -1291,6 +1550,104 @@ class WebClientRunner:
             result,
         )
         return _trim_finalize_result(result)
+
+    def _finalize_tracked_steps(self, session: _WebClientSession) -> None:
+        tracker = session.step_tracker
+        if tracker is None or session.plan is None:
+            return
+        current_step = tracker.current_step()
+        if current_step is not None and tracker.current_actions():
+            session.execution_log.append(
+                self._tracked_step_entry(
+                    session=session,
+                    step=current_step,
+                    actions=tracker.current_actions(),
+                )
+            )
+            tracker.advance()
+
+        remaining = [
+            step
+            for step in tracker.steps[tracker.current_index :]
+            if isinstance(step, dict)
+        ]
+        if remaining:
+            session.execution_log.extend(
+                self._skip_steps(remaining, reason="step was not reached before finalize")
+            )
+            while tracker.current_step() is not None:
+                tracker.advance()
+        self._write_browser_action_history(session)
+
+    def _tracked_step_entry(
+        self,
+        *,
+        session: _WebClientSession,
+        step: dict[str, Any],
+        actions: list[_TrackedBrowserAction],
+        outcome: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        started_at = (
+            _parse_timestamp(actions[0].started_at)
+            if actions
+            else datetime.now(timezone.utc)
+        )
+        entry = self._base_entry(step, started_at)
+        entry["tool"] = "browser"
+        browser = _aggregate_tracked_browser(actions)
+        entry["browser"] = browser
+        entry["screenshot_path"] = _first_tracked_screenshot(actions)
+        entry["duration_ms"] = sum(action.duration_ms for action in actions)
+        entry["end_time"] = actions[-1].ended_at if actions else _timestamp()
+
+        derived_outcome = actions[-1].outcome if actions else "skip"
+        entry["outcome"] = outcome or derived_outcome
+        if entry["outcome"] == "pass":
+            entry["reason"] = None
+        else:
+            entry["reason"] = reason or (actions[-1].reason if actions else "step skipped")
+
+        criteria = _tracked_step_criteria(actions)
+        try:
+            criteria = resolve_references(criteria, session.variables)
+            criteria_context = _tracked_criteria_context(
+                session=session,
+                actions=actions,
+                aggregate_browser=browser,
+            )
+            criteria_evaluation = evaluate_criteria(criteria, criteria_context)
+        except UnboundVariableError as exc:
+            criteria_evaluation = _forced_criteria_evaluation(
+                outcome="fail",
+                reason=str(exc),
+                browser=browser,
+            )
+        if outcome is not None:
+            criteria_evaluation = _forced_criteria_evaluation(
+                outcome=entry["outcome"],
+                reason=entry["reason"],
+                browser=browser,
+            )
+        entry["criteria_evaluation"] = criteria_evaluation
+        return entry
+
+    def _write_browser_action_history(self, session: _WebClientSession) -> None:
+        tracker = session.step_tracker
+        if tracker is None:
+            return
+        _write_json(
+            session.artifacts_dir / "browser_action_history.json",
+            {
+                "run_id": session.run_id,
+                "step_tracker": _step_tracker_payload(tracker),
+                "actions": [
+                    _tracked_action_payload(action)
+                    for actions in tracker.actions_by_step.values()
+                    for action in actions
+                ],
+            },
+        )
 
     def _close_web_client_session_resources(self, session: _WebClientSession) -> str | None:
         error_summary: str | None = None
@@ -2268,8 +2625,9 @@ class WebClientSessionTool(BaseTool):
         return (
             "Run one command in the active Jellyfin Web browser session. start "
             "opens a plan-backed or task browser session, action executes "
-            "exactly one browser action, and finalize closes resources and "
-            "returns the raw result JSON."
+            "exactly one browser action, advance_step moves the runner-owned "
+            "plan cursor, and finalize closes resources and returns the raw "
+            "result JSON."
         )
 
     @property
@@ -2303,9 +2661,10 @@ class WebClientSessionTool(BaseTool):
             "`[/web_client_session]\\n{\"command\": \"action\", ...}\\n"
             "[web_client_session/]`. For full-plan starts, pass the received "
             "Markdown plan text as `plan_markdown`; do not use local "
-            "filesystem paths. Send one action command per browser move, and "
-            "finish with finalize. Do not nest commands inside `actions` "
-            "arrays or pass `action` as an array."
+            "filesystem paths. Send one action command per browser move, use "
+            "`advance_step` when the current plan step is satisfied or "
+            "blocked, and finish with finalize. Do not nest commands inside "
+            "`actions` arrays or pass `action` as an array."
         )
 
     async def _execute(self, args: dict[str, Any], **_kwargs: Any) -> ToolResult:
@@ -2408,7 +2767,7 @@ def _validate_session_request(payload: Mapping[str, Any]) -> dict[str, str] | No
     if not isinstance(command, str) or not command.strip():
         return {
             "path": "$.command",
-            "message": "command is required and must be start, action, or finalize",
+            "message": "command is required and must be start, action, advance_step, or finalize",
         }
     command = command.strip().lower()
     if command not in SESSION_FIELDS_BY_COMMAND:
@@ -2462,6 +2821,24 @@ def _validate_session_request(payload: Mapping[str, Any]) -> dict[str, str] | No
         action_error = _validate_browser_action(action, "$.action")
         if action_error:
             return action_error
+    elif command == "advance_step":
+        if payload.get("outcome") is not None and payload.get("outcome") not in {
+            "pass",
+            "fail",
+            "skip",
+        }:
+            return {
+                "path": "$.outcome",
+                "message": "outcome must be pass, fail, or skip",
+            }
+        if payload.get("reason") is not None and not isinstance(
+            payload.get("reason"),
+            str,
+        ):
+            return {
+                "path": "$.reason",
+                "message": "reason must be a string when provided",
+            }
     elif command == "finalize" and payload.get("overall_result") is not None:
         if payload.get("overall_result") not in {
             "reproduced",
@@ -3243,61 +3620,168 @@ def _task_browser_metadata(value: Any) -> tuple[dict[str, Any], str | None]:
     return deepcopy(value), None
 
 
-def _session_action_step(
-    payload: Mapping[str, Any],
-    browser_input: Mapping[str, Any],
-    action: Mapping[str, Any],
-) -> dict[str, Any]:
-    criteria = payload.get("success_criteria")
-    if not isinstance(criteria, Mapping):
-        criteria = {"all_of": [{"type": "browser_action_run"}]}
-    else:
-        criteria = deepcopy(dict(criteria))
-
-    selector_assertions = _selector_criteria_assertions(
-        payload.get("selector_assertions")
-    )
-    if selector_assertions:
-        all_of = criteria.get("all_of") if isinstance(criteria, Mapping) else None
-        any_of = criteria.get("any_of") if isinstance(criteria, Mapping) else None
-        if isinstance(all_of, list):
-            all_of.extend(selector_assertions)
-        elif isinstance(any_of, list):
-            any_of.extend(selector_assertions)
-        else:
-            criteria = {
-                "all_of": [{"type": "browser_action_run"}, *selector_assertions]
-            }
-
-    label = (
-        payload.get("action_label")
-        or payload.get("label")
-        or action.get("label")
-        or action.get("type")
-        or "browser action"
-    )
-    step = {
-        "step_id": payload.get("step_id"),
-        "role": payload.get("role"),
-        "action": str(label),
-        "tool": "browser",
-        "input": deepcopy(dict(browser_input)),
-        "success_criteria": criteria,
+def _step_tracker_payload(tracker: _WebClientStepTracker) -> dict[str, Any]:
+    current_actions = tracker.current_actions()
+    return {
+        "current_step": _step_summary(tracker.current_step()),
+        "current_step_index": (
+            tracker.current_index + 1
+            if tracker.current_step() is not None
+            else None
+        ),
+        "completed_steps": [
+            _step_summary(tracker.steps[index])
+            for index in tracker.completed_indices
+            if 0 <= index < len(tracker.steps)
+        ],
+        "total_steps": len(tracker.steps),
+        "action_index": tracker.action_counter,
+        "actions_in_current_step": len(current_actions),
+        "all_steps_completed": tracker.current_step() is None,
     }
-    if payload.get("capture") is not None:
-        step["capture"] = deepcopy(payload.get("capture"))
-    return step
 
 
-def _selector_criteria_assertions(selector_assertions: Any) -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "browser_element",
-            "selector": selector,
-            "state": state,
+def _step_summary(step: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if step is None:
+        return None
+    return {
+        "step_id": step.get("step_id"),
+        "role": step.get("role"),
+        "action": step.get("action"),
+        "expected_outcome": step.get("expected_outcome"),
+    }
+
+
+def _tracked_action_payload(action: _TrackedBrowserAction) -> dict[str, Any]:
+    browser = action.result.get("browser")
+    browser_payload: dict[str, Any] | None = None
+    if isinstance(browser, Mapping):
+        browser_payload = {
+            "status": browser.get("status"),
+            "final_url": browser.get("final_url"),
+            "title": browser.get("title"),
+            "screenshot_paths": browser.get("screenshot_paths", []),
+            "error": browser.get("error"),
+            "actions": deepcopy(browser.get("actions", [])),
         }
-        for selector, state in _selector_expectations(selector_assertions)
+    return {
+        "request_id": action.request_id,
+        "action_index": action.action_index,
+        "step_index": action.step_index + 1,
+        "step_id": action.step_id,
+        "role": action.role,
+        "plan_action": action.plan_action,
+        "action": deepcopy(action.action),
+        "status": action.result.get("status"),
+        "outcome": action.outcome,
+        "reason": action.reason,
+        "start_time": action.started_at,
+        "end_time": action.ended_at,
+        "duration_ms": action.duration_ms,
+        "browser": browser_payload,
+        "screenshot_path": action.result.get("screenshot_path"),
+        "browser_screenshots": deepcopy(action.result.get("browser_screenshots", {})),
+        "selector_states": deepcopy(action.result.get("selector_states", {})),
+        "capture_values": deepcopy(action.result.get("capture_values", {})),
+    }
+
+
+def _aggregate_tracked_browser(
+    actions: list[_TrackedBrowserAction],
+) -> dict[str, Any] | None:
+    if not actions:
+        return None
+    latest_browser = actions[-1].result.get("browser")
+    browser = deepcopy(dict(latest_browser)) if isinstance(latest_browser, Mapping) else {}
+    browser_actions: list[Any] = []
+    screenshot_paths: list[str] = []
+    for tracked in actions:
+        tracked_browser = tracked.result.get("browser")
+        if not isinstance(tracked_browser, Mapping):
+            continue
+        raw_actions = tracked_browser.get("actions")
+        if isinstance(raw_actions, list):
+            browser_actions.extend(deepcopy(raw_actions))
+        for path in tracked_browser.get("screenshot_paths", []) or []:
+            if path:
+                screenshot_paths.append(str(path))
+    browser["actions"] = browser_actions
+    browser["screenshot_paths"] = screenshot_paths
+    return browser
+
+
+def _first_tracked_screenshot(actions: list[_TrackedBrowserAction]) -> str | None:
+    for tracked in actions:
+        if tracked.result.get("screenshot_path"):
+            return str(tracked.result["screenshot_path"])
+        browser = tracked.result.get("browser")
+        if isinstance(browser, Mapping):
+            for path in browser.get("screenshot_paths", []) or []:
+                if path:
+                    return str(path)
+    return None
+
+
+def _tracked_step_criteria(actions: list[_TrackedBrowserAction]) -> dict[str, Any]:
+    if actions and actions[-1].criteria is not None:
+        return deepcopy(actions[-1].criteria)
+    return {"all_of": [{"type": "browser_action_run"}]}
+
+
+def _tracked_criteria_context(
+    *,
+    session: _WebClientSession,
+    actions: list[_TrackedBrowserAction],
+    aggregate_browser: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    latest_result = actions[-1].result if actions else {}
+    latest_browser = latest_result.get("browser")
+    browser = (
+        latest_browser
+        if isinstance(latest_browser, Mapping)
+        else aggregate_browser
+    )
+    context = {
+        "browser": browser,
+        "browser_text": browser.get("page_text") if isinstance(browser, Mapping) else None,
+        "browser_elements": latest_result.get("selector_states", {}),
+        "screenshots": session.screenshots,
+        "screenshot_path": latest_result.get("screenshot_path"),
+        "browser_screenshots": latest_result.get("browser_screenshots", {}),
+    }
+    return context
+
+
+def _forced_criteria_evaluation(
+    *,
+    outcome: str,
+    reason: str | None,
+    browser: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    passed = outcome == "pass"
+    actions = browser.get("actions") if isinstance(browser, Mapping) else []
+    failed = [
+        action
+        for action in actions
+        if isinstance(action, Mapping) and action.get("status") != "pass"
     ]
+    return {
+        "passed": passed,
+        "operator": "all_of",
+        "assertions": [
+            {
+                "type": "browser_action_run",
+                "passed": passed,
+                "actual": {
+                    "status": browser.get("status") if isinstance(browser, Mapping) else None,
+                    "failed_actions": len(failed),
+                    "forced_outcome": outcome,
+                },
+                "expected": "caller-supplied step outcome",
+                "message": reason or f"step marked {outcome}",
+            }
+        ],
+    }
 
 
 def _web_client_session_result(
@@ -3466,6 +3950,20 @@ def _timestamp() -> str:
 
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def _duration_ms(started: datetime, ended: datetime) -> int:
+    return int((ended - started).total_seconds() * 1000)
+
+
+def _parse_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _safe_label(value: Any) -> str:

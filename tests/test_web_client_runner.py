@@ -66,6 +66,29 @@ def demo_browser_plan(release_track="stable", include_base_url=True):
     return plan
 
 
+def two_step_browser_plan():
+    return base_plan(
+        [
+            {
+                "step_id": 1,
+                "role": "setup",
+                "action": "Open Jellyfin Web",
+                "tool": "browser",
+                "input": {},
+                "expected_outcome": "Web UI is visible",
+            },
+            {
+                "step_id": 2,
+                "role": "trigger",
+                "action": "Capture home",
+                "tool": "browser",
+                "input": {},
+                "expected_outcome": "Home is captured",
+            },
+        ]
+    )
+
+
 class ThreadTrackingBrowserDriver(FakeBrowserDriver):
     def __init__(self, artifacts_root, results=None):
         super().__init__(artifacts_root, results=results)
@@ -589,16 +612,22 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "action",
                     "request_id": "next-1",
-                    "step_id": 1,
-                    "role": "trigger",
-                    "action_label": "Capture home",
                     "action": {"type": "screenshot", "label": "web_home"},
+                }
+            )
+            advance = runner.session(
+                {
+                    "command": "advance_step",
+                    "request_id": "advance-1",
                 }
             )
 
             self.assertEqual(action["status"], "pass")
-            self.assertEqual(action["criteria_evaluation"]["passed"], True)
-            self.assertEqual(action["execution_entry"]["step_id"], 1)
+            self.assertEqual(action["step_tracker"]["current_step"]["step_id"], 1)
+            self.assertEqual(action["tracked_action"]["step_id"], 1)
+            self.assertEqual(advance["execution_entry"]["step_id"], 1)
+            self.assertEqual(advance["execution_entry"]["role"], "trigger")
+            self.assertEqual(advance["execution_entry"]["action"], "Open Jellyfin Web")
             self.assertEqual(len(browser_driver.runs), 1)
             self.assertEqual(
                 browser_driver.runs[0]["browser_input"]["actions"],
@@ -662,6 +691,7 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(first["status"], "pass")
             self.assertEqual(second["status"], "pass")
             self.assertEqual(third["status"], "pass")
+            self.assertEqual(third["step_tracker"]["actions_in_current_step"], 3)
             self.assertEqual(
                 [
                     run["browser_input"]["actions"]
@@ -674,12 +704,17 @@ class WebClientRunnerTests(unittest.TestCase):
                 ],
             )
 
-            runner.session(
+            final = runner.session(
                 {
                     "command": "finalize",
                     "request_id": "finalize-1",
                     "overall_result": "reproduced",
                 }
+            )
+            self.assertEqual(len(final["execution_log"]), 1)
+            self.assertEqual(
+                len(final["execution_log"][0]["browser"]["actions"]),
+                3,
             )
 
     def test_session_finalize_returns_execution_result(self):
@@ -709,8 +744,6 @@ class WebClientRunnerTests(unittest.TestCase):
                 {
                     "command": "action",
                     "request_id": "next-1",
-                    "step_id": 1,
-                    "role": "trigger",
                     "action": {"type": "screenshot", "label": "web_home"},
                 }
             )
@@ -729,6 +762,218 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertTrue(Path(temp_dir, "plan-run", "result.json").is_file())
             self.assertTrue(browser_driver.closed)
             self.assertEqual(docker.stopped, [("container-1", "plan-run")])
+
+    def test_session_advance_step_moves_runner_owned_cursor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            plan_path = Path(temp_dir) / "plan.json"
+            plan_path.write_text(json.dumps(two_step_browser_plan()), encoding="utf-8")
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+
+            start = runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "cursor-run",
+                    "artifacts_root": temp_dir,
+                    "plan_path": str(plan_path),
+                }
+            )
+            runner.session(
+                {
+                    "command": "action",
+                    "request_id": "step-1-action",
+                    "action": {"type": "goto"},
+                }
+            )
+            advanced = runner.session(
+                {
+                    "command": "advance_step",
+                    "request_id": "advance-1",
+                }
+            )
+            runner.session(
+                {
+                    "command": "action",
+                    "request_id": "step-2-action",
+                    "action": {"type": "screenshot", "label": "home"},
+                }
+            )
+            final = runner.session(
+                {
+                    "command": "finalize",
+                    "request_id": "finalize-1",
+                    "overall_result": "reproduced",
+                }
+            )
+
+            self.assertEqual(start["step_tracker"]["current_step"]["step_id"], 1)
+            self.assertEqual(advanced["execution_entry"]["step_id"], 1)
+            self.assertEqual(advanced["step_tracker"]["current_step"]["step_id"], 2)
+            self.assertEqual(len(final["execution_log"]), 2)
+            self.assertEqual([entry["step_id"] for entry in final["execution_log"]], [1, 2])
+
+    def test_session_retry_actions_are_aggregated_under_current_step(self):
+        failed_browser = {
+            "status": "fail",
+            "actions": [
+                {
+                    "type": "click",
+                    "status": "fail",
+                    "error": "target unavailable",
+                }
+            ],
+            "screenshot_paths": [],
+            "final_url": "http://localhost:8097/web",
+            "title": "Jellyfin",
+            "console": [],
+            "failed_network": [],
+            "dom_summary": "title='Jellyfin'",
+            "dom_path": None,
+            "page_text": "Jellyfin Home",
+            "visible_controls": [],
+            "media_state": {"state": "none", "elements": []},
+            "error": "target unavailable",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir, results=[failed_browser])
+            plan_path = Path(temp_dir) / "plan.json"
+            plan_path.write_text(json.dumps(browser_plan()), encoding="utf-8")
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "retry-run",
+                    "artifacts_root": temp_dir,
+                    "plan_path": str(plan_path),
+                }
+            )
+            first = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "failed-click",
+                    "action": {
+                        "type": "click",
+                        "target": {"kind": "text", "name": "Missing"},
+                    },
+                }
+            )
+            second = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "successful-shot",
+                    "action": {"type": "screenshot", "label": "home"},
+                }
+            )
+            advanced = runner.session(
+                {
+                    "command": "advance_step",
+                    "request_id": "advance-1",
+                }
+            )
+
+            self.assertEqual(first["status"], "fail")
+            self.assertEqual(second["status"], "pass")
+            self.assertEqual(advanced["execution_entry"]["outcome"], "pass")
+            action_statuses = [
+                action["status"]
+                for action in advanced["execution_entry"]["browser"]["actions"]
+            ]
+            self.assertEqual(action_statuses, ["fail", "pass"])
+            self.assertTrue(
+                Path(temp_dir, "retry-run", "browser_action_history.json").is_file()
+            )
+
+    def test_session_finalize_auto_closes_active_step_and_skips_remaining(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            plan_path = Path(temp_dir) / "plan.json"
+            plan_path.write_text(json.dumps(two_step_browser_plan()), encoding="utf-8")
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "auto-finalize-run",
+                    "artifacts_root": temp_dir,
+                    "plan_path": str(plan_path),
+                }
+            )
+            runner.session(
+                {
+                    "command": "action",
+                    "request_id": "step-1-action",
+                    "action": {"type": "goto"},
+                }
+            )
+            final = runner.session(
+                {
+                    "command": "finalize",
+                    "request_id": "finalize-1",
+                    "overall_result": "inconclusive",
+                }
+            )
+
+            self.assertEqual([entry["outcome"] for entry in final["execution_log"]], ["pass", "skip"])
+            self.assertEqual([entry["step_id"] for entry in final["execution_log"]], [1, 2])
+
+    def test_session_advance_step_requires_active_plan_session(self):
+        temp_dir = tempfile.gettempdir()
+        runner = WebClientRunner(
+            docker=FakeDocker(),
+            api=FakeAPI(),
+            screenshotter=FakeScreenshotter(temp_dir),
+            browser_driver=FakeBrowserDriver(temp_dir),
+        )
+
+        before_start = runner.session(
+            {
+                "command": "advance_step",
+                "request_id": "advance-before-start",
+            }
+        )
+        runner.session(
+            {
+                "command": "start",
+                "request_id": "start-1",
+                "run_id": "task-session",
+                "base_url": "http://localhost:9000",
+                "artifacts_root": temp_dir,
+            }
+        )
+        task_mode = runner.session(
+            {
+                "command": "advance_step",
+                "request_id": "advance-task",
+            }
+        )
+
+        self.assertEqual(before_start["status"], "error")
+        self.assertIn("no active web_client_session", before_start["error"])
+        self.assertEqual(task_mode["status"], "error")
+        self.assertIn("plan-backed", task_mode["error"])
 
     def test_session_rejects_multi_action_payloads(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1424,8 +1669,6 @@ class WebClientRunnerTests(unittest.TestCase):
                     {
                         "command": "action",
                         "request_id": "worker-next",
-                        "step_id": 1,
-                        "role": "trigger",
                         "action": {"type": "screenshot", "label": "home"},
                     }
                 )
