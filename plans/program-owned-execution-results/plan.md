@@ -58,13 +58,12 @@ The closest library options are structured logging or JSON Lines helpers:
   run state. Source:
   https://opentelemetry.io/docs/languages/python/instrumentation/
 
-Recommendation for this repository: use an in-repo implementation over the
-standard library `json` module. The data is not generic application telemetry;
-it is domain state with explicit invariants, schemas, artifact paths, and
-step/attempt relationships. `jsonlines` is the only close dependency, but the
-write path needed here is small and the repo already writes deterministic JSON
-artifacts through local helpers. Before implementation, confirm this custom
-choice against the options above.
+Decision for this repository: use an in-repo implementation over the standard
+library `json` module. The data is not generic application telemetry; it is
+domain state with explicit invariants, schemas, artifact paths, and
+step/attempt relationships. The write path needed here is small and the repo
+already writes deterministic JSON artifacts through local helpers. No new
+dependency is introduced.
 
 ## Proposed Contract
 
@@ -102,7 +101,7 @@ Extend `ExecutionResult` with:
     "decisive_attempt_id": "attempt-00021",
     "reason": "string | null"
   },
-  "overall_result_source": "program_derived",
+  "overall_result_source": "program_derived | program_derived_missing_criteria | legacy_llm",
   "llm_requested_overall_result": "reproduced | not_reproduced | inconclusive | null"
 }
 ```
@@ -115,7 +114,7 @@ writing reports or comparing verification runs.
 
 Each event should include:
 
-- `event_id`: monotonic run-local integer or stable string.
+- `event_id`: monotonic run-local integer (always int; never a string).
 - `timestamp`: ISO 8601 UTC timestamp.
 - `run_id`.
 - `event_type`: `session_started`, `action_requested`, `action_completed`,
@@ -139,9 +138,17 @@ attempts:
    `step_id` attempts go into an `unassigned_attempts` list and cannot become
    decisive.
 3. Store every attempt in chronological order under its step.
-4. Mark an attempt decisive only when it contains criteria evaluation for that
-   planned step's objective, or when it is the first terminal skip/blocker for
-   that step.
+4. Mark an attempt decisive using this deterministic precedence:
+   1. The **last** attempt for the step that has a complete criteria evaluation
+      (i.e. `criteria_evaluation.passed` is a boolean, not null/missing) wins.
+      Ties — same sequence number is impossible by construction; otherwise pick
+      the higher `event_id`.
+   2. If no attempt has a complete criteria evaluation, the **first** terminal
+      skip/blocker attempt for the step is decisive (status `skip`).
+   3. Otherwise the step is `inconclusive` and `decisive_attempt_id` is null.
+
+   Partial criteria evaluations (e.g. `any_of` aborted by a capture failure) do
+   not count as complete and fall through to rule 4.2.
 5. Mark setup and verify steps `pass` only when their structured criteria pass.
    Failed exploratory attempts remain evidence, not final step state, if a later
    decisive attempt for the same step passes.
@@ -159,6 +166,21 @@ verify steps. If the Markdown plan does not contain parseable criteria, the
 runner should still record the raw trace, but the summary must become
 `inconclusive` with a reason such as `missing structured trigger criteria`.
 
+### Trust boundary for model-supplied step labels
+
+`step_id`, `role`, and `action_label` arrive on the action payload from the
+LLM. The runner cannot fully own partitioning when the partition key is
+model-asserted. We accept this explicitly:
+
+- The runner records each attempt under the model-supplied `step_id` without
+  re-deriving it.
+- Each `step_summary` carries `step_label_source: "model"` so consumers know
+  the assignment is asserted, not verified.
+- An attempt whose `step_id` does not match any planned step goes into
+  `unassigned_attempts` and can never become decisive.
+- Cross-checking the action payload against `planned_action` is out of scope
+  for this change and tracked as a follow-up.
+
 ## Implementation Phases
 
 ### Phase 1: Contracts and Fixtures
@@ -167,8 +189,10 @@ runner should still record the raw trace, but the summary must become
 - Extend `schemas/execution_result.json` with optional `execution_trace_path`,
   `execution_summary_path`, `step_summaries`, `trigger_summary`,
   `overall_result_source`, and `llm_requested_overall_result`.
-- Add a small fixture derived from the shape of `debug/stage2web-test5-5` with
-  repeated attempts for the same trigger step.
+- Add a small fixture under `tests/fixtures/program_owned_results/` derived
+  from the shape of `debug/stage2web-test5-5` with repeated attempts for the
+  same trigger step. Trim the copy aggressively; `debug/` is mutable and not a
+  stable test input.
 - Add tests that assert the fixture produces one trigger summary and a
   program-derived `overall_result`.
 
@@ -180,8 +204,11 @@ runner should still record the raw trace, but the summary must become
   - `ExecutionTraceRecorder.record_action_result(...)`.
   - `ExecutionTraceRecorder.write_summary(plan, attempts)`.
 - Use monotonic sequence numbers, not timestamps, for ordering.
-- Write JSON atomically for `execution_summary.json`; append JSONL for the raw
-  trace.
+- Write `execution_summary.json` atomically (write to `*.tmp` then `os.replace`).
+- For `execution_trace.jsonl`, serialize each event to a single bytes buffer
+  ending in `\n` and append with one `os.write` call on a file opened with
+  `O_APPEND`. Readers must tolerate a trailing partial line in case of crash
+  during write. Optional `os.fsync` after each event for durability.
 
 ### Phase 3: Wire Stage 2
 
@@ -197,13 +224,19 @@ runner should still record the raw trace, but the summary must become
   contract.
 - Continue writing current sidecar request/result files for debugging.
 
-### Phase 4: Criteria Ownership
+### Phase 4: Criteria Ownership (precedes Phase 5)
+
+This phase must land before Phase 5 flips report generation to summaries;
+otherwise every web-client run falls into the `inconclusive` branch of Rule 7
+because no plan carries structured criteria.
 
 - Update analysis output and `parse_reproduction_plan_markdown()` so web-client
   plans can carry structured `success_criteria`, `capture`, and optional
   `selector_assertions` per step.
-- Make the runner evaluate those criteria through `tools.criteria`, matching
-  the standard execution path.
+- Make the runner evaluate those criteria through `tools.criteria` (reusing
+  `evaluate_criteria`, `extract_captures`, `resolve_references`,
+  `normalize_criteria_assertion` — no new evaluator), matching the standard
+  execution path.
 - If an action payload includes ad hoc criteria, record it as attempt criteria,
   but do not let it replace the planned trigger criteria unless the planned step
   explicitly allows exploratory criteria.
@@ -221,6 +254,14 @@ runner should still record the raw trace, but the summary must become
   authoritative.
 - Verification comparison should compare `trigger_summary` and decisive
   criteria results, not arbitrary first trigger entries from `execution_log`.
+- Cross-version fallback: if either side of a comparison lacks
+  `trigger_summary` (e.g. an older first-run loaded against a newer
+  verification run), synthesize one on the fly from `execution_log` using the
+  Step Summary Rules above, so comparisons stay meaningful during rollout.
+- While Phase 4 is being adopted, if `trigger_summary.status` is
+  `inconclusive` solely because of `missing structured trigger criteria`,
+  fall back to the first trigger entry from `execution_log` for report
+  rendering. Mark this on the report so it is visible.
 
 ### Phase 6: Prompt Simplification
 
@@ -246,21 +287,37 @@ runner should still record the raw trace, but the summary must become
   value separately.
 - Unit test report generation with multiple raw trigger entries: report uses
   `trigger_summary`.
+- Unit test report generation builds successfully from `result.json` plus
+  `execution_summary.json` alone, with the transcript file absent, and
+  produces output equivalent to a run that did read the transcript. This
+  exercises the third acceptance criterion directly.
+- Unit test cross-version verification comparison: a first-run lacking
+  `trigger_summary` is compared against a verification run that has one;
+  the synthesized `trigger_summary` from `execution_log` produces a
+  meaningful comparison.
 - Run `.venv/bin/python -m unittest discover tests`.
 
 ## Rollout
 
-1. Land schemas and summary builder behind additive fields.
-2. Wire Web Client session runs and direct web-client runs to write traces.
-3. Switch report generation to summaries.
-4. Simplify prompts after tests prove the program-owned path works.
-5. Remove any obsolete prompt language that asks the model to remember or
+1. Land schemas and summary builder behind additive fields (Phase 1–2).
+2. Wire Web Client session runs and direct web-client runs to write traces
+   (Phase 3). Verification comparison uses synthesized `trigger_summary` for
+   any side that lacks one.
+3. Land criteria parsing in Markdown plans and runner evaluation (Phase 4)
+   before flipping report generation.
+4. Switch report generation to summaries (Phase 5).
+5. Simplify prompts (Phase 6) only after Phase 5 has been verified in real
+   runs — removing "remember actions" before the report path uses summaries
+   would leave reports relying on absent recall.
+6. Remove any obsolete prompt language that asks the model to remember or
    restate complete execution history.
 
 ## Acceptance Criteria
 
 - A web-client run can be finalized without a model-supplied `overall_result`.
-- `result.json` always contains `overall_result_source: "program_derived"`.
+- `result.json` always contains `overall_result_source` set to one of
+  `program_derived`, `program_derived_missing_criteria`, or `legacy_llm`
+  (the last only for runs predating this change).
 - Stage 3 can produce the same report after loading only `result.json` and
   `execution_summary.json`, without reading the transcript.
 - Repeated fallback attempts in one planned step do not create ambiguous trigger
