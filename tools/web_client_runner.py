@@ -38,6 +38,11 @@ except Exception:
 
 from tools.async_compat import run_sync_away_from_loop
 from tools.browser import BrowserDriver
+from tools.browser_replay import (
+    BrowserReplayRecorder,
+    ORIGINAL_TRACE_NAME,
+    REPLAY_DIR_NAME,
+)
 from tools.browser_errors import browser_infrastructure_error
 from tools.criteria import (
     CaptureError,
@@ -274,11 +279,13 @@ class _WebClientStepTracker:
 class _WebClientSession:
     request_id: str
     run_id: str
+    base_url: str
     artifacts_root: Path
     artifacts_dir: Path
     browser_input: dict[str, Any]
     step_id: Any
     browser_driver: Any
+    replay_recorder: Any | None = None
     plan: dict[str, Any] | None = None
     server_target: dict[str, Any] | None = None
     variables: dict[str, Any] = field(default_factory=dict)
@@ -781,6 +788,13 @@ class WebClientRunner:
                         "call finalize with overall_result: inconclusive"
                     ),
                 )
+                self._record_replay_non_browser_event(
+                    session=session,
+                    command=command,
+                    payload=payload,
+                    result=result,
+                    reason="session blocked after repeated schema errors",
+                )
                 self._write_session_result_if_possible(payload, result)
                 return result
             if session.no_progress_blocked:
@@ -791,6 +805,13 @@ class WebClientRunner:
                         "web_client_session is blocked after repeated no-progress "
                         "browser failures; call finalize with overall_result: inconclusive"
                     ),
+                )
+                self._record_replay_non_browser_event(
+                    session=session,
+                    command=command,
+                    payload=payload,
+                    result=result,
+                    reason="session blocked after repeated no-progress browser failures",
                 )
                 self._write_session_result_if_possible(payload, result)
                 return result
@@ -945,6 +966,13 @@ class WebClientRunner:
             result = _web_client_error(
                 request_id,
                 "web_client_session already has an active session; finalize it before starting a new one",
+            )
+            self._record_replay_non_browser_event(
+                session=self._web_session,
+                command="start",
+                payload=payload,
+                result=result,
+                reason="start rejected because a session is already active",
             )
             self._write_session_result_if_possible(payload, result)
             return result
@@ -1146,6 +1174,13 @@ class WebClientRunner:
                 browser_driver.configure(base_url=base_url, run_id=run_id)
         else:
             browser_driver = self._task_browser_driver(artifacts_root, base_url, run_id)
+        replay_recorder = self._start_replay_recorder(
+            artifacts_dir=artifacts_dir,
+            run_id=run_id,
+            base_url=base_url,
+            browser_input=browser_input,
+            browser_driver=browser_driver,
+        )
         step_tracker = (
             _WebClientStepTracker(deepcopy(plan.get("reproduction_steps", [])))
             if plan is not None
@@ -1154,11 +1189,13 @@ class WebClientRunner:
         session = _WebClientSession(
             request_id=request_id,
             run_id=run_id,
+            base_url=base_url,
             artifacts_root=artifacts_root,
             artifacts_dir=artifacts_dir,
             browser_input=browser_input,
             step_id=payload.get("step_id"),
             browser_driver=browser_driver,
+            replay_recorder=replay_recorder,
             plan=plan,
             server_target=server_target,
             browser_auth=browser_auth,
@@ -1190,6 +1227,15 @@ class WebClientRunner:
                 '{"type": "goto"} to navigate to base_url before any '
                 "click/wait_for/fill action"
             )
+        if replay_recorder is not None:
+            result["browser_replay_dir"] = str(replay_recorder.replay_dir)
+            result["replay_manifest_path"] = str(replay_recorder.manifest_path)
+            replay_recorder.record_start(
+                request=payload,
+                result=result,
+                base_url=base_url,
+                browser_input=browser_input,
+            )
         _write_json(
             artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
             result,
@@ -1215,12 +1261,26 @@ class WebClientRunner:
                 request_id,
                 session.error_summary or "session setup failed",
             )
+            self._record_replay_non_browser_event(
+                session=session,
+                command="action",
+                payload=payload,
+                result=result,
+                reason="session setup failed before browser action",
+            )
             self._write_session_result_if_possible(payload, result)
             return result
         if session.container_id and not self._container_running(session.container_id):
             session.container_crashed = True
             session.error_summary = session.error_summary or "container exited unexpectedly"
             result = _web_client_error(request_id, session.error_summary)
+            self._record_replay_non_browser_event(
+                session=session,
+                command="action",
+                payload=payload,
+                result=result,
+                reason="container exited before browser action",
+            )
             self._write_session_result_if_possible(payload, result)
             return result
 
@@ -1234,6 +1294,13 @@ class WebClientRunner:
                 request_id,
                 "action must be a single browser action object, not an array",
             )
+            self._record_replay_non_browser_event(
+                session=session,
+                command="action",
+                payload=payload,
+                result=result,
+                reason="invalid action payload did not reach Playwright",
+            )
             _write_json(
                 session.artifacts_dir
                 / f"web_client_result_{_safe_label(request_id)}.json",
@@ -1244,6 +1311,13 @@ class WebClientRunner:
             result = _web_client_error(
                 request_id,
                 "action is required for action command and must be an object",
+            )
+            self._record_replay_non_browser_event(
+                session=session,
+                command="action",
+                payload=payload,
+                result=result,
+                reason="invalid action payload did not reach Playwright",
             )
             _write_json(
                 session.artifacts_dir
@@ -1257,6 +1331,13 @@ class WebClientRunner:
         )
         if metadata_error:
             result = _web_client_error(request_id, metadata_error)
+            self._record_replay_non_browser_event(
+                session=session,
+                command="action",
+                payload=payload,
+                result=result,
+                reason="invalid browser metadata did not reach Playwright",
+            )
             _write_json(
                 session.artifacts_dir
                 / f"web_client_result_{_safe_label(request_id)}.json",
@@ -1269,6 +1350,7 @@ class WebClientRunner:
         if session.browser_auth is not None:
             browser_input = _inject_browser_auth(browser_input, session.browser_auth)
 
+        attempt_started = datetime.now(timezone.utc)
         if session.plan is not None:
             result = self._run_tracked_web_client_action(
                 request_id=request_id,
@@ -1288,8 +1370,19 @@ class WebClientRunner:
                 payload=payload,
             )
             result["run_id"] = session.run_id
+        attempt_ended = datetime.now(timezone.utc)
 
         self._record_web_session_browser_progress(session, action, result)
+        self._record_replay_action(
+            session=session,
+            payload=payload,
+            action=action,
+            browser_input=browser_input,
+            result=result,
+            started_at=attempt_started.isoformat(),
+            ended_at=attempt_ended.isoformat(),
+            duration_ms=_duration_ms(attempt_started, attempt_ended),
+        )
         _write_json(
             session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
             result,
@@ -1395,12 +1488,26 @@ class WebClientRunner:
                 request_id,
                 "advance_step is only supported for plan-backed web_client_session runs",
             )
+            self._record_replay_non_browser_event(
+                session=session,
+                command="advance_step",
+                payload=payload,
+                result=result,
+                reason="advance_step is not a browser action",
+            )
             self._write_session_result_if_possible(payload, result)
             return result
         if session.setup_failed:
             result = _web_client_error(
                 request_id,
                 session.error_summary or "session setup failed",
+            )
+            self._record_replay_non_browser_event(
+                session=session,
+                command="advance_step",
+                payload=payload,
+                result=result,
+                reason="session setup failed before advancing step",
             )
             self._write_session_result_if_possible(payload, result)
             return result
@@ -1418,6 +1525,13 @@ class WebClientRunner:
             )
             result["run_id"] = session.run_id
             result["step_tracker"] = _step_tracker_payload(tracker)
+            self._record_replay_non_browser_event(
+                session=session,
+                command="advance_step",
+                payload=payload,
+                result=result,
+                reason="advance_step is not a browser action",
+            )
             _write_json(
                 session.artifacts_dir
                 / f"web_client_result_{_safe_label(request_id)}.json",
@@ -1435,6 +1549,13 @@ class WebClientRunner:
             )
             result["run_id"] = session.run_id
             result["step_tracker"] = _step_tracker_payload(tracker)
+            self._record_replay_non_browser_event(
+                session=session,
+                command="advance_step",
+                payload=payload,
+                result=result,
+                reason="advance_step did not execute a browser action",
+            )
             _write_json(
                 session.artifacts_dir
                 / f"web_client_result_{_safe_label(request_id)}.json",
@@ -1461,6 +1582,13 @@ class WebClientRunner:
             "step_tracker": _step_tracker_payload(tracker),
             "error": None,
         }
+        self._record_replay_non_browser_event(
+            session=session,
+            command="advance_step",
+            payload=payload,
+            result=result,
+            reason="advance_step updates runner state but is not a browser action",
+        )
         _write_json(
             session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
             result,
@@ -1488,6 +1616,7 @@ class WebClientRunner:
             payload,
         )
         close_error = self._close_web_client_session_resources(session)
+        self._record_replay_trace_state(session)
         if close_error:
             session.error_summary = session.error_summary or close_error
 
@@ -1496,6 +1625,14 @@ class WebClientRunner:
                 request_id=request_id,
                 status="error" if close_error else "pass",
                 error=close_error,
+            )
+            result["run_id"] = session.run_id
+            self._record_replay_non_browser_event(
+                session=session,
+                command="finalize",
+                payload=payload,
+                result=result,
+                reason="finalize closes resources but is not a browser action",
             )
             _write_json(
                 session.artifacts_dir
@@ -1544,6 +1681,13 @@ class WebClientRunner:
             "jellyfin_logs": session.jellyfin_logs,
             "error_summary": error_summary,
         }
+        self._record_replay_non_browser_event(
+            session=session,
+            command="finalize",
+            payload=payload,
+            result=result,
+            reason="finalize closes resources but is not a browser action",
+        )
         _write_json(session.artifacts_dir / "result.json", result)
         _write_json(
             session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
@@ -1649,6 +1793,119 @@ class WebClientRunner:
             },
         )
 
+    def _start_replay_recorder(
+        self,
+        *,
+        artifacts_dir: Path,
+        run_id: str,
+        base_url: str,
+        browser_input: Mapping[str, Any],
+        browser_driver: Any,
+    ) -> BrowserReplayRecorder:
+        trace_path = artifacts_dir / REPLAY_DIR_NAME / ORIGINAL_TRACE_NAME
+        recorder = BrowserReplayRecorder(
+            artifacts_dir=artifacts_dir,
+            run_id=run_id,
+            base_url=base_url,
+            browser_input=browser_input,
+            trace_path=trace_path,
+        )
+        if hasattr(browser_driver, "configure_tracing"):
+            try:
+                browser_driver.configure_tracing(trace_path=recorder.trace_path)
+            except TypeError:
+                browser_driver.configure_tracing(recorder.trace_path)
+            except Exception as exc:
+                recorder.record_trace_state(
+                    {
+                        "enabled": False,
+                        "path": str(recorder.trace_path),
+                        "status": "error",
+                        "error": str(exc),
+                    }
+                )
+        return recorder
+
+    def _record_replay_action(
+        self,
+        *,
+        session: _WebClientSession,
+        payload: Mapping[str, Any],
+        action: Mapping[str, Any],
+        browser_input: Mapping[str, Any],
+        result: Mapping[str, Any],
+        started_at: str | None = None,
+        ended_at: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        recorder = session.replay_recorder
+        if recorder is None:
+            return
+        tracked = result.get("tracked_action")
+        replay_action: Mapping[str, Any] = action
+        replay_browser_input: Mapping[str, Any] = browser_input
+        action_index: int | None = None
+        step: dict[str, Any] | None = None
+        if isinstance(tracked, Mapping):
+            if isinstance(tracked.get("action"), Mapping):
+                replay_action = tracked["action"]
+            if isinstance(tracked.get("browser_input"), Mapping):
+                replay_browser_input = tracked["browser_input"]
+            if tracked.get("action_index") is not None:
+                action_index = int(tracked["action_index"])
+            step = {
+                "step_index": tracked.get("step_index"),
+                "step_id": tracked.get("step_id"),
+                "role": tracked.get("role"),
+                "action": tracked.get("plan_action"),
+            }
+            started_at = str(tracked.get("start_time") or "") or None
+            ended_at = str(tracked.get("end_time") or "") or None
+            if tracked.get("duration_ms") is not None:
+                duration_ms = int(tracked["duration_ms"])
+        recorder.record_action(
+            request_id=str(
+                result.get("request_id") or payload.get("request_id") or "unknown"
+            ),
+            request=payload,
+            action=replay_action,
+            browser_input=replay_browser_input,
+            result=result,
+            action_index=action_index,
+            step=step,
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_ms=duration_ms,
+        )
+
+    def _record_replay_non_browser_event(
+        self,
+        *,
+        session: _WebClientSession,
+        command: str,
+        payload: Mapping[str, Any],
+        result: Mapping[str, Any],
+        reason: str,
+    ) -> None:
+        recorder = session.replay_recorder
+        if recorder is None:
+            return
+        recorder.record_non_replayable(
+            command=command,
+            request=payload,
+            result=result,
+            reason=reason,
+        )
+
+    def _record_replay_trace_state(self, session: _WebClientSession) -> None:
+        recorder = session.replay_recorder
+        if recorder is None or not hasattr(session.browser_driver, "trace_state"):
+            return
+        try:
+            recorder.record_trace_state(session.browser_driver.trace_state())
+        except Exception:
+            return
+
     def _close_web_client_session_resources(self, session: _WebClientSession) -> str | None:
         error_summary: str | None = None
         try:
@@ -1677,18 +1934,63 @@ class WebClientRunner:
         result: dict[str, Any],
     ) -> None:
         session = self._web_session
-        if session is not None and command != "finalize":
-            session.consecutive_schema_errors += 1
-            result["schema_error_count"] = session.consecutive_schema_errors
-            if session.consecutive_schema_errors >= SCHEMA_ERROR_BLOCK_THRESHOLD:
-                session.schema_error_blocked = True
-                result["requires_finalize"] = True
-                result["recommended_overall_result"] = "inconclusive"
-                result["error"] = (
-                    f"{result.get('error')}; repeated schema errors block further "
-                    "actions until finalize"
+        if session is not None:
+            if command != "finalize":
+                session.consecutive_schema_errors += 1
+                result["schema_error_count"] = session.consecutive_schema_errors
+                if session.consecutive_schema_errors >= SCHEMA_ERROR_BLOCK_THRESHOLD:
+                    session.schema_error_blocked = True
+                    result["requires_finalize"] = True
+                    result["recommended_overall_result"] = "inconclusive"
+                    result["error"] = (
+                        f"{result.get('error')}; repeated schema errors block further "
+                        "actions until finalize"
+                    )
+            if session.replay_recorder is not None:
+                session.replay_recorder.record_schema_error(
+                    command=command,
+                    request=payload,
+                    result=result,
                 )
+        elif session is None:
+            self._record_pre_session_replay_schema_error(
+                command=command,
+                payload=payload,
+                result=result,
+            )
         self._write_session_result_if_possible(payload, result)
+
+    def _record_pre_session_replay_schema_error(
+        self,
+        *,
+        command: str,
+        payload: Mapping[str, Any],
+        result: Mapping[str, Any],
+    ) -> None:
+        if not payload.get("run_id") or not payload.get("artifacts_root"):
+            return
+        try:
+            artifacts_dir = (
+                Path(str(payload["artifacts_root"])).expanduser().resolve()
+                / str(payload["run_id"])
+            )
+            trace_path = artifacts_dir / REPLAY_DIR_NAME / ORIGINAL_TRACE_NAME
+            recorder = BrowserReplayRecorder(
+                artifacts_dir=artifacts_dir,
+                run_id=str(payload["run_id"]),
+                base_url=str(payload.get("base_url") or ""),
+                browser_input=payload.get("browser_input")
+                if isinstance(payload.get("browser_input"), Mapping)
+                else {},
+                trace_path=trace_path,
+            )
+            recorder.record_schema_error(
+                command=command,
+                request=payload,
+                result=result,
+            )
+        except Exception:
+            return
 
     def _record_web_session_browser_progress(
         self,
@@ -3672,6 +3974,7 @@ def _tracked_action_payload(action: _TrackedBrowserAction) -> dict[str, Any]:
         "role": action.role,
         "plan_action": action.plan_action,
         "action": deepcopy(action.action),
+        "browser_input": deepcopy(action.browser_input),
         "status": action.result.get("status"),
         "outcome": action.outcome,
         "reason": action.reason,

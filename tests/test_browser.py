@@ -36,6 +36,25 @@ class FakeRequest:
         return {"errorText": self._error_text}
 
 
+class FakeTracing:
+    def __init__(self, start_error=None, stop_error=None):
+        self.start_error = start_error
+        self.stop_error = stop_error
+        self.starts = []
+        self.stops = []
+
+    def start(self, **kwargs):
+        if self.start_error:
+            raise self.start_error
+        self.starts.append(kwargs)
+
+    def stop(self, path):
+        if self.stop_error:
+            raise self.stop_error
+        self.stops.append(path)
+        Path(path).write_bytes(b"trace")
+
+
 class FakeKeyboard:
     def __init__(self, page):
         self.page = page
@@ -230,9 +249,10 @@ class FakePage:
 
 
 class FakeContext:
-    def __init__(self, page):
+    def __init__(self, page, tracing=None):
         self.page = page
         self.closed = False
+        self.tracing = tracing or FakeTracing()
 
     def new_page(self):
         return self.page
@@ -242,13 +262,14 @@ class FakeContext:
 
 
 class FakeBrowser:
-    def __init__(self, page):
+    def __init__(self, page, tracing_factory=None):
         self.page = page
+        self.tracing_factory = tracing_factory or FakeTracing
         self.contexts = []
         self.closed = False
 
     def new_context(self, viewport=None, locale=None):
-        context = FakeContext(self.page)
+        context = FakeContext(self.page, tracing=self.tracing_factory())
         self.contexts.append(
             {"viewport": viewport, "locale": locale, "context": context}
         )
@@ -259,8 +280,8 @@ class FakeBrowser:
 
 
 class FakeChromium:
-    def __init__(self, page):
-        self.browser = FakeBrowser(page)
+    def __init__(self, page, tracing_factory=None):
+        self.browser = FakeBrowser(page, tracing_factory=tracing_factory)
         self.launches = []
 
     def launch(self, headless=True):
@@ -269,13 +290,13 @@ class FakeChromium:
 
 
 class FakePlaywright:
-    def __init__(self, page):
-        self.chromium = FakeChromium(page)
+    def __init__(self, page, tracing_factory=None):
+        self.chromium = FakeChromium(page, tracing_factory=tracing_factory)
 
 
 class FakePlaywrightManager:
-    def __init__(self, page):
-        self.playwright = FakePlaywright(page)
+    def __init__(self, page, tracing_factory=None):
+        self.playwright = FakePlaywright(page, tracing_factory=tracing_factory)
         self.exited = False
 
     def __enter__(self):
@@ -286,8 +307,8 @@ class FakePlaywrightManager:
 
 
 class BrowserDriverTests(unittest.TestCase):
-    def make_driver(self, artifacts_root, page):
-        manager = FakePlaywrightManager(page)
+    def make_driver(self, artifacts_root, page, tracing_factory=None):
+        manager = FakePlaywrightManager(page, tracing_factory=tracing_factory)
         driver = BrowserDriver(
             artifacts_root=artifacts_root,
             base_url="http://localhost:8096",
@@ -673,6 +694,46 @@ class BrowserDriverTests(unittest.TestCase):
 
             self.assertTrue(manager.playwright.chromium.browser.closed)
             self.assertTrue(manager.exited)
+
+    def test_tracing_starts_and_stops_when_configured(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            driver, manager = self.make_driver(temp_dir, page)
+            trace_path = Path(temp_dir) / "browser_replay" / "original_trace.zip"
+            driver.configure_tracing(trace_path=trace_path)
+
+            result = driver.run({"actions": [{"type": "wait_for", "selector": "body"}]})
+            driver.close()
+
+            context = manager.playwright.chromium.browser.contexts[0]["context"]
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(
+                context.tracing.starts,
+                [{"screenshots": True, "snapshots": True, "sources": True}],
+            )
+            self.assertEqual(context.tracing.stops, [str(trace_path.resolve())])
+            self.assertTrue(trace_path.is_file())
+            self.assertEqual(driver.trace_state()["status"], "recorded")
+
+    def test_tracing_errors_are_captured_without_failing_browser_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page = FakePage()
+            driver, _ = self.make_driver(
+                temp_dir,
+                page,
+                tracing_factory=lambda: FakeTracing(
+                    start_error=RuntimeError("trace start failed")
+                ),
+            )
+            driver.configure_tracing(
+                trace_path=Path(temp_dir) / "browser_replay" / "original_trace.zip"
+            )
+
+            result = driver.run({"actions": [{"type": "wait_for", "selector": "body"}]})
+
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(driver.trace_state()["status"], "error")
+            self.assertIn("trace start failed", driver.trace_state()["error"])
 
     def test_launch_uses_browser_visibility_env(self):
         with tempfile.TemporaryDirectory() as temp_dir:

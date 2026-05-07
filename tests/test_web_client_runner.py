@@ -1098,6 +1098,94 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertEqual(final["status"], "pass")
             self.assertEqual(browser_driver.runs, [])
 
+    def test_session_writes_replay_manifest_with_actions_and_schema_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "replay-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+            runner.session(
+                {
+                    "command": "action",
+                    "request_id": "goto-1",
+                    "action": {"type": "goto"},
+                }
+            )
+            schema_error = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "bad-click",
+                    "action": {"type": "click", "selector": "#legacy"},
+                }
+            )
+            runner.session(
+                {
+                    "command": "action",
+                    "request_id": "shot-1",
+                    "action": {"type": "screenshot", "label": "home"},
+                }
+            )
+            runner.session(
+                {
+                    "command": "finalize",
+                    "request_id": "finalize-1",
+                }
+            )
+
+            manifest_path = (
+                Path(temp_dir)
+                / "replay-run"
+                / "browser_replay"
+                / "replay_manifest.json"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            commands = manifest["commands"]
+            replayable = [command for command in commands if command["replayable"]]
+            schema_errors = [
+                command
+                for command in commands
+                if command.get("schema_path") == "$.action.selector"
+            ]
+
+            self.assertEqual(schema_error["error_code"], "schema_error")
+            self.assertEqual(
+                [item["action"]["type"] for item in replayable],
+                ["goto", "screenshot"],
+            )
+            self.assertEqual(len(schema_errors), 1)
+            self.assertFalse(schema_errors[0]["replayable"])
+            self.assertTrue(
+                Path(
+                    temp_dir,
+                    "replay-run",
+                    "browser_replay",
+                    "replay_browser_session.py",
+                ).is_file()
+            )
+            self.assertTrue(
+                Path(
+                    temp_dir,
+                    "replay-run",
+                    "browser_replay",
+                    "README.md",
+                ).is_file()
+            )
+            self.assertEqual(len(browser_driver.runs), 2)
+
     def test_session_no_progress_blocks_after_repeated_equivalent_failures(self):
         def failed_browser():
             return {

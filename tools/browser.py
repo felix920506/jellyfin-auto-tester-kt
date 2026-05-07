@@ -173,12 +173,16 @@ class BrowserDriver:
         run_id: str | None = None,
         playwright_factory: Any | None = None,
         locale: str | None = None,
+        headless: bool | None = None,
+        slow_mo_ms: int | None = None,
     ) -> None:
         self.artifacts_root = Path(artifacts_root or DEFAULT_ARTIFACTS_ROOT).resolve()
         self.base_url = base_url or "http://localhost:8096"
         self.run_id = run_id
         self._playwright_factory = playwright_factory
         self.locale = browser_locale(locale)
+        self.headless = headless
+        self.slow_mo_ms = slow_mo_ms
         self._playwright_cm: Any | None = None
         self._playwright: Any | None = None
         self._browser: Any | None = None
@@ -188,6 +192,11 @@ class BrowserDriver:
         self._locale: str | None = None
         self._console_messages: list[dict[str, Any]] = []
         self._failed_network: list[dict[str, Any]] = []
+        self._trace_enabled = False
+        self._trace_path: Path | None = None
+        self._trace_started = False
+        self._trace_stopped = False
+        self._trace_error: str | None = None
 
     def configure(
         self,
@@ -201,6 +210,55 @@ class BrowserDriver:
             self.run_id = run_id
         if locale is not None:
             self.locale = browser_locale(locale)
+
+    def configure_browser(
+        self,
+        *,
+        headless: bool | None = None,
+        slow_mo_ms: int | None = None,
+    ) -> None:
+        """Configure browser launch options for the next session."""
+
+        self.headless = headless
+        self.slow_mo_ms = slow_mo_ms
+
+    def configure_tracing(
+        self,
+        trace_path: str | Path | None,
+        *,
+        enabled: bool = True,
+    ) -> None:
+        """Enable Playwright trace recording for the current browser context."""
+
+        self._trace_enabled = bool(enabled and trace_path)
+        self._trace_path = Path(trace_path).expanduser().resolve() if trace_path else None
+        self._trace_started = False
+        self._trace_stopped = False
+        self._trace_error = None
+        if self._context is not None:
+            self._start_tracing()
+
+    def trace_state(self) -> dict[str, Any]:
+        """Return trace recording metadata for replay manifests."""
+
+        status = "disabled"
+        if self._trace_enabled:
+            if self._trace_error:
+                status = "error"
+            elif self._trace_stopped:
+                status = "recorded"
+            elif self._trace_started:
+                status = "recording"
+            else:
+                status = "pending"
+        return {
+            "enabled": self._trace_enabled,
+            "path": str(self._trace_path) if self._trace_path else None,
+            "status": status,
+            "started": self._trace_started,
+            "stopped": self._trace_stopped,
+            "error": self._trace_error,
+        }
 
     def run(
         self,
@@ -274,6 +332,7 @@ class BrowserDriver:
     def close(self) -> None:
         """Close the persistent browser session."""
 
+        self._stop_tracing()
         for target in (self._context, self._browser):
             if target is None:
                 continue
@@ -301,6 +360,7 @@ class BrowserDriver:
         ):
             return self._page
         if self._context is not None:
+            self._stop_tracing()
             try:
                 self._context.close()
             except Exception:
@@ -314,16 +374,79 @@ class BrowserDriver:
             self._playwright_cm = factory()
             self._playwright = self._playwright_cm.__enter__()
         if self._browser is None:
-            self._browser = self._playwright.chromium.launch(
-                headless=browser_should_run_headless()
-            )
+            self._browser = self._launch_browser()
 
         self._context = self._browser.new_context(viewport=viewport, locale=locale)
+        self._start_tracing()
         self._page = self._context.new_page()
         self._viewport = viewport
         self._locale = locale
         self._register_page_handlers(self._page)
         return self._page
+
+    def _launch_browser(self) -> Any:
+        headless = (
+            browser_should_run_headless()
+            if self.headless is None
+            else bool(self.headless)
+        )
+        launch_kwargs: dict[str, Any] = {"headless": headless}
+        if self.slow_mo_ms is not None and int(self.slow_mo_ms) > 0:
+            launch_kwargs["slow_mo"] = int(self.slow_mo_ms)
+        try:
+            return self._playwright.chromium.launch(**launch_kwargs)
+        except TypeError:
+            launch_kwargs.pop("slow_mo", None)
+            return self._playwright.chromium.launch(**launch_kwargs)
+
+    def _start_tracing(self) -> None:
+        if (
+            not self._trace_enabled
+            or self._context is None
+            or self._trace_started
+            or self._trace_stopped
+        ):
+            return
+        tracing = getattr(self._context, "tracing", None)
+        if tracing is None or not hasattr(tracing, "start"):
+            self._record_trace_error("Playwright tracing is not available")
+            return
+        try:
+            tracing.start(screenshots=True, snapshots=True, sources=True)
+            self._trace_started = True
+        except Exception as exc:
+            self._record_trace_error(f"failed to start Playwright trace: {exc}")
+
+    def _stop_tracing(self) -> None:
+        if (
+            not self._trace_enabled
+            or self._context is None
+            or not self._trace_started
+            or self._trace_stopped
+        ):
+            return
+        tracing = getattr(self._context, "tracing", None)
+        if tracing is None or not hasattr(tracing, "stop"):
+            self._record_trace_error("Playwright tracing stop is not available")
+            self._trace_stopped = True
+            return
+        if self._trace_path is None:
+            self._record_trace_error("Playwright trace path is not configured")
+            self._trace_stopped = True
+            return
+        try:
+            self._trace_path.parent.mkdir(parents=True, exist_ok=True)
+            tracing.stop(path=str(self._trace_path))
+            self._trace_stopped = True
+        except Exception as exc:
+            self._record_trace_error(f"failed to stop Playwright trace: {exc}")
+            self._trace_stopped = True
+
+    def _record_trace_error(self, message: str) -> None:
+        if self._trace_error:
+            self._trace_error = f"{self._trace_error}; {message}"
+        else:
+            self._trace_error = message
 
     def _register_page_handlers(self, page: Any) -> None:
         _safe_on(page, "console", self._handle_console)

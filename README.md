@@ -125,6 +125,12 @@ inside actions, path/url, waits, labels, viewport, and explicit `refresh`). It
 cannot change prerequisites, Docker image, non-browser steps, roles, expected
 outcomes, or success criteria.
 
+Every `web_client_session` run writes replay artifacts under
+`<run>/browser_replay/`: `replay_manifest.json`, `replay_browser_session.py`,
+`README.md`, and `original_trace.zip` when Playwright tracing is available.
+Run the generated script to re-execute accepted browser actions, or inspect the
+trace with `playwright show-trace`.
+
 ```bash
 .venv/bin/python main.py --stage analysis URL VERSION --out debug/stage1
 
