@@ -139,10 +139,11 @@ does not read `transcript.json`; it replays accepted browser actions from
 Schema-invalid calls, `start`, `advance_step`, and `finalize` are printed as
 skipped audit events.
 
-Use the generated script from a completed run:
+Run the utility directly with a manifest:
 
 ```bash
-.venv/bin/python artifacts/RUN_ID/browser_replay/replay_browser_session.py \
+.venv/bin/python -m utils.browser_replay \
+  artifacts/RUN_ID/browser_replay/replay_manifest.json \
   --base-url http://localhost:8096 \
   --headless true \
   --slow-mo-ms 250 \
@@ -152,20 +153,24 @@ Use the generated script from a completed run:
 For example, this replays the actions captured in `debug/stage2web-test5-7`:
 
 ```bash
-.venv/bin/python \
-  debug/stage2web-test5-7/web-client-60400220-d40a-4af9-91fd-3b88f909d4cf/browser_replay/replay_browser_session.py \
+.venv/bin/python -m utils.browser_replay \
+  debug/stage2web-test5-7/web-client-60400220-d40a-4af9-91fd-3b88f909d4cf/browser_replay/replay_manifest.json \
   --base-url https://demo.jellyfin.org/stable \
   --headless true \
   --stop-on-failure
 ```
 
-Or call the utility module directly with an explicit manifest:
+New replay artifact directories also include a generated convenience script:
 
 ```bash
-.venv/bin/python -m utils.browser_replay \
-  artifacts/RUN_ID/browser_replay/replay_manifest.json \
-  --base-url http://localhost:8096
+.venv/bin/python artifacts/RUN_ID/browser_replay/replay_browser_session.py \
+  --base-url http://localhost:8096 \
+  --headless true
 ```
+
+Older artifacts generated before the replay utility moved to `utils/` may have
+a stale generated-script import. In that case, use the `python -m
+utils.browser_replay .../replay_manifest.json` form above.
 
 If `--base-url` is omitted, replay uses the manifest's original base URL. The
 target Jellyfin server must already be running and reachable. Replay output is

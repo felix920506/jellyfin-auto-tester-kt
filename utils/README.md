@@ -10,10 +10,11 @@ from a run's `browser_replay/replay_manifest.json`. It is useful when you want
 to manually check that a browser workflow can be repeated without reading the
 LLM transcript.
 
-Run the generated per-run script:
+Run the utility directly with a manifest:
 
 ```bash
-.venv/bin/python artifacts/RUN_ID/browser_replay/replay_browser_session.py \
+.venv/bin/python -m utils.browser_replay \
+  artifacts/RUN_ID/browser_replay/replay_manifest.json \
   --base-url http://localhost:8096
 ```
 
@@ -21,22 +22,26 @@ For example, this replays the browser actions captured in
 `debug/stage2web-test5-7` against the original Jellyfin demo server:
 
 ```bash
-.venv/bin/python \
-  debug/stage2web-test5-7/web-client-60400220-d40a-4af9-91fd-3b88f909d4cf/browser_replay/replay_browser_session.py \
+.venv/bin/python -m utils.browser_replay \
+  debug/stage2web-test5-7/web-client-60400220-d40a-4af9-91fd-3b88f909d4cf/browser_replay/replay_manifest.json \
   --base-url https://demo.jellyfin.org/stable \
   --headless true \
   --stop-on-failure
 ```
 
-Or run the utility directly:
+New replay artifact directories also include a generated convenience script:
 
 ```bash
-.venv/bin/python -m utils.browser_replay \
-  artifacts/RUN_ID/browser_replay/replay_manifest.json \
+.venv/bin/python artifacts/RUN_ID/browser_replay/replay_browser_session.py \
+  --base-url http://localhost:8096 \
   --headless true \
   --slow-mo-ms 250 \
   --stop-on-failure
 ```
+
+Older artifacts generated before the replay utility moved to `utils/` may have
+a stale generated-script import. In that case, use the `python -m
+utils.browser_replay .../replay_manifest.json` form above.
 
 Options:
 
