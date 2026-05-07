@@ -17,6 +17,17 @@ Run the generated per-run script:
   --base-url http://localhost:8096
 ```
 
+For example, this replays the browser actions captured in
+`debug/stage2web-test5-7` against the original Jellyfin demo server:
+
+```bash
+.venv/bin/python \
+  debug/stage2web-test5-7/web-client-60400220-d40a-4af9-91fd-3b88f909d4cf/browser_replay/replay_browser_session.py \
+  --base-url https://demo.jellyfin.org/stable \
+  --headless true \
+  --stop-on-failure
+```
+
 Or run the utility directly:
 
 ```bash
@@ -36,6 +47,13 @@ Options:
 
 The Jellyfin server must already be running. Replay output is written under
 `browser_replay/replay-runs/<timestamp>/`.
+
+To inspect the original visual trace for the same example run:
+
+```bash
+.venv/bin/python -m playwright show-trace \
+  debug/stage2web-test5-7/web-client-60400220-d40a-4af9-91fd-3b88f909d4cf/browser_replay/original_trace.zip
+```
 
 ## Transcript Viewer
 

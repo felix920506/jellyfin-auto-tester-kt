@@ -149,6 +149,16 @@ Use the generated script from a completed run:
   --stop-on-failure
 ```
 
+For example, this replays the actions captured in `debug/stage2web-test5-7`:
+
+```bash
+.venv/bin/python \
+  debug/stage2web-test5-7/web-client-60400220-d40a-4af9-91fd-3b88f909d4cf/browser_replay/replay_browser_session.py \
+  --base-url https://demo.jellyfin.org/stable \
+  --headless true \
+  --stop-on-failure
+```
+
 Or call the utility module directly with an explicit manifest:
 
 ```bash
@@ -168,6 +178,13 @@ To inspect the original visual trace instead of re-executing actions:
 ```bash
 .venv/bin/python -m playwright show-trace \
   artifacts/RUN_ID/browser_replay/original_trace.zip
+```
+
+For the `debug/stage2web-test5-7` example trace:
+
+```bash
+.venv/bin/python -m playwright show-trace \
+  debug/stage2web-test5-7/web-client-60400220-d40a-4af9-91fd-3b88f909d4cf/browser_replay/original_trace.zip
 ```
 
 ```bash
