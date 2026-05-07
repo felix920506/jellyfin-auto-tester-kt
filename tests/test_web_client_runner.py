@@ -434,6 +434,134 @@ class WebClientRunnerTests(unittest.TestCase):
             self.assertTrue(Path(temp_dir, "inline-plan-run", "plan.json").is_file())
             self.assertEqual(final["overall_result"], "reproduced")
 
+    def test_session_generates_request_ids_when_omitted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+
+            start = runner.session(
+                {
+                    "command": "start",
+                    "run_id": "session-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+            first_action = runner.session(
+                {
+                    "command": "action",
+                    "action": {"type": "goto"},
+                }
+            )
+            second_action = runner.session(
+                {
+                    "command": "action",
+                    "action": {"type": "screenshot", "label": "home"},
+                }
+            )
+            final = runner.session({"command": "finalize"})
+
+            self.assertEqual(start["request_id"], "start-1")
+            self.assertEqual(first_action["request_id"], "action-1")
+            self.assertEqual(second_action["request_id"], "action-2")
+            self.assertEqual(final["request_id"], "finalize-1")
+            self.assertEqual(final["status"], "pass")
+            artifacts_dir = Path(temp_dir, "session-run")
+            for request_id in ("start-1", "action-1", "action-2", "finalize-1"):
+                self.assertTrue(
+                    Path(
+                        artifacts_dir,
+                        f"web_client_session_{request_id}.json",
+                    ).is_file()
+                )
+                self.assertTrue(
+                    Path(
+                        artifacts_dir,
+                        f"web_client_result_{request_id}.json",
+                    ).is_file()
+                )
+            start_payload = json.loads(
+                Path(artifacts_dir, "web_client_session_start-1.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+            self.assertEqual(start_payload["request_id"], "start-1")
+
+    def test_session_preserves_explicit_request_id_for_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=FakeBrowserDriver(temp_dir),
+            )
+
+            start = runner.session(
+                {
+                    "command": "start",
+                    "request_id": "caller-start",
+                    "run_id": "explicit-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+            final = runner.session(
+                {
+                    "command": "finalize",
+                    "request_id": "caller-finalize",
+                }
+            )
+
+            self.assertEqual(start["request_id"], "caller-start")
+            self.assertEqual(final["request_id"], "caller-finalize")
+            self.assertTrue(
+                Path(
+                    temp_dir,
+                    "explicit-run",
+                    "web_client_session_caller-start.json",
+                ).is_file()
+            )
+            self.assertTrue(
+                Path(
+                    temp_dir,
+                    "explicit-run",
+                    "web_client_result_caller-finalize.json",
+                ).is_file()
+            )
+
+    def test_session_rejects_explicit_empty_request_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir)
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+
+            result = runner.session(
+                {
+                    "command": "start",
+                    "request_id": "",
+                    "run_id": "empty-id-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["error_code"], "schema_error")
+            self.assertEqual(result["schema_path"], "$.request_id")
+            self.assertEqual(browser_driver.configures, [])
+
     def test_session_action_runs_exactly_one_plan_backed_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = FakeBrowserDriver(temp_dir)

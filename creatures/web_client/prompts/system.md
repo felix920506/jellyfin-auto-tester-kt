@@ -26,7 +26,6 @@ directly in the block body, with no `@@request=` argument:
 [/web_client_session]
 {
   "command": "action",
-  "request_id": "click-player-favorite",
   "action": {
     "type": "click",
     "target": {

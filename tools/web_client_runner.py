@@ -80,8 +80,7 @@ LOGGER = logging.getLogger(
 )
 CANONICAL_WEB_CLIENT_SESSION_SHAPE = (
     "[/web_client_session]\n"
-    '{"command":"action","request_id":"click-player-favorite",'
-    '"action":{"type":"click","target":{"kind":"control",'
+    '{"command":"action","action":{"type":"click","target":{"kind":"control",'
     '"name":"Add to favorites","scope":"player"}}}\n'
     "[web_client_session/]"
 )
@@ -235,6 +234,8 @@ class WebClientRunner:
         self.uuid_factory = uuid_factory
         self._task_sessions: dict[str, _TaskBrowserSession] = {}
         self._web_session: _WebClientSession | None = None
+        self._web_session_request_counters: dict[str, int] = {}
+        self._web_session_request_ids: set[str] = set()
 
     def execute_plan(
         self,
@@ -651,7 +652,19 @@ class WebClientRunner:
     ) -> dict[str, Any]:
         """Run one command in the unified LLM-facing browser session contract."""
 
-        payload = dict(request or kwargs)
+        if request is None:
+            payload = dict(kwargs)
+        elif isinstance(request, Mapping):
+            payload = dict(request)
+        else:
+            result = _web_client_schema_error(
+                request_id="unknown",
+                path="$",
+                message="web_client_session request must be an object",
+            )
+            return result
+
+        self._normalize_session_request_id(payload)
         request_id_value = payload.get("request_id")
         request_id = str(request_id_value or "unknown")
         command = str(payload.get("command") or "").strip().lower()
@@ -732,6 +745,30 @@ class WebClientRunner:
             result = _web_client_error(request_id, str(exc))
             self._write_session_result_if_possible(payload, result)
             return result
+
+    def _normalize_session_request_id(self, payload: dict[str, Any]) -> None:
+        command = str(payload.get("command") or "").strip().lower()
+        if command == "start" and self._web_session is None:
+            self._web_session_request_counters = {}
+            self._web_session_request_ids = set()
+
+        if "request_id" not in payload:
+            payload["request_id"] = self._next_web_session_request_id(command)
+            return
+
+        request_id = payload.get("request_id")
+        if isinstance(request_id, str) and request_id.strip():
+            self._web_session_request_ids.add(request_id)
+
+    def _next_web_session_request_id(self, command: str) -> str:
+        prefix = command if command in SESSION_FIELDS_BY_COMMAND else "request"
+        while True:
+            next_value = self._web_session_request_counters.get(prefix, 0) + 1
+            self._web_session_request_counters[prefix] = next_value
+            request_id = f"{prefix}-{next_value}"
+            if request_id not in self._web_session_request_ids:
+                self._web_session_request_ids.add(request_id)
+                return request_id
 
     def _run_browser_action_attempt(
         self,
@@ -2359,12 +2396,13 @@ def _validate_session_request(payload: Mapping[str, Any]) -> dict[str, str] | No
     if unknown:
         return _schema_field_error(f"$.{unknown[0]}")
 
-    request_id = payload.get("request_id")
-    if not isinstance(request_id, str) or not request_id.strip():
-        return {
-            "path": "$.request_id",
-            "message": "request_id is required and must be a non-empty string",
-        }
+    if "request_id" in payload:
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str) or not request_id.strip():
+            return {
+                "path": "$.request_id",
+                "message": "request_id must be a non-empty string when provided",
+            }
 
     command = payload.get("command")
     if not isinstance(command, str) or not command.strip():

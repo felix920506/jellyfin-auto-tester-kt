@@ -226,17 +226,14 @@ class BrowserContractTests(unittest.TestCase):
     def test_web_client_session_schema_accepts_session_commands(self):
         start_plan_request = {
             "command": "start",
-            "request_id": "request-1",
             "plan_markdown": "# ReproductionPlan Markdown v1\n\n...",
         }
         start_task_request = {
             "command": "start",
-            "request_id": "request-2",
             "base_url": "http://localhost:8096",
         }
         action_request = {
             "command": "action",
-            "request_id": "request-3",
             "action": {"type": "screenshot", "label": "home"},
             "step_id": 1,
             "role": "trigger",
@@ -244,6 +241,10 @@ class BrowserContractTests(unittest.TestCase):
             "selector_assertions": [{"selector": "body", "state": "visible"}],
         }
         finalize_request = {
+            "command": "finalize",
+            "overall_result": "inconclusive",
+        }
+        explicit_request = {
             "command": "finalize",
             "request_id": "request-4",
             "overall_result": "inconclusive",
@@ -256,10 +257,17 @@ class BrowserContractTests(unittest.TestCase):
             start_task_request,
             action_request,
             finalize_request,
+            explicit_request,
         ):
             errors.extend(validator.iter_errors({"request": request}))
 
         self.assertEqual(sorted(errors, key=lambda error: error.path), [])
+
+        empty_request_id = {
+            "command": "finalize",
+            "request_id": "",
+        }
+        self.assertTrue(list(validator.iter_errors({"request": empty_request_id})))
 
     def test_web_client_session_schema_rejects_multi_action_payloads(self):
         validator = Draft202012Validator(load_schema("web_client_session.json"))
@@ -453,6 +461,7 @@ class BrowserContractTests(unittest.TestCase):
         self.assertIn("Do not use local filesystem paths", web_client_prompt)
         self.assertIn('command: "finalize"', web_client_prompt)
         self.assertIn("There is only one active web-client session", web_client_prompt)
+        self.assertNotIn("request_id", web_client_prompt)
         self.assertNotIn("session_id", web_client_prompt)
 
     def test_web_client_tool_contract_uses_valid_tool_names(self):
