@@ -8,7 +8,7 @@ Repository scaffold for a three-stage Jellyfin issue reproduction pipeline.
 - `creatures/execution/` - Stage 2 execution agent files.
 - `creatures/report/` - Stage 3 report agent files.
 - `tools/` - Reusable Python utilities for Docker, GitHub, and Jellyfin API.
-- `transcript-viewer/` - Standalone web app for viewing execution transcripts.
+- `utils/` - Manual verification utilities, including browser replay and the transcript viewer.
 - `schemas/` - Shared JSON schemas for inter-stage messages.
 - `artifacts/` - Runtime output directory (ignored by Git).
 - `debug/` - Default output directory for manual stage execution.
@@ -48,7 +48,7 @@ cp .env.example .env
 
 The repository includes a standalone web application to view execution transcripts:
 
-1. Open `transcript-viewer/index.html` in a web browser.
+1. Open `utils/transcript-viewer/index.html` in a web browser.
 2. Click **"Select Debug Folder"** and choose the `debug/` directory.
 3. Select a transcript from the sidebar to view the conversation and tool calls.
 

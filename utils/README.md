@@ -36,3 +36,12 @@ Options:
 
 The Jellyfin server must already be running. Replay output is written under
 `browser_replay/replay-runs/<timestamp>/`.
+
+## Transcript Viewer
+
+`utils/transcript-viewer/` is a standalone browser app for inspecting pipeline
+transcripts without running a local server.
+
+Open `utils/transcript-viewer/index.html` in a browser, then choose the project
+`debug/` directory in the file picker. The viewer lists all `transcript.json`
+files it finds and loads adjacent `transcript_metadata.json` files when present.
