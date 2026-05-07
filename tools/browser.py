@@ -41,6 +41,7 @@ MEDIA_STATE_SCRIPT = """() => Array.from(document.querySelectorAll('audio, video
 DOM_SUMMARY_SCRIPT = """() => {
   const body = document.body;
   const text = body ? body.innerText.replace(/\\s+/g, ' ').trim().slice(0, 2000) : '';
+  const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
   const buttons = Array.from(document.querySelectorAll('button,[role="button"]'))
     .slice(0, 20)
     .map((el) => (el.innerText || el.getAttribute('aria-label') || el.id || '').trim())
@@ -54,12 +55,17 @@ DOM_SUMMARY_SCRIPT = """() => {
       label: el.getAttribute('aria-label'),
       placeholder: el.getAttribute('placeholder')
     }));
+  const headings = Array.from(document.querySelectorAll('h1,h2,[role="heading"]'))
+    .slice(0, 10)
+    .map((el) => clean(el.innerText || el.textContent || el.getAttribute('aria-label')))
+    .filter(Boolean);
   return {
     title: document.title,
     url: location.href,
     text,
     buttons,
     inputs,
+    headings,
     media_count: document.querySelectorAll('audio, video').length
   };
 }"""
@@ -87,6 +93,9 @@ CONTROL_INVENTORY_SCRIPT = """() => {
   const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
   const classes = (el) => Array.from(el.classList || []).filter(Boolean).slice(0, 12);
   const scopeFor = (el) => {
+    if (el.closest('[role="dialog"], dialog, .dialogContainer')) return 'modal';
+    if (el.closest('.actionSheet, .actionsheet')) return 'action_sheet';
+    if (el.closest('.detailPagePrimaryContainer, .itemDetailPage, .detailPageContent')) return 'detail';
     if (el.closest('.nowPlayingBar')) return 'player';
     if (el.closest('.mainDrawer')) return 'drawer';
     if (el.closest('.skinHeader')) return 'header';
@@ -116,6 +125,10 @@ CONTROL_INVENTORY_SCRIPT = """() => {
       data_action: el.getAttribute('data-action'),
       data_id: el.getAttribute('data-id') || el.getAttribute('data-itemid'),
       data_isfavorite: el.getAttribute('data-isfavorite'),
+      aria_current: el.getAttribute('aria-current'),
+      aria_selected: el.getAttribute('aria-selected'),
+      aria_pressed: el.getAttribute('aria-pressed'),
+      aria_expanded: el.getAttribute('aria-expanded'),
       scope,
       selector: `[data-jfat-target-id="${targetId}"]`,
       target: { kind, name }
@@ -1164,6 +1177,8 @@ def _format_dom_summary(payload: Mapping[str, Any]) -> str:
         parts.append(f"buttons={json.dumps(payload.get('buttons'), ensure_ascii=True)}")
     if payload.get("inputs"):
         parts.append(f"inputs={json.dumps(payload.get('inputs'), ensure_ascii=True, sort_keys=True)}")
+    if payload.get("headings"):
+        parts.append(f"headings={json.dumps(payload.get('headings'), ensure_ascii=True)}")
     parts.append(f"media_count={payload.get('media_count', 0)}")
     if payload.get("text"):
         parts.append(f"text={payload.get('text')!r}")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -307,6 +308,12 @@ class _WebClientSession:
     no_progress_failures: int = 0
     no_progress_signature: dict[str, Any] | None = None
     no_progress_blocked: bool = False
+    llm_latest_browser_state: dict[str, Any] | None = None
+    llm_latest_page_snapshot: dict[str, Any] | None = None
+    llm_latest_page_source_request_id: str | None = None
+    llm_latest_page_fingerprint: dict[str, Any] | None = None
+    llm_latest_compact_targets: dict[str, list[dict[str, Any]]] | None = None
+    llm_latest_media_state: dict[str, Any] | None = None
 
 
 class WebClientRunner:
@@ -1387,11 +1394,16 @@ class WebClientRunner:
             ended_at=attempt_ended.isoformat(),
             duration_ms=_duration_ms(attempt_started, attempt_ended),
         )
-        _write_json(
-            session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
-            result,
+        raw_result_path = (
+            session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json"
         )
-        return result
+        _write_json(raw_result_path, result)
+        return _llm_web_client_action_result(
+            session=session,
+            result=result,
+            action=action,
+            raw_result_path=raw_result_path,
+        )
 
     def _run_tracked_web_client_action(
         self,
@@ -1593,11 +1605,15 @@ class WebClientRunner:
             result=result,
             reason="advance_step updates runner state but is not a browser action",
         )
-        _write_json(
-            session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json",
-            result,
+        raw_result_path = (
+            session.artifacts_dir / f"web_client_result_{_safe_label(request_id)}.json"
         )
-        return result
+        _write_json(raw_result_path, result)
+        return _llm_web_client_advance_result(
+            session=session,
+            result=result,
+            raw_result_path=raw_result_path,
+        )
 
     def _finalize_web_client_session(
         self,
@@ -3625,6 +3641,701 @@ VERBOSE_BROWSER_FIELDS = (
     "failed_network",
     "media_state",
 )
+
+
+LLM_RESULT_FLAG_FIELDS = (
+    "error_code",
+    "no_progress",
+    "requires_finalize",
+    "recommended_overall_result",
+    "schema_error_count",
+)
+LLM_TARGET_GROUPS = (
+    ("controls", "visible_controls", "control"),
+    ("links", "visible_links", "link"),
+    ("player_controls", "player_controls", "player_control"),
+)
+LLM_ACTIVE_NAV_SCOPES = {"drawer", "header", "nav", "navigation", "sidebar", "tab"}
+LLM_MAJOR_SURFACE_SCOPES = {
+    "action_sheet": "action_sheet",
+    "actionsheet": "action_sheet",
+    "sheet": "action_sheet",
+    "detail": "detail",
+    "detail_view": "detail",
+    "dialog": "modal",
+    "modal": "modal",
+}
+
+
+def _llm_web_client_action_result(
+    *,
+    session: _WebClientSession,
+    result: Mapping[str, Any],
+    action: Mapping[str, Any],
+    raw_result_path: Path,
+) -> dict[str, Any]:
+    """Return the compact, stateful payload sent back to the web-client LLM."""
+
+    browser = result.get("browser")
+    payload: dict[str, Any] = {
+        "request_id": result.get("request_id"),
+        "status": result.get("status"),
+        "run_id": session.run_id,
+        "action_result": _compact_action_result(result, action),
+    }
+    if result.get("error"):
+        payload["error"] = result.get("error")
+    _copy_llm_result_flags(result, payload)
+
+    if not isinstance(browser, Mapping):
+        page_ref = _latest_page_ref(session)
+        if page_ref:
+            payload["page_ref"] = page_ref
+        payload["artifacts"] = {"raw_result_path": str(raw_result_path)}
+        return _drop_empty(payload)
+
+    compact_targets = _compact_browser_targets(browser)
+    compact_media_state = _compact_media_state(browser.get("media_state"))
+    page_fingerprint = _browser_page_fingerprint(browser, compact_targets)
+    previous_fingerprint = session.llm_latest_page_fingerprint
+    previous_targets = session.llm_latest_compact_targets
+    previous_media_state = session.llm_latest_media_state
+    page_changed = previous_fingerprint is None or page_fingerprint != previous_fingerprint
+    artifacts = _browser_artifacts(
+        result=result,
+        browser=browser,
+        raw_result_path=raw_result_path,
+    )
+
+    session.llm_latest_browser_state = deepcopy(dict(browser))
+    session.llm_latest_page_fingerprint = deepcopy(page_fingerprint)
+    session.llm_latest_compact_targets = deepcopy(compact_targets)
+    session.llm_latest_media_state = deepcopy(compact_media_state)
+
+    if page_changed:
+        page_snapshot = _compact_page_snapshot(
+            session=session,
+            request_id=str(result.get("request_id") or ""),
+            browser=browser,
+            targets=compact_targets,
+            media_state=compact_media_state,
+            artifacts=artifacts,
+        )
+        session.llm_latest_page_snapshot = deepcopy(page_snapshot)
+        session.llm_latest_page_source_request_id = str(result.get("request_id") or "")
+        payload["page_changed"] = True
+        payload["page_snapshot"] = page_snapshot
+    else:
+        payload["page_changed"] = False
+        page_ref = _latest_page_ref(session)
+        if page_ref:
+            payload["page_ref"] = page_ref
+        target_delta = _target_delta(previous_targets, compact_targets)
+        if _delta_has_changes(target_delta):
+            payload["target_delta"] = target_delta
+        media_state_delta = _media_state_delta(previous_media_state, compact_media_state)
+        if media_state_delta:
+            payload["media_state_delta"] = media_state_delta
+        payload["artifacts"] = artifacts
+
+    if session.step_tracker is not None:
+        payload["step_tracker"] = _llm_step_tracker_payload(session.step_tracker)
+    return _drop_empty(payload)
+
+
+def _llm_web_client_advance_result(
+    *,
+    session: _WebClientSession,
+    result: Mapping[str, Any],
+    raw_result_path: Path,
+) -> dict[str, Any]:
+    tracker = session.step_tracker
+    entry = result.get("execution_entry")
+    entry_map = entry if isinstance(entry, Mapping) else {}
+    result_step = result.get("advanced_step")
+    result_step_map = result_step if isinstance(result_step, Mapping) else {}
+    advanced_step = {
+        "step_id": entry_map.get("step_id") or result_step_map.get("step_id"),
+        "outcome": entry_map.get("outcome"),
+        "reason": entry_map.get("reason"),
+    }
+    payload: dict[str, Any] = {
+        "request_id": result.get("request_id"),
+        "status": result.get("status"),
+        "run_id": session.run_id,
+        "advanced_step": _drop_empty(advanced_step),
+        "current_step": _step_summary(tracker.current_step()) if tracker else None,
+        "progress": _llm_step_progress(tracker) if tracker else None,
+        "unchanged_since_last_action": True,
+        "artifacts": {"raw_result_path": str(raw_result_path)},
+    }
+    page_ref = _latest_page_ref(session)
+    if page_ref:
+        payload["page_ref"] = page_ref
+    elif session.llm_latest_browser_state is not None:
+        browser = session.llm_latest_browser_state
+        targets = session.llm_latest_compact_targets or _compact_browser_targets(browser)
+        media_state = session.llm_latest_media_state or _compact_media_state(
+            browser.get("media_state"),
+        )
+        artifacts = {"raw_result_path": str(raw_result_path)}
+        page_snapshot = _compact_page_snapshot(
+            session=session,
+            request_id=str(result.get("request_id") or ""),
+            browser=browser,
+            targets=targets,
+            media_state=media_state,
+            artifacts=artifacts,
+        )
+        session.llm_latest_page_snapshot = deepcopy(page_snapshot)
+        session.llm_latest_page_source_request_id = str(result.get("request_id") or "")
+        payload["page_ref"] = page_snapshot["page_ref"]
+        payload["page_snapshot"] = page_snapshot
+    if result.get("error"):
+        payload["error"] = result.get("error")
+    _copy_llm_result_flags(result, payload)
+    return _drop_empty(payload)
+
+
+def _compact_page_snapshot(
+    *,
+    session: _WebClientSession,
+    request_id: str,
+    browser: Mapping[str, Any],
+    targets: Mapping[str, list[dict[str, Any]]],
+    media_state: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    return _drop_empty(
+        {
+            "page_ref": _page_ref(session.run_id, request_id),
+            "source_request_id": request_id,
+            "url": browser.get("final_url"),
+            "title": browser.get("title"),
+            "text_excerpt": _browser_text_excerpt(browser),
+            "media_state": deepcopy(dict(media_state)),
+            "targets": deepcopy(dict(targets)),
+            "artifacts": deepcopy(dict(artifacts)),
+        }
+    )
+
+
+def _compact_action_result(
+    result: Mapping[str, Any],
+    requested_action: Mapping[str, Any],
+) -> dict[str, Any]:
+    browser = result.get("browser")
+    browser_action: Mapping[str, Any] = {}
+    if isinstance(browser, Mapping):
+        actions = browser.get("actions")
+        if isinstance(actions, list):
+            for item in reversed(actions):
+                if isinstance(item, Mapping):
+                    browser_action = item
+                    break
+
+    tracked = result.get("tracked_action")
+    resolved_action = requested_action
+    if isinstance(tracked, Mapping) and isinstance(tracked.get("action"), Mapping):
+        resolved_action = tracked["action"]
+
+    payload: dict[str, Any] = {
+        "type": browser_action.get("type") or resolved_action.get("type"),
+        "status": browser_action.get("status") or result.get("status"),
+        "label": browser_action.get("label") or resolved_action.get("label"),
+    }
+    target = browser_action.get("target") or resolved_action.get("target")
+    if isinstance(target, Mapping):
+        payload["target"] = _compact_target_object(target)
+    action_error = browser_action.get("error") or result.get("error")
+    if action_error:
+        payload["error"] = action_error
+    if result.get("selector_states") and result.get("status") != "pass":
+        payload["selector_states"] = deepcopy(result.get("selector_states"))
+    if result.get("capture_values"):
+        payload["capture_values"] = deepcopy(result.get("capture_values"))
+    diagnostics = browser_action.get("target_diagnostics")
+    if diagnostics and action_error:
+        payload["target_diagnostics"] = _compact_target_diagnostics(diagnostics)
+    return _drop_empty(payload)
+
+
+def _browser_artifacts(
+    *,
+    result: Mapping[str, Any],
+    browser: Mapping[str, Any],
+    raw_result_path: Path,
+) -> dict[str, Any]:
+    artifacts: dict[str, Any] = {"raw_result_path": str(raw_result_path)}
+    screenshot_path = result.get("screenshot_path")
+    if screenshot_path:
+        artifacts["screenshot_path"] = screenshot_path
+    screenshot_paths = [
+        str(path)
+        for path in browser.get("screenshot_paths", []) or []
+        if path
+    ]
+    if screenshot_paths:
+        artifacts["screenshot_paths"] = screenshot_paths
+    browser_screenshots = result.get("browser_screenshots")
+    if browser_screenshots:
+        artifacts["browser_screenshots"] = deepcopy(browser_screenshots)
+    dom_path = browser.get("dom_path")
+    if dom_path:
+        artifacts["dom_path"] = dom_path
+    return artifacts
+
+
+def _compact_browser_targets(
+    browser: Mapping[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    targets: dict[str, list[dict[str, Any]]] = {}
+    for group_name, source_key, target_kind in LLM_TARGET_GROUPS:
+        records = browser.get(source_key)
+        if not isinstance(records, list):
+            targets[group_name] = []
+            continue
+        targets[group_name] = [
+            compact
+            for compact in (
+                _compact_target_record(record, target_kind)
+                for record in records[:40]
+                if isinstance(record, Mapping)
+            )
+            if compact
+        ]
+    return targets
+
+
+def _compact_target_record(
+    record: Mapping[str, Any],
+    target_kind: str,
+) -> dict[str, Any]:
+    name = _clean_compact_text(record.get("name"))
+    target = record.get("target") if isinstance(record.get("target"), Mapping) else {}
+    target_name = _clean_compact_text(target.get("name")) if target else None
+    if not name and target_name:
+        name = target_name
+    if not name:
+        return {}
+    scope = _clean_compact_text(record.get("scope"))
+    data_action = _clean_compact_text(record.get("data_action"))
+    data_id = _clean_compact_text(record.get("data_id"))
+    href_path = _compact_href(record.get("href"))
+    compact: dict[str, Any] = {
+        "target_id": _target_record_id(
+            target_kind=target_kind,
+            name=name,
+            scope=scope,
+            title=_clean_compact_text(record.get("title")),
+            aria_label=_clean_compact_text(record.get("aria_label")),
+            data_action=data_action,
+            data_id=data_id,
+            href_path=href_path,
+        ),
+        "kind": target_kind,
+        "name": name,
+        "scope": scope,
+        "target": _compact_target_object(target or {"kind": target_kind, "name": name}),
+        "title": _compact_distinct_text(record.get("title"), name),
+        "aria_label": _compact_distinct_text(record.get("aria_label"), name),
+        "data_action": data_action,
+        "data_id": data_id,
+        "data_isfavorite": _clean_compact_text(record.get("data_isfavorite")),
+        "aria_current": _clean_compact_text(record.get("aria_current")),
+        "aria_selected": _clean_compact_text(record.get("aria_selected")),
+        "aria_pressed": _clean_compact_text(record.get("aria_pressed")),
+        "aria_expanded": _clean_compact_text(record.get("aria_expanded")),
+        "href_path": href_path,
+    }
+    return _drop_empty(compact)
+
+
+def _compact_target_object(target: Mapping[str, Any]) -> dict[str, Any]:
+    compact = {
+        "kind": _clean_compact_text(target.get("kind")),
+        "name": _clean_compact_text(target.get("name")),
+        "scope": _clean_compact_text(target.get("scope")),
+    }
+    if compact.get("kind") == "css" and target.get("selector"):
+        compact["selector"] = str(target["selector"])
+    return _drop_empty(compact)
+
+
+def _compact_target_diagnostics(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in ("message", "match_count", "kind"):
+        if value.get(key) is not None:
+            compact[key] = deepcopy(value[key])
+    target = value.get("target")
+    if isinstance(target, Mapping):
+        compact["target"] = _compact_target_object(target)
+    candidates = value.get("candidates")
+    if isinstance(candidates, list):
+        compact_candidates = []
+        for candidate in candidates[:5]:
+            if isinstance(candidate, Mapping):
+                compact_candidates.append(
+                    _drop_empty(
+                        {
+                            "name": _clean_compact_text(candidate.get("name")),
+                            "title": _clean_compact_text(candidate.get("title")),
+                            "aria_label": _clean_compact_text(
+                                candidate.get("aria_label"),
+                            ),
+                            "scope": _clean_compact_text(candidate.get("scope")),
+                            "target": _compact_target_object(candidate.get("target"))
+                            if isinstance(candidate.get("target"), Mapping)
+                            else None,
+                        }
+                    )
+                )
+        if compact_candidates:
+            compact["candidates"] = compact_candidates
+        if len(candidates) > 5:
+            compact["candidates_truncated"] = len(candidates)
+    return _drop_empty(compact)
+
+
+def _compact_media_state(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {"state": "unknown", "element_count": 0}
+    elements = value.get("elements")
+    compact: dict[str, Any] = {
+        "state": value.get("state"),
+        "element_count": len(elements) if isinstance(elements, list) else 0,
+    }
+    if isinstance(elements, list) and elements:
+        compact["elements"] = [
+            _drop_empty(
+                {
+                    "tag": item.get("tag"),
+                    "id": item.get("id"),
+                    "paused": item.get("paused"),
+                    "ended": item.get("ended"),
+                    "error": item.get("error"),
+                    "readyState": item.get("readyState"),
+                    "currentTime": _rounded_number(item.get("currentTime")),
+                    "duration": _rounded_number(item.get("duration")),
+                }
+            )
+            for item in elements[:3]
+            if isinstance(item, Mapping)
+        ]
+    return _drop_empty(compact)
+
+
+def _browser_page_fingerprint(
+    browser: Mapping[str, Any],
+    targets: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    return {
+        "route": _page_route(browser.get("final_url")),
+        "title": _normalized_page_text(browser.get("title")),
+        "active_navigation": _active_navigation_signature(targets),
+        "view_identity": _browser_view_identity(browser),
+        "major_surface": _major_surface_signature(browser, targets),
+    }
+
+
+def _page_route(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    if not parsed.scheme and not parsed.netloc:
+        return text
+    route = parsed.path or "/"
+    if parsed.fragment:
+        route = f"{route}#{parsed.fragment}"
+    return f"{parsed.netloc}{route}" if parsed.netloc else route
+
+
+def _active_navigation_signature(
+    targets: Mapping[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    active = []
+    for target in _flatten_targets(targets):
+        scope = str(target.get("scope") or "").strip().lower()
+        if scope not in LLM_ACTIVE_NAV_SCOPES:
+            continue
+        active_fields = {
+            key: target.get(key)
+            for key in ("aria_current", "aria_selected", "aria_pressed")
+            if _truthy_aria_state(target.get(key))
+        }
+        if not active_fields:
+            continue
+        active.append(
+            {
+                "kind": target.get("kind"),
+                "name": target.get("name"),
+                "scope": target.get("scope"),
+                **active_fields,
+            }
+        )
+    return active
+
+
+def _browser_view_identity(browser: Mapping[str, Any]) -> str | None:
+    for key in ("view_identity", "main_heading", "heading", "active_view"):
+        value = _clean_compact_text(browser.get(key))
+        if value:
+            return value[:120]
+    headings = browser.get("headings")
+    if isinstance(headings, list):
+        for heading in headings:
+            value = _clean_compact_text(heading)
+            if value:
+                return value[:120]
+    summary = str(browser.get("dom_summary") or "")
+    match = re.search(r"(?:heading|main_heading)=['\"]([^'\"]+)['\"]", summary)
+    if match:
+        return _clean_compact_text(match.group(1))[:120]
+    headings_match = re.search(r"headings=(\[[^\]]+\])", summary)
+    if headings_match:
+        try:
+            parsed = json.loads(headings_match.group(1))
+        except json.JSONDecodeError:
+            parsed = []
+        if isinstance(parsed, list):
+            for heading in parsed:
+                value = _clean_compact_text(heading)
+                if value:
+                    return value[:120]
+    return None
+
+
+def _major_surface_signature(
+    browser: Mapping[str, Any],
+    targets: Mapping[str, list[dict[str, Any]]],
+) -> str:
+    explicit = _clean_compact_text(browser.get("major_surface"))
+    if explicit:
+        return LLM_MAJOR_SURFACE_SCOPES.get(explicit.lower(), explicit.lower())
+    scopes = {
+        str(target.get("scope") or "").strip().lower()
+        for target in _flatten_targets(targets)
+    }
+    for scope, surface in LLM_MAJOR_SURFACE_SCOPES.items():
+        if scope in scopes:
+            return surface
+    return "page"
+
+
+def _target_delta(
+    previous: Mapping[str, list[dict[str, Any]]] | None,
+    current: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    previous_by_id = _targets_by_id(previous or {})
+    current_by_id = _targets_by_id(current)
+    added = [
+        deepcopy(current_by_id[target_id])
+        for target_id in sorted(set(current_by_id) - set(previous_by_id))
+    ]
+    removed = [
+        deepcopy(previous_by_id[target_id])
+        for target_id in sorted(set(previous_by_id) - set(current_by_id))
+    ]
+    changed = []
+    for target_id in sorted(set(previous_by_id) & set(current_by_id)):
+        before = previous_by_id[target_id]
+        after = current_by_id[target_id]
+        if before != after:
+            changed.append({"target_id": target_id, "before": before, "after": after})
+    return {"added": added, "removed": removed, "changed": changed}
+
+
+def _media_state_delta(
+    previous: Mapping[str, Any] | None,
+    current: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    previous_dict = dict(previous or {})
+    current_dict = dict(current)
+    if previous is None or previous_dict == current_dict:
+        return None
+    return {"before": deepcopy(previous_dict), "after": deepcopy(current_dict)}
+
+
+def _targets_by_id(
+    targets: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    by_id = {}
+    for target in _flatten_targets(targets):
+        target_id = target.get("target_id")
+        if target_id:
+            by_id[str(target_id)] = deepcopy(target)
+    return by_id
+
+
+def _flatten_targets(
+    targets: Mapping[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    for group_name, _source_key, _target_kind in LLM_TARGET_GROUPS:
+        group = targets.get(group_name)
+        if isinstance(group, list):
+            flattened.extend(item for item in group if isinstance(item, dict))
+    return flattened
+
+
+def _delta_has_changes(delta: Mapping[str, Any]) -> bool:
+    return any(delta.get(key) for key in ("added", "removed", "changed"))
+
+
+def _llm_step_tracker_payload(tracker: _WebClientStepTracker) -> dict[str, Any]:
+    payload = _step_tracker_payload(tracker)
+    return {
+        "current_step": payload["current_step"],
+        "completed_step_ids": [
+            step.get("step_id")
+            for step in payload["completed_steps"]
+            if isinstance(step, Mapping)
+        ],
+        "total_steps": payload["total_steps"],
+        "action_index": payload["action_index"],
+        "actions_in_current_step": payload["actions_in_current_step"],
+        "all_steps_completed": payload["all_steps_completed"],
+    }
+
+
+def _llm_step_progress(
+    tracker: _WebClientStepTracker | None,
+) -> dict[str, Any] | None:
+    if tracker is None:
+        return None
+    payload = _llm_step_tracker_payload(tracker)
+    return {
+        "completed_step_ids": payload["completed_step_ids"],
+        "total_steps": payload["total_steps"],
+        "action_index": payload["action_index"],
+    }
+
+
+def _latest_page_ref(session: _WebClientSession) -> str | None:
+    snapshot = session.llm_latest_page_snapshot
+    if isinstance(snapshot, Mapping) and snapshot.get("page_ref"):
+        return str(snapshot["page_ref"])
+    return None
+
+
+def _page_ref(run_id: str, request_id: str) -> str:
+    return f"page:{run_id}:{request_id or 'unknown'}"
+
+
+def _browser_text_excerpt(browser: Mapping[str, Any], limit: int = 700) -> str | None:
+    text = browser.get("page_text") or browser.get("dom_summary")
+    if text is None:
+        return None
+    normalized = _clean_compact_text(text)
+    if not normalized:
+        return None
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
+
+def _target_record_id(
+    *,
+    target_kind: str,
+    name: str | None,
+    scope: str | None,
+    title: str | None,
+    aria_label: str | None,
+    data_action: str | None,
+    data_id: str | None,
+    href_path: str | None,
+) -> str:
+    payload = {
+        "kind": target_kind,
+        "name": _normalized_page_text(name),
+        "scope": _normalized_page_text(scope),
+        "title": _normalized_page_text(title),
+        "aria_label": _normalized_page_text(aria_label),
+        "data_action": _normalized_page_text(data_action),
+        "data_id": _normalized_page_text(data_id),
+        "href_path": href_path,
+    }
+    digest = hashlib.sha1(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
+    ).hexdigest()[:12]
+    return f"{target_kind}:{digest}"
+
+
+def _compact_href(value: Any) -> str | None:
+    text = _clean_compact_text(value)
+    if not text:
+        return None
+    parsed = urlparse(text)
+    if parsed.scheme or parsed.netloc:
+        path = parsed.path or "/"
+        if parsed.fragment:
+            path = f"{path}#{parsed.fragment}"
+        text = path
+    if len(text) > 100:
+        return None
+    return text
+
+
+def _compact_distinct_text(value: Any, name: str | None) -> str | None:
+    text = _clean_compact_text(value)
+    if not text or _normalized_page_text(text) == _normalized_page_text(name):
+        return None
+    return text
+
+
+def _clean_compact_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text or None
+
+
+def _normalized_page_text(value: Any) -> str | None:
+    text = _clean_compact_text(value)
+    return text.casefold() if text else None
+
+
+def _truthy_aria_state(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text and text not in {"false", "0", "none", "off"})
+
+
+def _rounded_number(value: Any) -> int | float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number.is_integer():
+        return int(number)
+    return round(number, 2)
+
+
+def _copy_llm_result_flags(
+    source: Mapping[str, Any],
+    target: dict[str, Any],
+) -> None:
+    for key in LLM_RESULT_FLAG_FIELDS:
+        if key in source:
+            target[key] = deepcopy(source[key])
+
+
+def _drop_empty(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _drop_empty(item)
+            for key, item in value.items()
+            if item is not None and item != {} and item != []
+        }
+    if isinstance(value, list):
+        return [_drop_empty(item) for item in value if item is not None]
+    return value
 
 
 def _trim_finalize_result(result: Mapping[str, Any]) -> dict[str, Any]:

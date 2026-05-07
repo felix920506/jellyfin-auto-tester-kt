@@ -114,10 +114,12 @@ response. After every action or `advance_step` you MUST stop generating, wait
 for the runner to return the JSON result, then decide the next command from
 that result.
 
-The action result includes the post-action page state (`final_url`,
-`visible_controls`, `visible_links`, `player_controls`, `dom_summary`,
-selector states). You cannot pick a correct next target without reading that
-state, so batching is unsafe — do not predict the result and continue.
+The action result is stateful. A new URL/hash route, title, active tab/view, or
+major surface returns `page_changed: true` with a compact `page_snapshot`.
+Same-page actions return `page_changed: false`, a `page_ref`, and only target
+or media deltas when something relevant changed. You cannot pick a correct next
+target without reading the latest snapshot or delta, so batching is unsafe —
+do not predict the result and continue.
 
 Never submit a `finalize` tool call together with a `send_message`, with the
 `WEB_CLIENT_COMPLETE` keyword, or with any earlier `action`. Finalize once,

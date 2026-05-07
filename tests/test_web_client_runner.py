@@ -89,6 +89,50 @@ def two_step_browser_plan():
     )
 
 
+def session_browser_result(
+    *,
+    url="http://localhost:8097/web/index.html#/home.html",
+    title="Jellyfin",
+    text="Jellyfin Home",
+    heading=None,
+    controls=None,
+    links=None,
+    player_controls=None,
+    media_state=None,
+    actions=None,
+    screenshot_paths=None,
+):
+    controls = list(controls or [])
+    links = list(links or [])
+    if player_controls is None:
+        player_controls = [
+            control
+            for control in controls
+            if str(control.get("scope") or "") == "player"
+        ]
+    result = {
+        "status": "pass",
+        "actions": actions
+        or [{"type": "click", "status": "pass", "label": "browser_action"}],
+        "screenshot_paths": list(screenshot_paths or ["/tmp/browser_action.png"]),
+        "final_url": url,
+        "title": title,
+        "console": [],
+        "failed_network": [],
+        "dom_summary": f"title='Jellyfin'; text='{text}'",
+        "dom_path": "/tmp/dom.html",
+        "page_text": text,
+        "visible_controls": controls,
+        "visible_links": links,
+        "player_controls": list(player_controls or []),
+        "media_state": media_state or {"state": "none", "elements": []},
+        "error": None,
+    }
+    if heading is not None:
+        result["main_heading"] = heading
+    return result
+
+
 class ThreadTrackingBrowserDriver(FakeBrowserDriver):
     def __init__(self, artifacts_root, results=None):
         super().__init__(artifacts_root, results=results)
@@ -624,10 +668,29 @@ class WebClientRunnerTests(unittest.TestCase):
 
             self.assertEqual(action["status"], "pass")
             self.assertEqual(action["step_tracker"]["current_step"]["step_id"], 1)
-            self.assertEqual(action["tracked_action"]["step_id"], 1)
-            self.assertEqual(advance["execution_entry"]["step_id"], 1)
-            self.assertEqual(advance["execution_entry"]["role"], "trigger")
-            self.assertEqual(advance["execution_entry"]["action"], "Open Jellyfin Web")
+            self.assertTrue(action["page_changed"])
+            self.assertIn("page_snapshot", action)
+            self.assertNotIn("tracked_action", action)
+            raw_action = json.loads(
+                Path(temp_dir, "plan-run", "web_client_result_next-1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(raw_action["tracked_action"]["step_id"], 1)
+            self.assertNotIn("execution_entry", advance)
+            self.assertEqual(advance["advanced_step"]["step_id"], 1)
+            raw_advance = json.loads(
+                Path(
+                    temp_dir,
+                    "plan-run",
+                    "web_client_result_advance-1.json",
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(raw_advance["execution_entry"]["role"], "trigger")
+            self.assertEqual(
+                raw_advance["execution_entry"]["action"],
+                "Open Jellyfin Web",
+            )
             self.assertEqual(len(browser_driver.runs), 1)
             self.assertEqual(
                 browser_driver.runs[0]["browser_input"]["actions"],
@@ -822,10 +885,402 @@ class WebClientRunnerTests(unittest.TestCase):
             )
 
             self.assertEqual(start["step_tracker"]["current_step"]["step_id"], 1)
-            self.assertEqual(advanced["execution_entry"]["step_id"], 1)
-            self.assertEqual(advanced["step_tracker"]["current_step"]["step_id"], 2)
+            self.assertEqual(advanced["advanced_step"]["step_id"], 1)
+            self.assertEqual(advanced["current_step"]["step_id"], 2)
+            self.assertEqual(advanced["progress"]["completed_step_ids"], [1])
+            self.assertIn("page_ref", advanced)
+            self.assertTrue(advanced["unchanged_since_last_action"])
+            self.assertNotIn("execution_entry", advanced)
             self.assertEqual(len(final["execution_log"]), 2)
             self.assertEqual([entry["step_id"] for entry in final["execution_log"]], [1, 2])
+
+    def test_session_first_action_returns_compact_page_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    session_browser_result(
+                        controls=[
+                            {
+                                "name": "Favorite",
+                                "scope": "page",
+                                "data_id": "item-1",
+                                "data_isfavorite": "false",
+                                "classes": ["generated", "favoriteButton"],
+                                "selector": '[data-jfat-target-id="jfat-control-1"]',
+                                "target": {
+                                    "kind": "control",
+                                    "name": "Favorite",
+                                    "scope": "page",
+                                },
+                            }
+                        ],
+                    )
+                ],
+            )
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "snapshot-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+
+            result = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "goto-1",
+                    "action": {"type": "goto"},
+                }
+            )
+
+            self.assertEqual(result["status"], "pass")
+            self.assertTrue(result["page_changed"])
+            self.assertNotIn("browser", result)
+            snapshot = result["page_snapshot"]
+            self.assertEqual(snapshot["source_request_id"], "goto-1")
+            self.assertEqual(snapshot["title"], "Jellyfin")
+            payload_json = json.dumps(result)
+            self.assertNotIn("dom_summary", payload_json)
+            self.assertNotIn("page_text", payload_json)
+            self.assertNotIn("tracked_action", payload_json)
+            self.assertNotIn("classes", payload_json)
+            self.assertNotIn("selector", payload_json)
+            self.assertEqual(
+                snapshot["targets"]["controls"][0]["data_isfavorite"],
+                "false",
+            )
+            raw_path = Path(snapshot["artifacts"]["raw_result_path"])
+            raw = json.loads(raw_path.read_text(encoding="utf-8"))
+            self.assertIn("dom_summary", raw["browser"])
+            self.assertEqual(
+                raw["browser"]["visible_controls"][0]["selector"],
+                '[data-jfat-target-id="jfat-control-1"]',
+            )
+
+    def test_session_same_route_action_returns_target_delta_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    session_browser_result(
+                        controls=[{"name": "Play", "scope": "page"}],
+                    ),
+                    session_browser_result(
+                        controls=[
+                            {"name": "Play", "scope": "page"},
+                            {"name": "Shuffle", "scope": "page"},
+                        ],
+                    ),
+                ],
+            )
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "delta-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+            first = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "goto-1",
+                    "action": {"type": "goto"},
+                }
+            )
+            second = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "click-1",
+                    "action": {
+                        "type": "click",
+                        "target": {"kind": "control", "name": "Play"},
+                    },
+                }
+            )
+
+            self.assertFalse(second["page_changed"])
+            self.assertEqual(second["page_ref"], first["page_snapshot"]["page_ref"])
+            self.assertNotIn("page_snapshot", second)
+            self.assertEqual(
+                [target["name"] for target in second["target_delta"]["added"]],
+                ["Shuffle"],
+            )
+            self.assertIn("raw_result_path", second["artifacts"])
+
+    def test_session_hash_route_change_returns_new_page_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    session_browser_result(
+                        url="http://localhost:8097/web/index.html#/home.html",
+                        text="Home",
+                    ),
+                    session_browser_result(
+                        url="http://localhost:8097/web/index.html#/music.html",
+                        text="Music",
+                    ),
+                ],
+            )
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "route-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+            runner.session(
+                {
+                    "command": "action",
+                    "request_id": "goto-1",
+                    "action": {"type": "goto"},
+                }
+            )
+
+            result = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "goto-music",
+                    "action": {
+                        "type": "click",
+                        "target": {"kind": "link", "name": "Music"},
+                    },
+                }
+            )
+
+            self.assertTrue(result["page_changed"])
+            self.assertEqual(
+                result["page_snapshot"]["url"],
+                "http://localhost:8097/web/index.html#/music.html",
+            )
+
+    def test_session_active_tab_change_returns_new_page_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    session_browser_result(
+                        links=[
+                            {
+                                "name": "Home",
+                                "scope": "header",
+                                "aria_current": "page",
+                            },
+                            {"name": "Music", "scope": "header"},
+                        ],
+                    ),
+                    session_browser_result(
+                        links=[
+                            {"name": "Home", "scope": "header"},
+                            {
+                                "name": "Music",
+                                "scope": "header",
+                                "aria_current": "page",
+                            },
+                        ],
+                    ),
+                ],
+            )
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "tab-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+            runner.session(
+                {
+                    "command": "action",
+                    "request_id": "goto-1",
+                    "action": {"type": "goto"},
+                }
+            )
+
+            result = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "tab-1",
+                    "action": {
+                        "type": "click",
+                        "target": {"kind": "link", "name": "Music"},
+                    },
+                }
+            )
+
+            self.assertTrue(result["page_changed"])
+            active_names = [
+                target["name"]
+                for target in result["page_snapshot"]["targets"]["links"]
+                if target.get("aria_current")
+            ]
+            self.assertEqual(active_names, ["Music"])
+
+    def test_session_favorite_toggle_returns_same_page_target_delta(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            favorite_off = {
+                "name": "Favorite",
+                "scope": "page",
+                "data_id": "item-1",
+                "data_isfavorite": "false",
+            }
+            favorite_on = dict(favorite_off, data_isfavorite="true")
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    session_browser_result(controls=[favorite_off]),
+                    session_browser_result(controls=[favorite_on]),
+                ],
+            )
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "favorite-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+            runner.session(
+                {
+                    "command": "action",
+                    "request_id": "goto-1",
+                    "action": {"type": "goto"},
+                }
+            )
+
+            result = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "favorite-1",
+                    "action": {
+                        "type": "click",
+                        "target": {"kind": "control", "name": "Favorite"},
+                    },
+                }
+            )
+
+            self.assertFalse(result["page_changed"])
+            self.assertNotIn("page_snapshot", result)
+            changed = result["target_delta"]["changed"][0]
+            self.assertEqual(changed["before"]["data_isfavorite"], "false")
+            self.assertEqual(changed["after"]["data_isfavorite"], "true")
+
+    def test_session_menu_delta_and_modal_surface_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(
+                temp_dir,
+                results=[
+                    session_browser_result(controls=[{"name": "More", "scope": "page"}]),
+                    session_browser_result(
+                        controls=[
+                            {"name": "More", "scope": "page"},
+                            {"name": "Edit metadata", "scope": "menu"},
+                        ],
+                    ),
+                    session_browser_result(
+                        controls=[{"name": "Close", "scope": "modal"}],
+                    ),
+                ],
+            )
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "surface-run",
+                    "base_url": "http://localhost:9000",
+                    "artifacts_root": temp_dir,
+                }
+            )
+            runner.session(
+                {
+                    "command": "action",
+                    "request_id": "goto-1",
+                    "action": {"type": "goto"},
+                }
+            )
+
+            menu = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "menu-1",
+                    "action": {
+                        "type": "click",
+                        "target": {"kind": "control", "name": "More"},
+                    },
+                }
+            )
+            modal = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "modal-1",
+                    "action": {
+                        "type": "click",
+                        "target": {"kind": "control", "name": "Edit metadata"},
+                    },
+                }
+            )
+
+            self.assertFalse(menu["page_changed"])
+            self.assertEqual(
+                [target["name"] for target in menu["target_delta"]["added"]],
+                ["Edit metadata"],
+            )
+            self.assertTrue(modal["page_changed"])
+            self.assertEqual(
+                modal["page_snapshot"]["targets"]["controls"][0]["scope"],
+                "modal",
+            )
 
     def test_session_retry_actions_are_aggregated_under_current_step(self):
         failed_browser = {
@@ -897,10 +1352,17 @@ class WebClientRunnerTests(unittest.TestCase):
 
             self.assertEqual(first["status"], "fail")
             self.assertEqual(second["status"], "pass")
-            self.assertEqual(advanced["execution_entry"]["outcome"], "pass")
+            self.assertEqual(advanced["advanced_step"]["outcome"], "pass")
+            raw_advance = json.loads(
+                Path(
+                    temp_dir,
+                    "retry-run",
+                    "web_client_result_advance-1.json",
+                ).read_text(encoding="utf-8")
+            )
             action_statuses = [
                 action["status"]
-                for action in advanced["execution_entry"]["browser"]["actions"]
+                for action in raw_advance["execution_entry"]["browser"]["actions"]
             ]
             self.assertEqual(action_statuses, ["fail", "pass"])
             self.assertTrue(
