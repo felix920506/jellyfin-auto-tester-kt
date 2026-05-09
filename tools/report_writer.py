@@ -79,6 +79,35 @@ def generate(
     }
 
 
+def load_original_context(
+    verification_result: dict[str, Any],
+    artifacts_base: str | Path = DEFAULT_ARTIFACTS_BASE,
+) -> dict[str, Any]:
+    """Load the first-run context for a verification ExecutionResult."""
+
+    if not isinstance(verification_result, dict):
+        raise TypeError("verification_result must be a dict")
+    verification_result = hydrate_execution_result(verification_result)
+
+    original_run_id = _require_text(verification_result, "original_run_id")
+    artifacts_root = _resolve_artifacts_root(verification_result, artifacts_base)
+    original_dir = artifacts_root / original_run_id
+    result_path = original_dir / "result.json"
+    report_path = original_dir / "report.md"
+
+    original_result = hydrate_execution_result(
+        _read_json_object(result_path, "original result")
+    )
+    if not report_path.is_file():
+        raise FileNotFoundError(f"original report not found: {report_path}")
+
+    return {
+        "original_result": original_result,
+        "report_path": str(report_path),
+        "report_markdown": report_path.read_text(encoding="utf-8"),
+    }
+
+
 def build_verification_plan(
     original_result: dict[str, Any],
     written_steps: list[dict[str, Any]],
@@ -844,6 +873,16 @@ def _resolve_artifacts_root(
     if str(artifacts_base) == DEFAULT_ARTIFACTS_BASE:
         return DEFAULT_ARTIFACTS_ROOT
     return base.resolve()
+
+
+def _read_json_object(path: Path, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} not found: {path}")
+    with path.open(encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object: {path}")
+    return value
 
 
 def _relative_artifact_path(path: str, output_dir: Path, artifacts_root: Path) -> str:

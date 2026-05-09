@@ -72,8 +72,8 @@ Reload durable first-run context:
 
 - Read `execution_result.original_run_id`. If it is missing, route to
   `human_review_queue`; the verification result cannot be tied to a report.
-- Load `artifacts/<original_run_id>/result.json`.
-- Load `artifacts/<original_run_id>/report.md`.
+- Call `report_writer.load_original_context(verification_result)` to load the
+  original result and report from that run's artifacts.
 - Do not rely on in-memory state from the first pass.
 
 Compare results:
@@ -107,6 +107,8 @@ Route exactly once:
   step outcomes show.
 - If screenshots are unavailable, omit the Screenshots section and note that no
   screenshots were captured.
+- Do not run shell commands or perform general-purpose file reads/writes. Use
+  `report_writer` for report and artifact access.
 - Do not use named output blocks. Send structured payloads only to the declared
   channels: `verification_request`, `web_client_verification_request`,
   `final_report`, and `human_review_queue`.

@@ -402,6 +402,75 @@ class ReportWriterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 report_writer.build_verification_plan(original, setup_only)
 
+    def test_load_original_context_hydrates_compact_verification_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = sample_result(temp_dir, run_id="run-1")
+            original_path = Path(original["artifacts_dir"]) / "result.json"
+            original_path.write_text(json.dumps(original), encoding="utf-8")
+            report_writer.generate(original, artifacts_base=temp_dir)
+
+            verification = sample_result(temp_dir, run_id="run-2")
+            verification["is_verification"] = True
+            verification["original_run_id"] = "run-1"
+            verification["plan"]["is_verification"] = True
+            verification["plan"]["original_run_id"] = "run-1"
+            verification_path = Path(verification["artifacts_dir"]) / "result.json"
+            verification_path.write_text(json.dumps(verification), encoding="utf-8")
+
+            context = report_writer.load_original_context(
+                compact_execution_result(verification),
+                artifacts_base=temp_dir,
+            )
+
+            self.assertEqual(context["original_result"]["run_id"], "run-1")
+            self.assertEqual(
+                Path(context["report_path"]).resolve(),
+                (Path(temp_dir) / "run-1" / "report.md").resolve(),
+            )
+            self.assertIn(
+                "# Reproduction Report: PlaybackInfo returns 500",
+                context["report_markdown"],
+            )
+
+    def test_load_original_context_requires_original_run_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            verification = sample_result(temp_dir, run_id="run-2")
+            verification["is_verification"] = True
+            verification["original_run_id"] = None
+
+            with self.assertRaisesRegex(ValueError, "original_run_id is required"):
+                report_writer.load_original_context(
+                    verification,
+                    artifacts_base=temp_dir,
+                )
+
+    def test_load_original_context_requires_original_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            verification = sample_result(temp_dir, run_id="run-2")
+            verification["is_verification"] = True
+            verification["original_run_id"] = "missing-run"
+
+            with self.assertRaisesRegex(FileNotFoundError, "original result not found"):
+                report_writer.load_original_context(
+                    verification,
+                    artifacts_base=temp_dir,
+                )
+
+    def test_load_original_context_requires_original_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = sample_result(temp_dir, run_id="run-1")
+            result_path = Path(original["artifacts_dir"]) / "result.json"
+            result_path.write_text(json.dumps(original), encoding="utf-8")
+            verification = sample_result(temp_dir, run_id="run-2")
+            verification["is_verification"] = True
+            verification["original_run_id"] = "run-1"
+
+            with self.assertRaisesRegex(FileNotFoundError, "original report not found"):
+                report_writer.load_original_context(
+                    verification,
+                    artifacts_base=temp_dir,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

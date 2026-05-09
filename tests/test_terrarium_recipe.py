@@ -114,6 +114,15 @@ class TerrariumRecipeTests(unittest.TestCase):
             ]
             self.assertEqual(channel_outputs, [], config_path)
 
+    def test_report_agent_uses_only_strictly_required_tools(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        config_path = repo_root / "creatures" / "report" / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        tools = {tool["name"] for tool in config.get("tools", [])}
+
+        self.assertEqual(tools, {"send_message", "report_writer"})
+
     def test_pure_web_recipe_can_omit_execution_agent(self):
         repo_root = Path(__file__).resolve().parents[1]
         recipe = {
