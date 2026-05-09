@@ -628,6 +628,8 @@ class FakeReportStageEngine:
         self.auto_execute_verification = auto_execute_verification
         self.default_verification_run_id = default_verification_run_id
         self.execution_agent = FakeExecutionAgent()
+        self.report_agent = FakeInnerAgent()
+        self.report_default_output = self.report_agent.output_router.default_output
         self.channels = {
             "execution_done": FakeAsyncChannel(),
             "verification_request": FakeAsyncChannel(),
@@ -644,10 +646,15 @@ class FakeReportStageEngine:
     def __getitem__(self, name):
         if name == "execution_agent":
             return self.execution_agent
+        if name == "report_agent":
+            return self.report_agent
         raise KeyError(name)
 
     async def run(self):
         self.run_thread = threading.get_ident()
+        await self.report_agent.output_router.default_output.write_stream(
+            "raw report llm output\n"
+        )
         first_message = await self.channels["execution_done"].receive()
         self.first_execution_result = hydrate_execution_result(
             json.loads(first_message.content)
@@ -2561,6 +2568,7 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 route_payload["path"],
                 str((temp_path / "report" / "report.md").resolve()),
             )
+            self.assertEqual(engine.report_default_output.streamed, [])
             self.assertTrue(engine.stopped)
 
     def test_run_report_stage_injects_supplied_verification_after_request(self):

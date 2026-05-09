@@ -625,6 +625,10 @@ async def run_issue(
     logger.info("Loading Terrarium recipe from %s", recipe_path)
     engine = await _load_engine(recipe_path, engine_factory=engine_factory)
     _apply_default_execution_budget(engine)
+    _suppress_agent_outputs(
+        engine,
+        ("execution_agent", "web_client_agent", "report_agent"),
+    )
 
     terminal_task = asyncio.create_task(_wait_for_terminal_message(engine))
     plan_observer_task = _create_first_channel_observer_task(
@@ -1665,6 +1669,10 @@ async def _run_report_stage_impl(
         "report",
         engine_factory=engine_factory,
         include_verification_agents=verification_result is None,
+    )
+    _suppress_agent_outputs(
+        engine,
+        ("report_agent", "execution_agent", "web_client_agent"),
     )
     logger.debug(
         "Routing Stage 3 execution result through KT report agent run_id=%s "
@@ -3227,13 +3235,20 @@ def _optional_agent(engine: Any, name: str) -> Any | None:
         return None
 
 
+def _suppress_agent_outputs(engine: Any, agent_names: Iterable[str]) -> None:
+    for name in agent_names:
+        agent = _optional_agent(engine, name)
+        if agent is not None:
+            _suppress_default_output(agent)
+
+
 def _suppress_default_output(creature_or_agent: Any) -> None:
-    """Prevent KohakuTerrarium's default stdout output from duplicating chat.
+    """Prevent KohakuTerrarium's default stdout output from leaking chat.
 
     ``Creature.chat()`` streams text by adding a secondary output callback, but
-    leaves the default output active. In this pipeline, ``run_issue`` also
-    writes every yielded chat chunk to its own stream, so the default output must
-    be muted to keep the transcript single-sourced.
+    leaves the default output active. The pipeline fabric either writes its own
+    terminal summary or captures transcripts explicitly, so uncontrolled default
+    output must stay muted.
     """
 
     agent = getattr(creature_or_agent, "agent", creature_or_agent)
