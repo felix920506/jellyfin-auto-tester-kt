@@ -502,6 +502,27 @@ class ReportWriterTests(unittest.TestCase):
             self.assertFalse(original["plan"]["is_verification"])
             self.assertIsNone(original["plan"]["original_run_id"])
 
+    def test_build_verification_plan_selects_steps_when_not_supplied(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = sample_result(temp_dir, run_id="run-1")
+
+            verification_plan = report_writer.build_verification_plan(original)
+
+            self.assertTrue(verification_plan["is_verification"])
+            self.assertEqual(verification_plan["original_run_id"], "run-1")
+            self.assertEqual(
+                [step["step_id"] for step in verification_plan["reproduction_steps"]],
+                [1, 2, 3],
+            )
+            self.assertEqual(
+                sum(
+                    1
+                    for step in verification_plan["reproduction_steps"]
+                    if step["role"] == "trigger"
+                ),
+                1,
+            )
+
     def test_build_verification_plan_preserves_demo_target_without_docker_image(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original = demo_result(temp_dir)

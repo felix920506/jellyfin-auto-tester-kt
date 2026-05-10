@@ -202,13 +202,15 @@ def load_original_context(
 
 def build_verification_plan(
     original_result: dict[str, Any],
-    written_steps: list[dict[str, Any]],
+    written_steps: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Build a verification ReproductionPlan from first-pass report steps."""
+    """Build a verification ReproductionPlan from deterministic report steps."""
 
     if not isinstance(original_result, dict):
         raise TypeError("original_result must be a dict")
     original_result = hydrate_execution_result(original_result)
+    if written_steps is None:
+        written_steps = select_report_steps(original_result)
     if not isinstance(written_steps, list) or not written_steps:
         raise ValueError("written_steps must be a non-empty list")
 

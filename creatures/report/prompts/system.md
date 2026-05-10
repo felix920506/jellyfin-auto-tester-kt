@@ -45,8 +45,8 @@ Write the report:
 
 Request verification:
 
-- Call `report_writer.build_verification_plan(original_result, written_steps)`
-  using only the distilled report steps.
+- Call `report_writer.build_verification_plan(execution_result)`. The tool
+  selects the verification steps deterministically.
 - If the returned plan has `execution_target: "web_client"`, send it to the
   `web_client_verification_request` channel with a `send_message` tool-call
   block.
