@@ -179,6 +179,65 @@ def demo_result(artifacts_root, run_id="demo-run"):
 
 
 class ReportWriterTests(unittest.TestCase):
+    def test_summarize_execution_result_uses_program_step_summaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sample_result(temp_dir)
+            result["step_summaries"] = [
+                {
+                    "step_id": 1,
+                    "role": "setup",
+                    "planned_action": "Create the media item",
+                    "status": "pass",
+                    "reason": None,
+                    "criteria_evaluation": {"passed": True},
+                    "decisive_attempt_id": "attempt-1",
+                    "evidence_refs": [],
+                },
+                {
+                    "step_id": 2,
+                    "role": "trigger",
+                    "planned_action": "Request playback info for the HEVC item",
+                    "status": "pass",
+                    "reason": None,
+                    "criteria_evaluation": {"passed": True},
+                    "decisive_attempt_id": "attempt-2",
+                    "evidence_refs": [{"type": "http", "status_code": 500}],
+                },
+            ]
+            result["trigger_summary"] = {
+                "step_id": 2,
+                "status": "pass",
+                "decisive_attempt_id": "attempt-2",
+                "reason": None,
+            }
+
+            summary = report_writer.summarize_execution_result(result)
+
+            self.assertEqual(summary["source"], "step_summaries")
+            self.assertEqual(summary["trigger"]["source"], "trigger_summary")
+            self.assertEqual(summary["trigger"]["status"], "pass")
+            self.assertEqual(summary["trigger"]["decisive_attempt_id"], "attempt-2")
+            self.assertEqual(len(summary["steps"]), 2)
+
+    def test_summarize_execution_result_falls_back_to_execution_log(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sample_result(temp_dir)
+            result["execution_log"][1]["outcome"] = "fail"
+            result["execution_log"][1]["reason"] = "status_code expected 500 got 200"
+            result["execution_log"][1]["criteria_evaluation"] = {
+                "passed": False,
+                "assertions": [],
+            }
+
+            summary = report_writer.summarize_execution_result(result)
+
+            self.assertEqual(summary["source"], "execution_log")
+            self.assertEqual(summary["trigger"]["status"], "fail")
+            self.assertEqual(
+                summary["trigger"]["reason"],
+                "status_code expected 500 got 200",
+            )
+
     def test_generate_writes_report_with_filtered_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             result = sample_result(temp_dir)

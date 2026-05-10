@@ -27,6 +27,24 @@ MAX_BODY_CHARS = 2000
 MAX_STREAM_CHARS = 1200
 
 
+def summarize_execution_result(execution_result: dict[str, Any]) -> dict[str, Any]:
+    """Return deterministic step and trigger status for an ExecutionResult."""
+
+    if not isinstance(execution_result, dict):
+        raise TypeError("execution_result must be a dict")
+    execution_result = hydrate_execution_result(execution_result)
+
+    steps, source = _step_statuses(execution_result)
+    trigger = _trigger_status(execution_result, steps, source)
+    return {
+        "run_id": _text(execution_result.get("run_id"), "unknown"),
+        "overall_result": execution_result.get("overall_result"),
+        "source": source,
+        "steps": steps,
+        "trigger": trigger,
+    }
+
+
 def generate(
     execution_result: dict[str, Any],
     verification_result: dict[str, Any] | None = None,
@@ -222,7 +240,7 @@ def _summary(
     plan = _plan(execution_result)
     version = _text(plan.get("target_version"), "the target version")
     overall = execution_result.get("overall_result")
-    trigger = _trigger_entry(execution_result)
+    trigger = summarize_execution_result(execution_result).get("trigger") or {}
     if overall == "reproduced":
         sentence = (
             f"The automated run reproduced the reported issue on Jellyfin {version}; "
@@ -674,26 +692,26 @@ def _screenshots(
 
 def _analysis(execution_result: dict[str, Any]) -> str:
     lines = []
-    overall = execution_result.get("overall_result")
-    trigger = _trigger_entry(execution_result)
-    lines.append(f"- Overall result: `{_text(overall, 'unknown')}`.")
+    summary = summarize_execution_result(execution_result)
+    trigger = summary.get("trigger") if isinstance(summary.get("trigger"), dict) else None
+    lines.append(f"- Overall result: `{_text(summary.get('overall_result'), 'unknown')}`.")
     if trigger:
         lines.append(
             "- Trigger step: "
             f"`{_text(trigger.get('action'), 'unnamed')}` ended as "
-            f"`{_text(trigger.get('outcome'), 'unknown')}`"
+            f"`{_text(trigger.get('status'), 'unknown')}`"
             + (f" with reason `{_inline_code(trigger['reason'])}`." if trigger.get("reason") else ".")
         )
     failures = [
-        entry
-        for entry in execution_result.get("execution_log", [])
-        if isinstance(entry, dict) and entry.get("outcome") in {"fail", "skip"}
+        step
+        for step in summary.get("steps", [])
+        if isinstance(step, dict) and step.get("status") in {"fail", "skip", "inconclusive"}
     ]
     if failures:
-        for entry in failures[:5]:
+        for step in failures[:5]:
             lines.append(
-                f"- Step {entry.get('step_id')} `{_text(entry.get('action'), 'unnamed')}` "
-                f"{entry.get('outcome')}: {_text(entry.get('reason'), 'no reason recorded')}."
+                f"- Step {step.get('step_id')} `{_text(step.get('action'), 'unnamed')}` "
+                f"{step.get('status')}: {_text(step.get('reason'), 'no reason recorded')}."
             )
     else:
         lines.append("- All executed steps met their structured success criteria.")
@@ -838,6 +856,140 @@ def _trigger_entry(execution_result: Mapping[str, Any]) -> dict[str, Any] | None
         if isinstance(entry, dict) and entry.get("role") == "trigger":
             return entry
     return None
+
+
+def _step_statuses(execution_result: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    step_summaries = execution_result.get("step_summaries")
+    if isinstance(step_summaries, list) and step_summaries:
+        return [_status_from_step_summary(step) for step in step_summaries if isinstance(step, dict)], "step_summaries"
+    return _legacy_step_statuses(execution_result), "execution_log"
+
+
+def _status_from_step_summary(step: dict[str, Any]) -> dict[str, Any]:
+    criteria = step.get("criteria_evaluation") if isinstance(step.get("criteria_evaluation"), dict) else None
+    return {
+        "step_id": step.get("step_id"),
+        "role": step.get("role"),
+        "action": _text(step.get("planned_action") or step.get("action"), "unnamed"),
+        "tool": step.get("tool"),
+        "status": _text(step.get("status"), "inconclusive"),
+        "reason": step.get("reason"),
+        "criteria_passed": criteria.get("passed") if criteria else None,
+        "decisive_attempt_id": step.get("decisive_attempt_id"),
+        "evidence_refs": deepcopy(step.get("evidence_refs") if isinstance(step.get("evidence_refs"), list) else []),
+        "source": "step_summaries",
+    }
+
+
+def _legacy_step_statuses(execution_result: dict[str, Any]) -> list[dict[str, Any]]:
+    entries_by_step: dict[str, list[dict[str, Any]]] = {}
+    unkeyed: list[dict[str, Any]] = []
+    for entry in execution_result.get("execution_log", []):
+        if not isinstance(entry, dict):
+            continue
+        key = _step_key(entry.get("step_id"))
+        if key is None:
+            unkeyed.append(entry)
+        else:
+            entries_by_step.setdefault(key, []).append(entry)
+
+    statuses: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    plan_steps = _plan(execution_result).get("reproduction_steps")
+    if isinstance(plan_steps, list):
+        for step in plan_steps:
+            if not isinstance(step, dict):
+                continue
+            key = _step_key(step.get("step_id"))
+            if key is None:
+                continue
+            seen_keys.add(key)
+            statuses.append(
+                _status_from_legacy_step(step, _decisive_execution_entry(entries_by_step.get(key, [])))
+            )
+
+    for key, entries in entries_by_step.items():
+        if key in seen_keys:
+            continue
+        entry = _decisive_execution_entry(entries)
+        if entry is not None:
+            statuses.append(_status_from_legacy_step({}, entry))
+
+    for entry in unkeyed:
+        statuses.append(_status_from_legacy_step({}, entry))
+    return statuses
+
+
+def _status_from_legacy_step(
+    plan_step: dict[str, Any],
+    entry: dict[str, Any] | None,
+) -> dict[str, Any]:
+    criteria = entry.get("criteria_evaluation") if entry and isinstance(entry.get("criteria_evaluation"), dict) else None
+    outcome = entry.get("outcome") if entry else None
+    return {
+        "step_id": plan_step.get("step_id") if plan_step else (entry or {}).get("step_id"),
+        "role": plan_step.get("role") if plan_step else (entry or {}).get("role"),
+        "action": _text(plan_step.get("action") if plan_step else (entry or {}).get("action"), "unnamed"),
+        "tool": plan_step.get("tool") if plan_step else (entry or {}).get("tool"),
+        "status": _text(outcome, "inconclusive"),
+        "reason": (entry or {}).get("reason"),
+        "criteria_passed": criteria.get("passed") if criteria else None,
+        "decisive_attempt_id": (entry or {}).get("attempt_id"),
+        "evidence_refs": [],
+        "source": "execution_log",
+    }
+
+
+def _decisive_execution_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    complete = [
+        entry
+        for entry in entries
+        if isinstance(entry.get("criteria_evaluation"), dict)
+        and isinstance(entry["criteria_evaluation"].get("passed"), bool)
+    ]
+    if complete:
+        return complete[-1]
+    terminal = [entry for entry in entries if entry.get("outcome") in {"pass", "fail", "skip"}]
+    if terminal:
+        return terminal[-1]
+    return entries[-1] if entries else None
+
+
+def _trigger_status(
+    execution_result: dict[str, Any],
+    steps: list[dict[str, Any]],
+    source: str,
+) -> dict[str, Any] | None:
+    trigger_summary = execution_result.get("trigger_summary")
+    if isinstance(trigger_summary, dict):
+        step_id = trigger_summary.get("step_id")
+        matching_step = next((step for step in steps if step.get("step_id") == step_id), {})
+        return {
+            "step_id": step_id,
+            "role": "trigger",
+            "action": _text(matching_step.get("action") or trigger_summary.get("planned_action"), "trigger"),
+            "tool": matching_step.get("tool"),
+            "status": _text(trigger_summary.get("status"), "inconclusive"),
+            "reason": trigger_summary.get("reason"),
+            "criteria_passed": matching_step.get("criteria_passed"),
+            "decisive_attempt_id": trigger_summary.get("decisive_attempt_id"),
+            "evidence_refs": deepcopy(matching_step.get("evidence_refs") if isinstance(matching_step.get("evidence_refs"), list) else []),
+            "source": "trigger_summary",
+        }
+    for step in steps:
+        if step.get("role") == "trigger":
+            return deepcopy(step)
+    if source == "execution_log":
+        entry = _trigger_entry(execution_result)
+        if entry:
+            return _status_from_legacy_step({}, entry)
+    return None
+
+
+def _step_key(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
 
 
 def _plain_log_excerpt(execution_result: dict[str, Any]) -> str:
