@@ -259,6 +259,28 @@ class ReportWriterTests(unittest.TestCase):
             self.assertNotIn("DEBUG noisy line", report)
             self.assertIn("![Step 3 screenshot](screenshots/playback_error.png)", report)
 
+    def test_collect_report_evidence_returns_structured_report_inputs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sample_result(temp_dir)
+
+            evidence = report_writer.collect_report_evidence(
+                result,
+                output_dir=Path(result["artifacts_dir"]),
+                artifacts_root=temp_dir,
+            )
+
+            self.assertEqual(
+                evidence["logs"]["lines"],
+                ["WARN playback pipeline warning", "ERROR Transcoding failed in FFmpeg"],
+            )
+            self.assertEqual(evidence["http_responses"][0]["method"], "POST")
+            self.assertEqual(evidence["http_responses"][0]["status_code"], 500)
+            self.assertIn("Transcoding failed", evidence["http_responses"][0]["body"])
+            self.assertEqual(
+                evidence["screenshots"][0]["relative_path"],
+                "screenshots/playback_error.png",
+            )
+
     def test_generate_hydrates_compact_execution_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             result = sample_result(temp_dir)

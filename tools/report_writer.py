@@ -45,6 +45,44 @@ def summarize_execution_result(execution_result: dict[str, Any]) -> dict[str, An
     }
 
 
+def collect_report_evidence(
+    execution_result: dict[str, Any],
+    output_dir: str | Path | None = None,
+    artifacts_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return deterministic evidence selected for report rendering."""
+
+    if not isinstance(execution_result, dict):
+        raise TypeError("execution_result must be a dict")
+    execution_result = hydrate_execution_result(execution_result)
+
+    resolved_output_dir = (
+        Path(output_dir).expanduser()
+        if output_dir is not None
+        else Path(
+            str(
+                execution_result.get("artifacts_dir")
+                or DEFAULT_ARTIFACTS_ROOT / _text(execution_result.get("run_id"), "unknown")
+            )
+        ).expanduser()
+    )
+    resolved_artifacts_root = (
+        Path(artifacts_root).expanduser()
+        if artifacts_root is not None
+        else resolved_output_dir.parent
+    )
+    return {
+        "logs": _log_evidence(execution_result),
+        "http_responses": _http_evidence(execution_result),
+        "browser": _browser_evidence_items(execution_result),
+        "screenshots": _screenshot_evidence(
+            execution_result,
+            resolved_output_dir,
+            resolved_artifacts_root,
+        ),
+    }
+
+
 def generate(
     execution_result: dict[str, Any],
     verification_result: dict[str, Any] | None = None,
@@ -485,32 +523,45 @@ def _evidence(
     output_dir: Path,
     artifacts_root: Path,
 ) -> str:
+    evidence = collect_report_evidence(execution_result, output_dir, artifacts_root)
     parts = [
         "### Jellyfin Server Logs (relevant excerpt)",
         "",
-        _log_excerpt(execution_result),
+        _format_log_evidence(evidence["logs"]),
         "",
         "### HTTP Responses",
         "",
-        _http_responses(execution_result),
+        _format_http_evidence(evidence["http_responses"]),
     ]
 
-    browser = _browser_evidence(execution_result)
+    browser = _format_browser_evidence(evidence["browser"])
     if browser:
         parts.extend(["", "### Browser Evidence", "", browser])
 
-    screenshots = _screenshots(execution_result, output_dir, artifacts_root)
+    screenshots = _format_screenshot_evidence(evidence["screenshots"])
     if screenshots:
         parts.extend(["", "### Screenshots", "", screenshots])
     return "\n".join(parts)
 
 
 def _log_excerpt(execution_result: dict[str, Any]) -> str:
+    return _format_log_evidence(_log_evidence(execution_result))
+
+
+def _log_evidence(execution_result: dict[str, Any]) -> dict[str, Any]:
     logs = _jellyfin_logs(execution_result)
     if not logs.strip():
         if _is_demo_plan(_plan(execution_result)):
-            return "```text\nPublic demo server mode does not collect Jellyfin server logs.\n```"
-        return "```text\nNo Jellyfin server logs were captured.\n```"
+            return {
+                "available": False,
+                "lines": [],
+                "message": "Public demo server mode does not collect Jellyfin server logs.",
+            }
+        return {
+            "available": False,
+            "lines": [],
+            "message": "No Jellyfin server logs were captured.",
+        }
 
     indicators = _failure_indicators(execution_result)
     selected = []
@@ -521,8 +572,23 @@ def _log_excerpt(execution_result: dict[str, Any]) -> str:
             break
 
     if not selected:
-        selected = ["No ERROR/WARN lines or configured failure indicators were found in captured logs."]
-    return "```text\n" + "\n".join(_truncate(line, 500) for line in selected) + "\n```"
+        return {
+            "available": True,
+            "lines": [],
+            "message": "No ERROR/WARN lines or configured failure indicators were found in captured logs.",
+        }
+    return {
+        "available": True,
+        "lines": [_truncate(line, 500) for line in selected],
+        "message": None,
+    }
+
+
+def _format_log_evidence(logs: dict[str, Any]) -> str:
+    lines = logs.get("lines") if isinstance(logs.get("lines"), list) else []
+    message = _text(logs.get("message"))
+    content = "\n".join(str(line) for line in lines) if lines else message
+    return "```text\n" + _text(content, "No Jellyfin server logs were captured.") + "\n```"
 
 
 def _jellyfin_logs(execution_result: dict[str, Any]) -> str:
@@ -572,74 +638,142 @@ def _relevant_log_line(line: str, indicators: Iterable[str]) -> bool:
 
 
 def _http_responses(execution_result: dict[str, Any]) -> str:
+    return _format_http_evidence(_http_evidence(execution_result))
+
+
+def _http_evidence(execution_result: dict[str, Any]) -> list[dict[str, Any]]:
     entries = [
         entry
         for entry in execution_result.get("execution_log", [])
         if isinstance(entry, dict) and isinstance(entry.get("http"), dict)
     ]
-    if not entries:
-        return "No HTTP responses were captured."
 
     step_by_id = {
         step.get("step_id"): step
         for step in _plan(execution_result).get("reproduction_steps", [])
         if isinstance(step, dict)
     }
-    blocks = []
+    responses = []
     for entry in entries:
         step = step_by_id.get(entry.get("step_id"), {})
         step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
         method = _text(step_input.get("method"), "HTTP")
         path = _text(step_input.get("path"), f"step {entry.get('step_id')}")
         http = entry["http"]
-        blocks.append(f"- `{method.upper()} {path}` -> HTTP {http.get('status_code')}")
         body = http.get("body")
-        if body:
-            blocks.append(_indent_code(_format_body(body), "json" if _looks_json(body) else "text", spaces=2))
+        responses.append(
+            {
+                "step_id": entry.get("step_id"),
+                "method": method.upper(),
+                "path": path,
+                "status_code": http.get("status_code"),
+                "body": _format_body(body) if body else None,
+                "body_format": "json" if body and _looks_json(body) else "text",
+            }
+        )
+    return responses
+
+
+def _format_http_evidence(responses: list[dict[str, Any]]) -> str:
+    if not responses:
+        return "No HTTP responses were captured."
+    blocks = []
+    for response in responses:
+        blocks.append(
+            f"- `{response.get('method', 'HTTP')} {response.get('path', '/')}` "
+            f"-> HTTP {response.get('status_code')}"
+        )
+        if response.get("body"):
+            blocks.append(
+                _indent_code(
+                    str(response["body"]),
+                    _text(response.get("body_format"), "text"),
+                    spaces=2,
+                )
+            )
     return "\n".join(blocks)
 
 
 def _browser_evidence(execution_result: dict[str, Any]) -> str:
+    return _format_browser_evidence(_browser_evidence_items(execution_result))
+
+
+def _browser_evidence_items(execution_result: dict[str, Any]) -> list[dict[str, Any]]:
     entries = [
         entry
         for entry in execution_result.get("execution_log", [])
         if isinstance(entry, dict) and isinstance(entry.get("browser"), dict)
     ]
-    if not entries:
-        return ""
-
-    blocks = []
+    items = []
     for entry in entries:
         browser = entry["browser"]
         actions = browser.get("actions") if isinstance(browser.get("actions"), list) else []
-        action_summary = _browser_action_summary(actions)
+        console = browser.get("console") if isinstance(browser.get("console"), list) else []
+        failed_network = browser.get("failed_network") if isinstance(browser.get("failed_network"), list) else []
+        media_state = browser.get("media_state") if isinstance(browser.get("media_state"), dict) else {}
+        items.append(
+            {
+                "step_id": entry.get("step_id"),
+                "status": browser.get("status", "unknown"),
+                "action_summary": _browser_action_summary(actions),
+                "final_url": browser.get("final_url"),
+                "media_state": media_state.get("state"),
+                "console": [
+                    {"type": item.get("type", "console"), "text": _text(item.get("text"), "")}
+                    for item in console[:5]
+                    if isinstance(item, dict)
+                ],
+                "failed_network": [
+                    {
+                        "status": item.get("status") or item.get("error") or "failed",
+                        "url": _text(item.get("url"), ""),
+                    }
+                    for item in failed_network[:5]
+                    if isinstance(item, dict)
+                ],
+                "dom_summary": _truncate(str(browser["dom_summary"]), 500)
+                if browser.get("dom_summary")
+                else None,
+            }
+        )
+    return items
+
+
+def _format_browser_evidence(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return ""
+    blocks = []
+    for browser_item in items:
+        action_summary = _text(browser_item.get("action_summary"))
         blocks.append(
-            f"- Step {entry.get('step_id')} browser `{browser.get('status', 'unknown')}`"
+            f"- Step {browser_item.get('step_id')} browser `{browser_item.get('status', 'unknown')}`"
             + (f": {action_summary}" if action_summary else "")
         )
-        if browser.get("final_url"):
-            blocks.append(f"  Final URL: `{_inline_code(browser['final_url'])}`")
-        if browser.get("media_state"):
-            state = browser.get("media_state", {}).get("state")
-            blocks.append(f"  Media state: `{_inline_code(state or 'unknown')}`")
-        console = browser.get("console") if isinstance(browser.get("console"), list) else []
+        if browser_item.get("final_url"):
+            blocks.append(f"  Final URL: `{_inline_code(browser_item['final_url'])}`")
+        if browser_item.get("media_state"):
+            blocks.append(f"  Media state: `{_inline_code(browser_item['media_state'])}`")
+        console = browser_item.get("console") if isinstance(browser_item.get("console"), list) else []
         if console:
             blocks.append("  Console warnings/errors:")
-            for item in console[:5]:
-                if isinstance(item, dict):
+            for console_item in console[:5]:
+                if isinstance(console_item, dict):
                     blocks.append(
-                        f"  - `{_inline_code(item.get('type', 'console'))}` "
-                        f"{_text(item.get('text'), '')}"
+                        f"  - `{_inline_code(console_item.get('type', 'console'))}` "
+                        f"{_text(console_item.get('text'), '')}"
                     )
-        failed_network = browser.get("failed_network") if isinstance(browser.get("failed_network"), list) else []
+        failed_network = (
+            browser_item.get("failed_network")
+            if isinstance(browser_item.get("failed_network"), list)
+            else []
+        )
         if failed_network:
             blocks.append("  Failed network responses:")
-            for item in failed_network[:5]:
-                if isinstance(item, dict):
-                    status = item.get("status") or item.get("error") or "failed"
-                    blocks.append(f"  - `{_inline_code(status)}` {_text(item.get('url'), '')}")
-        if browser.get("dom_summary"):
-            blocks.append(f"  DOM summary: {_truncate(str(browser['dom_summary']), 500)}")
+            for failed in failed_network[:5]:
+                if isinstance(failed, dict):
+                    blocks.append(f"  - `{_inline_code(failed.get('status', 'failed'))}` {_text(failed.get('url'), '')}")
+        if browser_item.get("dom_summary"):
+            blocks.append(f"  DOM summary: {browser_item['dom_summary']}")
     return "\n".join(blocks)
 
 
@@ -664,6 +798,16 @@ def _screenshots(
     output_dir: Path,
     artifacts_root: Path,
 ) -> str:
+    return _format_screenshot_evidence(
+        _screenshot_evidence(execution_result, output_dir, artifacts_root)
+    )
+
+
+def _screenshot_evidence(
+    execution_result: dict[str, Any],
+    output_dir: Path,
+    artifacts_root: Path,
+) -> list[dict[str, Any]]:
     paths = []
     for entry in execution_result.get("execution_log", []):
         if not isinstance(entry, dict):
@@ -676,7 +820,7 @@ def _screenshots(
             if path:
                 paths.append((entry, str(path)))
 
-    lines = []
+    screenshots = []
     seen = set()
     for entry, path in paths:
         relative = _relative_artifact_path(path, output_dir, artifacts_root)
@@ -686,8 +830,22 @@ def _screenshots(
         label = f"Step {entry.get('step_id')} screenshot"
         if path == entry.get("failure_screenshot_path"):
             label = f"Step {entry.get('step_id')} failure"
-        lines.append(f"![{label}]({relative})")
-    return "\n".join(lines)
+        screenshots.append(
+            {
+                "step_id": entry.get("step_id"),
+                "path": path,
+                "relative_path": relative,
+                "label": label,
+            }
+        )
+    return screenshots
+
+
+def _format_screenshot_evidence(screenshots: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        f"![{_text(item.get('label'), 'Screenshot')}]({item.get('relative_path')})"
+        for item in screenshots
+    )
 
 
 def _analysis(execution_result: dict[str, Any]) -> str:
