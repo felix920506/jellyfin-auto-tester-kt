@@ -36,57 +36,37 @@ Select the minimal reproduction steps with tools:
 - Call `report_writer.select_report_steps(execution_result)`.
 - Do not add, remove, rewrite, or reorder executable report steps yourself.
 
-Write the report:
+Route the first pass:
 
-- Call `report_writer.generate(execution_result)` to render and save
-  `report.md` under the first run's artifacts directory.
-- Do not draft report sections yourself; report wording and Markdown assembly
-  are owned by `report_writer`.
-
-Request verification:
-
-- Call `report_writer.build_verification_plan(execution_result)`. The tool
-  selects the verification steps deterministically.
-- If the returned plan has `execution_target: "web_client"`, send it to the
-  `web_client_verification_request` channel with a `send_message` tool-call
-  block.
-- Otherwise, send it to the standard `verification_request` channel with a
-  `send_message` tool-call block.
-- Do not send to `final_report` on the first run.
+- Call `report_writer.route_report_result(execution_result)`. The tool renders
+  the report, selects verification steps, and chooses either
+  `verification_request`, `web_client_verification_request`, or
+  `human_review_queue`. Plans with `execution_target: "web_client"` are routed
+  to `web_client_verification_request`.
+- Send the returned `payload` to the returned `channel` with a `send_message`
+  tool-call block.
+- Do not override the returned channel or payload.
 
 Exception:
 
-If the first run is `inconclusive` and the trigger step was never reached
-because all trigger work was skipped or setup failed before the trigger, skip
-verification. Send the draft report to `human_review_queue` with a clear reason
-and emit `QUEUED_FOR_REVIEW`.
+If `route_report_result` returns `human_review_queue`, emit
+`QUEUED_FOR_REVIEW`. Otherwise wait for the verification result.
 
 ### Verification run: `is_verification = true`
 
 Reload durable first-run context:
 
-- Read `execution_result.original_run_id`. If it is missing, route to
-  `human_review_queue`; the verification result cannot be tied to a report.
-- Call `report_writer.load_original_context(verification_result)` to load the
-  original result and report from that run's artifacts.
+- `report_writer.route_report_result(verification_result)` loads the original
+  result and report using `execution_result.original_run_id`.
+- If original context is missing, the tool returns `human_review_queue`.
 - Do not rely on in-memory state from the first pass.
-
-Compare results:
-
-- Call `report_writer.compare_verification(original_result, verification_result)`.
-- Treat the returned `passed`, `reason_code`, and `details` as authoritative;
-  do not compare verification results yourself.
 
 Route exactly once:
 
-- If verification passed and is consistent, call
-  `report_writer.generate(original_result, verification_result)` to attach
-  verification metadata, send the final report metadata to `final_report` with
-  `send_message`, and emit `REPORT_COMPLETE`.
-- If verification failed or is inconsistent, call
-  `report_writer.generate(original_result, verification_result)` so the report
-  includes a verification failure section, send the report metadata and reason
-  to `human_review_queue` with `send_message`, and emit `QUEUED_FOR_REVIEW`.
+- Call `report_writer.route_report_result(verification_result)`.
+- Send the returned `payload` to the returned `channel` with `send_message`.
+- If the returned channel is `final_report`, emit `REPORT_COMPLETE`.
+- If the returned channel is `human_review_queue`, emit `QUEUED_FOR_REVIEW`.
 
 ## Rules
 

@@ -493,6 +493,41 @@ class ReportWriterTests(unittest.TestCase):
             self.assertEqual(comparison["reason_code"], "trigger_status_mismatch")
             self.assertIn("Original trigger status", comparison["details"][0])
 
+    def test_route_report_result_first_run_requests_verification(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sample_result(temp_dir, run_id="run-1")
+
+            route = report_writer.route_report_result(result, artifacts_base=temp_dir)
+
+            self.assertEqual(route["channel"], "verification_request")
+            self.assertFalse(route["terminal"])
+            self.assertTrue(route["payload"]["is_verification"])
+            self.assertEqual(route["payload"]["original_run_id"], "run-1")
+            self.assertTrue((Path(temp_dir) / "run-1" / "report.md").is_file())
+
+    def test_route_report_result_verification_sends_final_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = sample_result(temp_dir, run_id="run-1")
+            original_path = Path(original["artifacts_dir"]) / "result.json"
+            original_path.write_text(json.dumps(original), encoding="utf-8")
+            report_writer.generate(original, artifacts_base=temp_dir)
+            verification = sample_result(temp_dir, run_id="run-2")
+            verification["is_verification"] = True
+            verification["original_run_id"] = "run-1"
+            verification["plan"]["is_verification"] = True
+            verification["plan"]["original_run_id"] = "run-1"
+
+            route = report_writer.route_report_result(
+                verification,
+                artifacts_base=temp_dir,
+            )
+
+            self.assertEqual(route["channel"], "final_report")
+            self.assertTrue(route["terminal"])
+            self.assertTrue(route["payload"]["verified"])
+            self.assertEqual(route["payload"]["verification_run_id"], "run-2")
+            self.assertTrue(Path(route["payload"]["report_path"]).is_file())
+
     def test_generate_records_verification_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original = sample_result(temp_dir, run_id="run-1")

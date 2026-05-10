@@ -224,6 +224,82 @@ def compare_verification(
     }
 
 
+def route_report_result(
+    execution_result: dict[str, Any],
+    verification_result: dict[str, Any] | None = None,
+    artifacts_base: str | Path = DEFAULT_ARTIFACTS_BASE,
+) -> dict[str, Any]:
+    """Return the deterministic channel and payload for the report stage."""
+
+    if not isinstance(execution_result, dict):
+        raise TypeError("execution_result must be a dict")
+    execution_result = hydrate_execution_result(execution_result)
+
+    if verification_result is not None:
+        if not isinstance(verification_result, dict):
+            raise TypeError("verification_result must be a dict")
+        verification_result = hydrate_execution_result(verification_result)
+        original_result = execution_result
+        return _route_verification_result(original_result, verification_result, artifacts_base)
+
+    if execution_result.get("is_verification"):
+        try:
+            context = load_original_context(execution_result, artifacts_base=artifacts_base)
+        except (FileNotFoundError, ValueError) as error:
+            return {
+                "channel": "human_review_queue",
+                "payload": {
+                    "verified": False,
+                    "verification_run_id": execution_result.get("run_id"),
+                    "original_run_id": execution_result.get("original_run_id"),
+                    "reason_code": "missing_original_context",
+                    "reason": str(error),
+                },
+                "terminal": True,
+                "comparison": {
+                    "passed": False,
+                    "reason_code": "missing_original_context",
+                    "details": [str(error)],
+                },
+            }
+        return _route_verification_result(
+            context["original_result"],
+            execution_result,
+            artifacts_base,
+        )
+
+    metadata = generate(execution_result, artifacts_base=artifacts_base)
+    summary = summarize_execution_result(execution_result)
+    if _should_skip_first_run_verification(summary):
+        payload = _report_route_payload(metadata, execution_result)
+        payload.update(
+            {
+                "verified": False,
+                "reason_code": "trigger_not_reached",
+                "reason": "First run was inconclusive before the trigger produced decisive evidence.",
+            }
+        )
+        return {
+            "channel": "human_review_queue",
+            "payload": payload,
+            "terminal": True,
+            "report_metadata": metadata,
+        }
+
+    verification_plan = build_verification_plan(execution_result)
+    channel = (
+        "web_client_verification_request"
+        if verification_plan.get("execution_target") == "web_client"
+        else "verification_request"
+    )
+    return {
+        "channel": channel,
+        "payload": verification_plan,
+        "terminal": False,
+        "report_metadata": metadata,
+    }
+
+
 def generate(
     execution_result: dict[str, Any],
     verification_result: dict[str, Any] | None = None,
@@ -1098,6 +1174,79 @@ def _notes(execution_result: dict[str, Any]) -> str:
     if not notes:
         notes.append("- No additional caveats were recorded.")
     return "\n".join(notes)
+
+
+def _route_verification_result(
+    original_result: dict[str, Any],
+    verification_result: dict[str, Any],
+    artifacts_base: str | Path,
+) -> dict[str, Any]:
+    comparison = compare_verification(original_result, verification_result)
+    metadata = generate(
+        original_result,
+        verification_result=verification_result,
+        artifacts_base=artifacts_base,
+    )
+    payload = _report_route_payload(
+        metadata,
+        original_result,
+        verification_result=verification_result,
+        comparison=comparison,
+    )
+    if comparison["passed"]:
+        return {
+            "channel": "final_report",
+            "payload": payload,
+            "terminal": True,
+            "report_metadata": metadata,
+            "comparison": comparison,
+        }
+    payload.update(
+        {
+            "reason_code": comparison["reason_code"],
+            "reason": "; ".join(comparison["details"])
+            or f"Verification comparison failed: {comparison['reason_code']}",
+        }
+    )
+    return {
+        "channel": "human_review_queue",
+        "payload": payload,
+        "terminal": True,
+        "report_metadata": metadata,
+        "comparison": comparison,
+    }
+
+
+def _report_route_payload(
+    metadata: dict[str, Any],
+    original_result: dict[str, Any],
+    verification_result: dict[str, Any] | None = None,
+    comparison: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    plan = _plan(original_result)
+    path = metadata.get("path")
+    payload = {
+        "path": path,
+        "report_path": path,
+        "run_id": original_result.get("run_id"),
+        "verification_run_id": (verification_result or {}).get("run_id"),
+        "overall_result": original_result.get("overall_result"),
+        "verified": metadata.get("verified"),
+        "verification_status": metadata.get("verification_status"),
+        "issue_url": plan.get("issue_url"),
+    }
+    if comparison is not None:
+        payload["comparison"] = comparison
+    return payload
+
+
+def _should_skip_first_run_verification(summary: dict[str, Any]) -> bool:
+    if summary.get("overall_result") != "inconclusive":
+        return False
+    trigger = summary.get("trigger")
+    if not isinstance(trigger, dict):
+        return True
+    return trigger.get("status") in {None, "skip", "inconclusive"}
 
 
 def _verification_passed(
