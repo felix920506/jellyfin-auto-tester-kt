@@ -21,6 +21,19 @@ DEFAULT_ARTIFACTS_BASE = "/artifacts"
 MAX_LOG_EXCERPT_LINES = 50
 MAX_BODY_CHARS = 2000
 MAX_STREAM_CHARS = 1200
+HUMAN_REVIEW_REASON_MESSAGES = {
+    "missing_original_context": "Verification result could not be tied to the original run artifacts.",
+    "trigger_not_reached": "First run was inconclusive before the trigger produced decisive evidence.",
+    "original_inconclusive": "Original run was inconclusive and cannot be verified automatically.",
+    "overall_result_mismatch": "Verification overall result differed from the original run.",
+    "missing_trigger": "Original or verification trigger summary is missing.",
+    "trigger_status_mismatch": "Verification trigger status differed from the original run.",
+    "trigger_criteria_mismatch": "Verification trigger criteria result differed from the original run.",
+    "http_evidence_missing": "Verification run did not capture trigger HTTP evidence from the original run.",
+    "http_status_mismatch": "Verification trigger HTTP status differed from the original run.",
+    "http_body_indicator_mismatch": "Verification trigger HTTP body indicators differed from the original run.",
+    "log_indicator_mismatch": "Verification log indicators differed from the original run.",
+}
 
 
 def summarize_execution_result(execution_result: dict[str, Any]) -> dict[str, Any]:
@@ -246,6 +259,11 @@ def route_report_result(
         try:
             context = load_original_context(execution_result, artifacts_base=artifacts_base)
         except (FileNotFoundError, ValueError) as error:
+            reason = format_human_review_reason(
+                "missing_original_context",
+                [str(error)],
+                verification_result=execution_result,
+            )
             return {
                 "channel": "human_review_queue",
                 "payload": {
@@ -253,13 +271,13 @@ def route_report_result(
                     "verification_run_id": execution_result.get("run_id"),
                     "original_run_id": execution_result.get("original_run_id"),
                     "reason_code": "missing_original_context",
-                    "reason": str(error),
+                    "reason": reason,
                 },
                 "terminal": True,
                 "comparison": {
                     "passed": False,
                     "reason_code": "missing_original_context",
-                    "details": [str(error)],
+                    "details": [reason],
                 },
             }
         return _route_verification_result(
@@ -276,7 +294,10 @@ def route_report_result(
             {
                 "verified": False,
                 "reason_code": "trigger_not_reached",
-                "reason": "First run was inconclusive before the trigger produced decisive evidence.",
+                "reason": format_human_review_reason(
+                    "trigger_not_reached",
+                    original_result=execution_result,
+                ),
             }
         )
         return {
@@ -298,6 +319,31 @@ def route_report_result(
         "terminal": False,
         "report_metadata": metadata,
     }
+
+
+def format_human_review_reason(
+    reason_code: str,
+    details: Iterable[Any] | None = None,
+    original_result: dict[str, Any] | None = None,
+    verification_result: dict[str, Any] | None = None,
+) -> str:
+    """Return the deterministic human-review reason for a route decision."""
+
+    message = HUMAN_REVIEW_REASON_MESSAGES.get(
+        reason_code,
+        f"Automated report routing failed with reason `{reason_code}`.",
+    )
+    parts = [message]
+    detail_text = "; ".join(_text(detail) for detail in (details or []) if _text(detail))
+    if detail_text:
+        parts.append(f"Details: {detail_text}")
+    original_artifacts = (original_result or {}).get("artifacts_dir")
+    verification_artifacts = (verification_result or {}).get("artifacts_dir")
+    if original_artifacts:
+        parts.append(f"Original artifacts: {original_artifacts}")
+    if verification_artifacts:
+        parts.append(f"Verification artifacts: {verification_artifacts}")
+    return " ".join(parts)
 
 
 def generate(
@@ -1204,8 +1250,12 @@ def _route_verification_result(
     payload.update(
         {
             "reason_code": comparison["reason_code"],
-            "reason": "; ".join(comparison["details"])
-            or f"Verification comparison failed: {comparison['reason_code']}",
+            "reason": format_human_review_reason(
+                comparison["reason_code"],
+                comparison["details"],
+                original_result=original_result,
+                verification_result=verification_result,
+            ),
         }
     )
     return {

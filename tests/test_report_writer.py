@@ -528,6 +528,51 @@ class ReportWriterTests(unittest.TestCase):
             self.assertEqual(route["payload"]["verification_run_id"], "run-2")
             self.assertTrue(Path(route["payload"]["report_path"]).is_file())
 
+    def test_format_human_review_reason_uses_reason_codes_and_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = sample_result(temp_dir, run_id="run-1")
+            verification = sample_result(temp_dir, run_id="run-2")
+
+            reason = report_writer.format_human_review_reason(
+                "trigger_status_mismatch",
+                ["Original trigger status `pass`; verification trigger status `fail`."],
+                original_result=original,
+                verification_result=verification,
+            )
+
+            self.assertIn("Verification trigger status differed", reason)
+            self.assertIn("Original trigger status `pass`", reason)
+            self.assertIn(str(Path(temp_dir) / "run-1"), reason)
+            self.assertIn(str(Path(temp_dir) / "run-2"), reason)
+
+    def test_route_report_result_verification_review_uses_deterministic_reason(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = sample_result(temp_dir, run_id="run-1")
+            original_path = Path(original["artifacts_dir"]) / "result.json"
+            original_path.write_text(json.dumps(original), encoding="utf-8")
+            report_writer.generate(original, artifacts_base=temp_dir)
+            verification = sample_result(
+                temp_dir,
+                run_id="run-2",
+                overall_result="not_reproduced",
+            )
+            verification["is_verification"] = True
+            verification["original_run_id"] = "run-1"
+
+            route = report_writer.route_report_result(
+                verification,
+                artifacts_base=temp_dir,
+            )
+
+            self.assertEqual(route["channel"], "human_review_queue")
+            self.assertEqual(route["payload"]["reason_code"], "overall_result_mismatch")
+            self.assertIn(
+                "Verification overall result differed",
+                route["payload"]["reason"],
+            )
+            self.assertIn(str(Path(temp_dir) / "run-1"), route["payload"]["reason"])
+            self.assertIn(str(Path(temp_dir) / "run-2"), route["payload"]["reason"])
+
     def test_generate_records_verification_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original = sample_result(temp_dir, run_id="run-1")
