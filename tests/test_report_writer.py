@@ -281,6 +281,36 @@ class ReportWriterTests(unittest.TestCase):
                 "screenshots/playback_error.png",
             )
 
+    def test_select_report_steps_uses_deterministic_minimal_set(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sample_result(temp_dir)
+            late_setup = {
+                "step_id": 4,
+                "role": "setup",
+                "action": "Create unrelated state after trigger",
+                "tool": "bash",
+                "input": {"command": "true"},
+                "expected_outcome": "The command exits successfully.",
+                "success_criteria": {"all_of": [{"type": "exit_code", "equals": 0}]},
+            }
+            late_verify = {
+                "step_id": 5,
+                "role": "verify",
+                "action": "Check the same failure again",
+                "tool": "http_request",
+                "input": {"method": "GET", "path": "/System/Info"},
+                "expected_outcome": "The server remains reachable.",
+                "success_criteria": {"all_of": [{"type": "status_code", "equals": 200}]},
+            }
+            result["plan"]["reproduction_steps"].extend([late_setup, late_verify])
+
+            steps = report_writer.select_report_steps(result)
+
+            self.assertEqual([step["step_id"] for step in steps], [1, 2, 3, 5])
+            self.assertEqual(sum(1 for step in steps if step["role"] == "trigger"), 1)
+            self.assertIsNot(steps[0], result["plan"]["reproduction_steps"][0])
+            self.assertNotIn(late_setup, steps)
+
     def test_generate_hydrates_compact_execution_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             result = sample_result(temp_dir)

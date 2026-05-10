@@ -83,6 +83,15 @@ def collect_report_evidence(
     }
 
 
+def select_report_steps(execution_result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the deterministic minimal step set for report and verification."""
+
+    if not isinstance(execution_result, dict):
+        raise TypeError("execution_result must be a dict")
+    execution_result = hydrate_execution_result(execution_result)
+    return _minimal_steps(execution_result)
+
+
 def generate(
     execution_result: dict[str, Any],
     verification_result: dict[str, Any] | None = None,
@@ -405,7 +414,7 @@ def _reproduction_steps(
     execution_result: dict[str, Any],
     written_steps: list[dict[str, Any]] | None,
 ) -> str:
-    steps = written_steps or _minimal_steps(execution_result)
+    steps = written_steps or select_report_steps(execution_result)
     if not steps:
         return "No executable reproduction steps were available in the execution result."
 
