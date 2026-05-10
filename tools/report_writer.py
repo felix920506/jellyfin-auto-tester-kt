@@ -1,8 +1,4 @@
-"""Report generation helpers for Stage 3.
-
-The report stage is mostly agent reasoning, but this module keeps the output
-format deterministic and makes the one-pass verification request reproducible.
-"""
+"""Deterministic report generation helpers for Stage 3."""
 
 from __future__ import annotations
 
@@ -92,6 +88,38 @@ def select_report_steps(execution_result: dict[str, Any]) -> list[dict[str, Any]
     return _minimal_steps(execution_result)
 
 
+def render_report_markdown(
+    execution_result: dict[str, Any],
+    verification_result: dict[str, Any] | None = None,
+    artifacts_base: str | Path = DEFAULT_ARTIFACTS_BASE,
+    written_steps: list[dict[str, Any]] | None = None,
+) -> str:
+    """Render the full report Markdown without writing it to disk."""
+
+    if not isinstance(execution_result, dict):
+        raise TypeError("execution_result must be a dict")
+    execution_result = hydrate_execution_result(execution_result)
+    if verification_result is not None:
+        if not isinstance(verification_result, dict):
+            raise TypeError("verification_result must be a dict")
+        verification_result = hydrate_execution_result(verification_result)
+
+    run_id = _require_text(execution_result, "run_id")
+    output_run_id = (
+        _require_text(execution_result, "original_run_id")
+        if execution_result.get("is_verification")
+        else run_id
+    )
+    artifacts_root = _resolve_artifacts_root(execution_result, artifacts_base)
+    return _render_report(
+        execution_result=execution_result,
+        verification_result=verification_result,
+        output_dir=artifacts_root / output_run_id,
+        artifacts_root=artifacts_root,
+        written_steps=written_steps,
+    )
+
+
 def generate(
     execution_result: dict[str, Any],
     verification_result: dict[str, Any] | None = None,
@@ -125,11 +153,10 @@ def generate(
     output_dir = artifacts_root / output_run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    report = _render_report(
-        execution_result=execution_result,
+    report = render_report_markdown(
+        execution_result,
         verification_result=verification_result,
-        output_dir=output_dir,
-        artifacts_root=artifacts_root,
+        artifacts_base=artifacts_base,
         written_steps=written_steps,
     )
     path = output_dir / "report.md"

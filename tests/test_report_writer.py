@@ -259,6 +259,20 @@ class ReportWriterTests(unittest.TestCase):
             self.assertNotIn("DEBUG noisy line", report)
             self.assertIn("![Step 3 screenshot](screenshots/playback_error.png)", report)
 
+    def test_render_report_markdown_assembles_report_without_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sample_result(temp_dir)
+            report_path = Path(temp_dir) / "run-1" / "report.md"
+
+            report = report_writer.render_report_markdown(
+                result,
+                artifacts_base=temp_dir,
+            )
+
+            self.assertIn("# Reproduction Report: PlaybackInfo returns 500", report)
+            self.assertIn("## Evidence", report)
+            self.assertFalse(report_path.exists())
+
     def test_collect_report_evidence_returns_structured_report_inputs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             result = sample_result(temp_dir)
