@@ -457,6 +457,42 @@ class ReportWriterTests(unittest.TestCase):
             self.assertIn("**Verification Run ID:** run-2", report)
             self.assertIn("**Result:** Passed", report)
 
+    def test_compare_verification_accepts_matching_trigger_and_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = sample_result(temp_dir, run_id="run-1")
+            verification = sample_result(temp_dir, run_id="run-2")
+            verification["is_verification"] = True
+            verification["original_run_id"] = "run-1"
+
+            comparison = report_writer.compare_verification(original, verification)
+
+            self.assertTrue(comparison["passed"])
+            self.assertEqual(comparison["reason_code"], "consistent")
+            self.assertEqual(comparison["details"], [])
+
+    def test_compare_verification_rejects_mismatched_trigger_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = sample_result(temp_dir, run_id="run-1")
+            verification = sample_result(temp_dir, run_id="run-2")
+            verification["overall_result"] = "reproduced"
+            verification["execution_log"][1]["outcome"] = "fail"
+            verification["execution_log"][1]["reason"] = "status_code expected 500 got 200"
+            verification["execution_log"][1]["http"] = {
+                "status_code": 200,
+                "body": '{"ok":true}',
+                "headers": {},
+            }
+            verification["execution_log"][1]["criteria_evaluation"] = {
+                "passed": False,
+                "assertions": [],
+            }
+
+            comparison = report_writer.compare_verification(original, verification)
+
+            self.assertFalse(comparison["passed"])
+            self.assertEqual(comparison["reason_code"], "trigger_status_mismatch")
+            self.assertIn("Original trigger status", comparison["details"][0])
+
     def test_generate_records_verification_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original = sample_result(temp_dir, run_id="run-1")

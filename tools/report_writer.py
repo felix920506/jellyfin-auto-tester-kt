@@ -120,6 +120,110 @@ def render_report_markdown(
     )
 
 
+def compare_verification(
+    original_result: dict[str, Any],
+    verification_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare first-run and verification results deterministically."""
+
+    if not isinstance(original_result, dict):
+        raise TypeError("original_result must be a dict")
+    if not isinstance(verification_result, dict):
+        raise TypeError("verification_result must be a dict")
+    original_result = hydrate_execution_result(original_result)
+    verification_result = hydrate_execution_result(verification_result)
+
+    original_summary = summarize_execution_result(original_result)
+    verification_summary = summarize_execution_result(verification_result)
+    details: list[str] = []
+    reason_code = "consistent"
+
+    def fail(code: str, detail: str) -> None:
+        nonlocal reason_code
+        if reason_code == "consistent":
+            reason_code = code
+        details.append(detail)
+
+    original_overall = original_summary.get("overall_result")
+    verification_overall = verification_summary.get("overall_result")
+    if original_overall == "inconclusive":
+        fail("original_inconclusive", "Original run was inconclusive.")
+    if verification_overall != original_overall:
+        fail(
+            "overall_result_mismatch",
+            f"Original result `{original_overall}`; verification result `{verification_overall}`.",
+        )
+
+    original_trigger = original_summary.get("trigger")
+    verification_trigger = verification_summary.get("trigger")
+    if not isinstance(original_trigger, dict) or not isinstance(verification_trigger, dict):
+        fail("missing_trigger", "Original or verification trigger summary is missing.")
+    else:
+        if verification_trigger.get("status") != original_trigger.get("status"):
+            fail(
+                "trigger_status_mismatch",
+                "Original trigger status "
+                f"`{original_trigger.get('status')}`; verification trigger status "
+                f"`{verification_trigger.get('status')}`.",
+            )
+        original_criteria = original_trigger.get("criteria_passed")
+        verification_criteria = verification_trigger.get("criteria_passed")
+        if (
+            isinstance(original_criteria, bool)
+            and isinstance(verification_criteria, bool)
+            and verification_criteria != original_criteria
+        ):
+            fail(
+                "trigger_criteria_mismatch",
+                f"Original trigger criteria `{original_criteria}`; "
+                f"verification trigger criteria `{verification_criteria}`.",
+            )
+
+    original_http = _trigger_http_signature(original_result, original_trigger)
+    verification_http = _trigger_http_signature(verification_result, verification_trigger)
+    if original_http and not verification_http:
+        fail("http_evidence_missing", "Original trigger had HTTP evidence; verification did not.")
+    elif original_http and verification_http:
+        if original_http.get("status_code") != verification_http.get("status_code"):
+            fail(
+                "http_status_mismatch",
+                "Original trigger HTTP status "
+                f"`{original_http.get('status_code')}`; verification trigger HTTP status "
+                f"`{verification_http.get('status_code')}`.",
+            )
+        if (
+            original_http.get("failure_indicator_present") is not None
+            and verification_http.get("failure_indicator_present") is not None
+            and original_http.get("failure_indicator_present")
+            != verification_http.get("failure_indicator_present")
+        ):
+            fail(
+                "http_body_indicator_mismatch",
+                "Original and verification trigger HTTP bodies did not match "
+                "configured failure indicators.",
+            )
+
+    original_logs = _log_indicator_signature(original_result)
+    verification_logs = _log_indicator_signature(verification_result)
+    if (
+        original_logs is not None
+        and verification_logs is not None
+        and original_logs != verification_logs
+    ):
+        fail(
+            "log_indicator_mismatch",
+            "Original and verification logs did not match configured failure indicators.",
+        )
+
+    return {
+        "passed": reason_code == "consistent",
+        "reason_code": reason_code,
+        "details": details,
+        "original": original_summary,
+        "verification": verification_summary,
+    }
+
+
 def generate(
     execution_result: dict[str, Any],
     verification_result: dict[str, Any] | None = None,
@@ -956,19 +1060,24 @@ def _verification_comparison(
     execution_result: dict[str, Any],
     verification_result: dict[str, Any],
 ) -> str:
-    original_trigger = _trigger_entry(execution_result) or {}
-    verification_trigger = _trigger_entry(verification_result) or {}
+    comparison = compare_verification(execution_result, verification_result)
+    original_trigger = comparison["original"].get("trigger") or {}
+    verification_trigger = comparison["verification"].get("trigger") or {}
     lines = [
         "Original result "
-        f"`{_text(execution_result.get('overall_result'), 'unknown')}`; "
+        f"`{_text(comparison['original'].get('overall_result'), 'unknown')}`; "
         "verification result "
-        f"`{_text(verification_result.get('overall_result'), 'unknown')}`.",
-        "Original trigger outcome "
-        f"`{_text(original_trigger.get('outcome'), 'unknown')}`; "
-        "verification trigger outcome "
-        f"`{_text(verification_trigger.get('outcome'), 'unknown')}`.",
+        f"`{_text(comparison['verification'].get('overall_result'), 'unknown')}`.",
+        "Original trigger status "
+        f"`{_text(original_trigger.get('status'), 'unknown')}`; "
+        "verification trigger status "
+        f"`{_text(verification_trigger.get('status'), 'unknown')}`.",
     ]
-    if verification_trigger.get("reason"):
+    if comparison.get("reason_code") != "consistent":
+        lines.append(f"Comparison reason: `{_inline_code(comparison.get('reason_code'))}`.")
+    if comparison.get("details"):
+        lines.extend(str(detail) for detail in comparison["details"])
+    elif verification_trigger.get("reason"):
         lines.append(f"Verification trigger reason: `{_inline_code(verification_trigger['reason'])}`.")
     return " ".join(lines)
 
@@ -997,16 +1106,7 @@ def _verification_passed(
 ) -> bool | None:
     if verification_result is None:
         return None
-    if execution_result.get("overall_result") == "inconclusive":
-        return False
-    if verification_result.get("overall_result") != execution_result.get("overall_result"):
-        return False
-
-    original_trigger = _trigger_entry(execution_result)
-    verification_trigger = _trigger_entry(verification_result)
-    if not original_trigger or not verification_trigger:
-        return False
-    return original_trigger.get("outcome") == verification_trigger.get("outcome")
+    return bool(compare_verification(execution_result, verification_result)["passed"])
 
 
 def _verification_status(verified: bool | None) -> str:
@@ -1180,6 +1280,59 @@ def _trigger_status(
         if entry:
             return _status_from_legacy_step({}, entry)
     return None
+
+
+def _trigger_http_signature(
+    execution_result: dict[str, Any],
+    trigger: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(trigger, dict):
+        return None
+    trigger_key = _step_key(trigger.get("step_id"))
+    if trigger_key is None:
+        return None
+    entries = [
+        entry
+        for entry in execution_result.get("execution_log", [])
+        if isinstance(entry, dict)
+        and _step_key(entry.get("step_id")) == trigger_key
+        and isinstance(entry.get("http"), dict)
+    ]
+    entry = _decisive_execution_entry(entries)
+    if entry is None:
+        return None
+    http = entry.get("http") if isinstance(entry.get("http"), dict) else {}
+    body = _text(http.get("body"))
+    indicators = _failure_indicators(execution_result)
+    return {
+        "status_code": http.get("status_code"),
+        "failure_indicator_present": _indicator_present(body, indicators)
+        if indicators and body
+        else None,
+    }
+
+
+def _log_indicator_signature(execution_result: dict[str, Any]) -> bool | None:
+    indicators = _failure_indicators(execution_result)
+    if not indicators:
+        return None
+    logs = _jellyfin_logs(execution_result)
+    if not logs:
+        return False
+    return _indicator_present(logs, indicators)
+
+
+def _indicator_present(value: str, indicators: Iterable[str]) -> bool:
+    for indicator in indicators:
+        if not indicator:
+            continue
+        try:
+            if re.search(indicator, value, flags=re.IGNORECASE):
+                return True
+        except re.error:
+            if indicator.lower() in value.lower():
+                return True
+    return False
 
 
 def _step_key(value: Any) -> str | None:

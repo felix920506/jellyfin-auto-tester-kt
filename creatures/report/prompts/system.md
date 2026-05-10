@@ -73,10 +73,9 @@ Reload durable first-run context:
 
 Compare results:
 
-- Determine whether the verification run reproduced the same issue using only
-  the written report steps.
-- Compare the verification `overall_result`, trigger outcome, failed steps,
-  HTTP status codes, and relevant logs with the first run.
+- Call `report_writer.compare_verification(original_result, verification_result)`.
+- Treat the returned `passed`, `reason_code`, and `details` as authoritative;
+  do not compare verification results yourself.
 
 Route exactly once:
 
