@@ -211,7 +211,7 @@ For the `debug/stage2web-test5-7` example trace:
 - **Stage 1 (Analysis)** writes `transcript.json`, `transcript_metadata.json`, and `plan.md`.
 - **Stage 2 (Execution)** reads `plan.md` and writes `execution_result.json`.
 - **Stage 2 (Web Client)** is a peer to Execution for pure Jellyfin Web bugs; it reads `plan.md` and writes `transcript.json`, `transcript_metadata.json`, and `execution_result.json`.
-- **Stage 3 (Report)** reads `execution_result.json`, runs the report and verification agents through KT channels, and writes `report.md` plus `final_report.json` or `human_review_queue.json`.
+- **Stage 3 (Report)** reads `execution_result.json`, runs the report and verification agents through KT channels, and writes `transcript.json`, `transcript_metadata.json`, `report.md`, plus `final_report.json` or `human_review_queue.json`.
 
 For compatibility with an already captured verification run, pass it with
 `--verification-result`; Stage 3 still waits for the report agent to request

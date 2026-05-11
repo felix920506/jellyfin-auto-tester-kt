@@ -1583,6 +1583,25 @@ def _execution_stage_plan_channel(plan: dict[str, Any]) -> str:
     return "plan_ready"
 
 
+def _report_stage_transcript_prompt(
+    execution_result: dict[str, Any],
+    verification_result: dict[str, Any] | None,
+) -> str:
+    lines = [
+        "Stage 3 report input received on execution_done:",
+        json.dumps(execution_result, indent=2, sort_keys=True, default=str),
+    ]
+    if verification_result is not None:
+        lines.extend(
+            [
+                "",
+                "Supplied verification result to inject after verification_request:",
+                json.dumps(verification_result, indent=2, sort_keys=True, default=str),
+            ]
+        )
+    return "\n".join(lines)
+
+
 def run_report_stage(
     input_path: str | Path,
     out_dir: str | Path,
@@ -1670,24 +1689,96 @@ async def _run_report_stage_impl(
         engine_factory=engine_factory,
         include_verification_agents=verification_result is None,
     )
+    report_agent = _optional_agent(engine, "report_agent")
     _suppress_agent_outputs(
         engine,
-        ("report_agent", "execution_agent", "web_client_agent"),
+        ("execution_agent", "web_client_agent"),
     )
+    prompt = _report_stage_transcript_prompt(
+        compact_execution_result(execution_result),
+        compact_execution_result(verification_result)
+        if verification_result is not None
+        else None,
+    )
+    transcript_writer = _AnalysisTranscriptWriter(
+        output_dir / ANALYSIS_TRANSCRIPT_FILE,
+        issue_url=_optional_text(execution_result.get("plan", {}).get("issue_url")),
+        container_version=_optional_text(
+            execution_result.get("plan", {}).get("target_version")
+            or execution_result.get("plan", {}).get("jellyfin_version")
+        ),
+        prompt=prompt,
+        issue_thread=None,
+        system_prompt=(
+            _agent_system_prompt_text(report_agent)
+            if report_agent is not None
+            else None
+        ),
+        stage="report",
+        input_metadata={
+            "input_path": str(result_path),
+            "run_id": execution_result.get("run_id"),
+            "verification_result_path": (
+                str(verification_result_path)
+                if verification_result_path is not None
+                else None
+            ),
+            "verification_result_run_id": (
+                verification_result.get("run_id")
+                if verification_result is not None
+                else None
+            ),
+        },
+    )
+    transcript_writer.initialize()
+    transcript_writer.record_prompt(prompt, attempt=1)
+    transcript_message_hooks: list[tuple[Any, str, Any]] = []
+    transcript_capture_state: tuple[_TranscriptOutput, Any, Any] | None = None
+    if report_agent is not None:
+        transcript_message_hooks = _install_transcript_message_hooks(
+            report_agent,
+            transcript_writer,
+        )
+
+        def record_visible_output(text: str) -> None:
+            if not transcript_writer.has_provider_traffic:
+                transcript_writer.record_assistant_text(text, source="output_router")
+
+        transcript_capture_state = _install_transcript_output(
+            report_agent,
+            on_write=record_visible_output,
+        )
     logger.debug(
         "Routing Stage 3 execution result through KT report agent run_id=%s "
         "verification_result=%s",
         execution_result.get("run_id"),
         verification_result is not None,
     )
-    route, route_payload, verification_injected = await _run_report_agent_handoff(
-        engine,
-        compact_execution_result(execution_result),
-        compact_execution_result(verification_result)
-        if verification_result is not None
-        else None,
-        timeout_s=timeout_s,
-    )
+    try:
+        route, route_payload, verification_injected = await _run_report_agent_handoff(
+            engine,
+            compact_execution_result(execution_result),
+            compact_execution_result(verification_result)
+            if verification_result is not None
+            else None,
+            timeout_s=timeout_s,
+        )
+    except Exception as exc:
+        conversation_output = _assistant_conversation_text(report_agent)
+        assistant_output = conversation_output or transcript_writer.assistant_text
+        output_sources = _transcript_sources(
+            ("conversation", conversation_output),
+            ("incremental", transcript_writer.assistant_text),
+        )
+        transcript_writer.write_snapshot(
+            assistant_output=assistant_output,
+            output_sources=output_sources,
+            status=f"failed:{exc.__class__.__name__}",
+        )
+        raise
+    finally:
+        _restore_transcript_output(transcript_capture_state)
+        _restore_transcript_message_hooks(transcript_message_hooks)
 
     route_payload = _normalize_route_payload(route_payload)
     report_file = _mirror_report_from_route(route_payload, output_dir, execution_result)
@@ -1700,6 +1791,17 @@ async def _run_report_stage_impl(
     _write_json_file(route_file, route_payload)
     _write_json_file(output_dir / "result.json", route_payload)
     _write_json_file(output_dir / "report_metadata.json", route_payload)
+    conversation_output = _assistant_conversation_text(report_agent)
+    assistant_output = conversation_output or transcript_writer.assistant_text
+    output_sources = _transcript_sources(
+        ("conversation", conversation_output),
+        ("incremental", transcript_writer.assistant_text),
+    )
+    transcript_writer.write_snapshot(
+        assistant_output=assistant_output,
+        output_sources=output_sources,
+        status=route,
+    )
     logger.info("Stage 3 debug run wrote %s", route_file.name)
 
     return _write_stage_result(
@@ -1722,6 +1824,8 @@ async def _run_report_stage_impl(
                     if verification_result is not None
                     else None
                 ),
+                "transcript": ANALYSIS_TRANSCRIPT_FILE,
+                "transcript_metadata": TRANSCRIPT_METADATA_FILE,
             },
         )
     )

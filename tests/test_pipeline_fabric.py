@@ -443,6 +443,14 @@ class FakeWebClientAgent:
         self.agent.llm = llm
 
 
+class FakeReportAgent:
+    def __init__(self, llm):
+        self.agent = FakeInnerAgent()
+        conversation = FakeMessageListConversation()
+        self.agent.controller = FakeController(conversation)
+        self.agent.llm = llm
+
+
 class CrashingProviderLLM:
     def __init__(self, chunks):
         self.chunks = list(chunks)
@@ -453,6 +461,18 @@ class CrashingProviderLLM:
         for chunk in self.chunks:
             yield chunk
         raise RuntimeError("web-client provider crashed")
+
+
+class HangingProviderLLM:
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.calls = []
+
+    async def chat(self, messages, **_kwargs):
+        self.calls.append([dict(message) for message in messages])
+        for chunk in self.chunks:
+            yield chunk
+        await asyncio.Event().wait()
 
 
 class ProviderWebClientStageEngine(FakeWebClientStageEngine):
@@ -526,6 +546,42 @@ class ProviderWebClientStageEngine(FakeWebClientStageEngine):
                 channel="execution_done",
             )
         )
+
+
+class HangingReportStageEngine:
+    def __init__(self, llm):
+        self.report_agent = FakeReportAgent(llm)
+        self.channels = {
+            "execution_done": FakeAsyncChannel(),
+            "verification_request": FakeAsyncChannel(),
+            "final_report": FakeAsyncChannel(),
+            "human_review_queue": FakeAsyncChannel(),
+        }
+        self.first_execution_result = None
+        self.stopped = False
+
+    def __getitem__(self, name):
+        if name == "report_agent":
+            return self.report_agent
+        raise KeyError(name)
+
+    async def run(self):
+        first_message = await self.channels["execution_done"].receive()
+        self.first_execution_result = hydrate_execution_result(
+            json.loads(first_message.content)
+        )
+        conversation = self.report_agent.agent.controller.conversation
+        conversation.append("user", first_message.content)
+        response_parts = []
+        async for chunk in self.report_agent.agent.llm.chat(
+            conversation.to_messages(),
+            stream=True,
+        ):
+            response_parts.append(chunk)
+        conversation.append("assistant", "".join(response_parts))
+
+    async def stop(self):
+        self.stopped = True
 
 
 class FakeStartedTerrariumStageEngine:
@@ -2568,6 +2624,18 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 route_payload["path"],
                 str((temp_path / "report" / "report.md").resolve()),
             )
+            transcript_payload = _read_stage_transcript(temp_path / "report")
+            transcript_metadata = _read_stage_transcript_metadata(
+                temp_path / "report"
+            )
+            self.assertEqual(transcript_metadata["stage"], "report")
+            self.assertEqual(transcript_metadata["status"], "final_report")
+            self.assertEqual(result.metadata["transcript"], ANALYSIS_TRANSCRIPT_FILE)
+            self.assertEqual(
+                result.metadata["transcript_metadata"],
+                TRANSCRIPT_METADATA_FILE,
+            )
+            self.assertIn("raw report llm output", _assistant_text(transcript_payload))
             self.assertEqual(engine.report_default_output.streamed, [])
             self.assertTrue(engine.stopped)
 
@@ -2619,6 +2687,46 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 verification_result,
             )
             self.assertEqual(engine.verification_result["run_id"], "verify-supplied")
+
+    def test_run_report_stage_flushes_transcript_while_provider_times_out(self):
+        plan = _sample_plan()
+        llm = HangingProviderLLM(["partial report response\n"])
+        engine = HangingReportStageEngine(llm)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            execution_dir = temp_path / "execution"
+            artifacts_dir = execution_dir / "run-1"
+            execution_result = _sample_execution_result(plan, artifacts_dir)
+            (execution_dir / "result.json").write_text(
+                json.dumps(execution_result),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(PipelineTimeoutError, "Stage 3 report"):
+                run_report_stage(
+                    execution_dir,
+                    temp_path / "report",
+                    timeout_s=0.1,
+                    engine_factory=lambda stage: engine,
+                )
+
+            transcript_payload = _read_stage_transcript(temp_path / "report")
+            transcript_metadata = _read_stage_transcript_metadata(
+                temp_path / "report"
+            )
+
+        self.assertTrue(engine.stopped)
+        self.assertEqual(transcript_metadata["stage"], "report")
+        self.assertEqual(transcript_metadata["status"], "failed:PipelineTimeoutError")
+        self.assertEqual(
+            [message["role"] for message in transcript_payload["messages"]],
+            ["user", "assistant"],
+        )
+        self.assertEqual(
+            transcript_payload["messages"][1]["content"],
+            "partial report response\n",
+        )
+        self.assertEqual(len(transcript_metadata["provider_requests"]), 1)
 
     def test_execution_turn_budget_matches_master_plan(self):
         self.assertEqual(execution_turn_budget(0), (60, 70))
