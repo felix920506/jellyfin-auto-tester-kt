@@ -763,7 +763,25 @@ class FakeReportStageEngine:
         route = "final_report" if verified else "human_review_queue"
         report_path = Path(self.first_execution_result["artifacts_dir"]) / "report.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text("# Report\n", encoding="utf-8")
+        report_path.write_text(
+            "\n".join(
+                [
+                    "# Report",
+                    "",
+                    "## Summary",
+                    "",
+                    "Stage 3 summary without raw logs.",
+                    "",
+                    "## Evidence",
+                    "",
+                    "```text",
+                    "server log",
+                    "```",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
         payload = {
             "path": str(report_path),
             "verified": verified,
@@ -2624,6 +2642,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 route_payload["path"],
                 str((temp_path / "report" / "report.md").resolve()),
             )
+            self.assertEqual(
+                route_payload["summary"],
+                "Stage 3 summary without raw logs.",
+            )
             transcript_payload = _read_stage_transcript(temp_path / "report")
             transcript_metadata = _read_stage_transcript_metadata(
                 temp_path / "report"
@@ -2643,7 +2665,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 "result_path",
                 transcript_payload["messages"][0]["content"],
             )
-            self.assertIn("raw report llm output", _assistant_text(transcript_payload))
+            assistant_text = _assistant_text(transcript_payload)
+            self.assertIn("Stage 3 completed with `final_report`", assistant_text)
+            self.assertIn("Stage 3 summary without raw logs.", assistant_text)
+            self.assertNotIn("raw report llm output", assistant_text)
             self.assertEqual(engine.report_default_output.streamed, [])
             self.assertTrue(engine.stopped)
 
@@ -2735,10 +2760,9 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("jellyfin_logs", transcript_text)
         self.assertNotIn("server log", transcript_text)
         self.assertIn("result_path", transcript_payload["messages"][0]["content"])
-        self.assertEqual(
-            transcript_payload["messages"][1]["content"],
-            "partial report response\n",
-        )
+        assistant_text = transcript_payload["messages"][1]["content"]
+        self.assertIn("Stage 3 failed with `PipelineTimeoutError`", assistant_text)
+        self.assertNotIn("partial report response", assistant_text)
         self.assertEqual(len(transcript_metadata["provider_requests"]), 1)
 
     def test_execution_turn_budget_matches_master_plan(self):

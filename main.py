@@ -374,9 +374,14 @@ class _AnalysisTranscriptWriter:
         assistant_output: str | None = None,
         output_sources: list[dict[str, str]] | None = None,
         status: str,
+        replace_messages: bool = False,
     ) -> None:
         assistant = self.assistant_text if assistant_output is None else assistant_output
-        messages = self._messages_for_output(assistant)
+        messages = (
+            self._replacement_messages_for_output(assistant)
+            if replace_messages
+            else self._messages_for_output(assistant)
+        )
         output_sources = (
             output_sources
             if output_sources is not None
@@ -440,6 +445,26 @@ class _AnalysisTranscriptWriter:
         if self._provider_messages:
             return [dict(message) for message in self._provider_messages]
         return [dict(message) for message in self._fallback_messages]
+
+    def _replacement_messages_for_output(self, assistant_output: str) -> list[dict[str, Any]]:
+        messages = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        prompt_message = next(
+            (
+                message
+                for message in self._fallback_messages
+                if message.get("role") == "user"
+            ),
+            None,
+        )
+        messages.append(
+            dict(prompt_message)
+            if prompt_message is not None
+            else {"role": "user", "content": self.prompt}
+        )
+        messages.append({"role": "assistant", "content": assistant_output})
+        return messages
 
 
 def load_env_file(path: str | Path = DEFAULT_DOTENV_PATH) -> bool:
@@ -1764,16 +1789,13 @@ async def _run_report_stage_impl(
             timeout_s=timeout_s,
         )
     except Exception as exc:
-        conversation_output = _assistant_conversation_text(report_agent)
-        assistant_output = conversation_output or transcript_writer.assistant_text
-        output_sources = _transcript_sources(
-            ("conversation", conversation_output),
-            ("incremental", transcript_writer.assistant_text),
-        )
+        assistant_output = _report_stage_failure_summary(exc, execution_result)
+        output_sources = _transcript_sources(("stage3_summary", assistant_output))
         transcript_writer.write_snapshot(
             assistant_output=assistant_output,
             output_sources=output_sources,
             status=f"failed:{exc.__class__.__name__}",
+            replace_messages=True,
         )
         raise
     finally:
@@ -1786,21 +1808,21 @@ async def _run_report_stage_impl(
         route_payload["path"] = str(report_file)
         if "report_path" in route_payload:
             route_payload["report_path"] = str(report_file)
+        report_summary = _extract_report_summary(report_file)
+        if report_summary:
+            route_payload.setdefault("summary", report_summary)
 
     route_file = output_dir / f"{route}.json"
     _write_json_file(route_file, route_payload)
     _write_json_file(output_dir / "result.json", route_payload)
     _write_json_file(output_dir / "report_metadata.json", route_payload)
-    conversation_output = _assistant_conversation_text(report_agent)
-    assistant_output = conversation_output or transcript_writer.assistant_text
-    output_sources = _transcript_sources(
-        ("conversation", conversation_output),
-        ("incremental", transcript_writer.assistant_text),
-    )
+    assistant_output = _report_stage_summary(route, route_payload, report_file)
+    output_sources = _transcript_sources(("stage3_summary", assistant_output))
     transcript_writer.write_snapshot(
         assistant_output=assistant_output,
         output_sources=output_sources,
         status=route,
+        replace_messages=True,
     )
     logger.info("Stage 3 debug run wrote %s", route_file.name)
 
@@ -2022,6 +2044,95 @@ def _mirror_report_from_route(
         _logger().debug("Report route referenced missing report path: %s", source_path)
         return None
     return _mirror_report(source_path, output_dir)
+
+
+def _report_stage_summary(
+    route: str,
+    route_payload: Any,
+    report_file: Path | None,
+) -> str:
+    payload = route_payload if isinstance(route_payload, dict) else {}
+    lines = [f"Stage 3 completed with `{route}`."]
+    summary = _optional_text(payload.get("summary"))
+    if summary is None and report_file is not None:
+        summary = _extract_report_summary(report_file)
+    if summary:
+        lines.extend(["", "Summary:", summary])
+
+    details = _report_stage_summary_details(payload, report_file)
+    if details:
+        lines.extend(["", "Details:", *details])
+    return "\n".join(lines).strip() + "\n"
+
+
+def _report_stage_failure_summary(
+    exc: Exception,
+    execution_result: dict[str, Any],
+) -> str:
+    run_id = _optional_text(execution_result.get("run_id")) or "unknown"
+    return (
+        f"Stage 3 failed with `{exc.__class__.__name__}`.\n\n"
+        "Details:\n"
+        f"- Run ID: `{run_id}`\n"
+        f"- Error: {_optional_text(str(exc)) or 'No error detail was provided.'}\n"
+    )
+
+
+def _report_stage_summary_details(
+    payload: dict[str, Any],
+    report_file: Path | None,
+) -> list[str]:
+    details = []
+    report_path = (
+        _optional_text(payload.get("report_path"))
+        or _optional_text(payload.get("path"))
+        or (str(report_file) if report_file is not None else None)
+    )
+    if report_path:
+        details.append(f"- Report: `{report_path}`")
+    for key, label in (
+        ("run_id", "Run ID"),
+        ("verification_run_id", "Verification Run ID"),
+        ("overall_result", "Overall result"),
+        ("verification_status", "Verification status"),
+        ("reason_code", "Review reason code"),
+    ):
+        value = _optional_text(payload.get(key))
+        if value:
+            details.append(f"- {label}: `{value}`")
+    verified = payload.get("verified")
+    if isinstance(verified, bool):
+        details.append(f"- Verified: `{'yes' if verified else 'no'}`")
+    reason = _optional_text(payload.get("reason"))
+    if reason:
+        details.append(f"- Review reason: {reason}")
+    return details
+
+
+def _extract_report_summary(report_file: Path) -> str:
+    try:
+        report = report_file.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return _extract_markdown_section(report, "Summary")
+
+
+def _extract_markdown_section(markdown: str, heading: str) -> str:
+    lines = markdown.splitlines()
+    section_lines: list[str] = []
+    in_section = False
+    target = f"## {heading}".strip().casefold()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            if in_section:
+                break
+            if stripped.casefold() == target:
+                in_section = True
+            continue
+        if in_section:
+            section_lines.append(line)
+    return "\n".join(section_lines).strip()
 
 
 async def _load_engine(
