@@ -21,6 +21,21 @@ def compact_execution_result(result: Mapping[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def compact_report_execution_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a Stage 3 handoff payload without raw execution logs.
+
+    The report writer can hydrate the complete ExecutionResult from
+    ``result_path`` or ``artifacts_dir/result.json``. Keeping Stage 3 handoffs
+    path-based prevents report-agent transcripts from carrying original log
+    bodies while preserving deterministic report generation.
+    """
+
+    compact = compact_execution_result(result)
+    compact.pop("execution_log", None)
+    compact.pop("jellyfin_logs", None)
+    return compact
+
+
 def compact_if_execution_result(value: Any) -> Any:
     """Compact canonical final results while leaving intermediate statuses alone."""
 

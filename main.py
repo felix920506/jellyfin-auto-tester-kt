@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 from stage1_model_blacklist import is_stage1_model_blacklisted
 from tools.async_compat import run_sync_away_from_loop
 from tools.execution_result_handoff import (
-    compact_execution_result,
+    compact_report_execution_result,
     hydrate_execution_result,
 )
 from tools.reproduction_plan_markdown import (
@@ -1695,8 +1695,8 @@ async def _run_report_stage_impl(
         ("execution_agent", "web_client_agent"),
     )
     prompt = _report_stage_transcript_prompt(
-        compact_execution_result(execution_result),
-        compact_execution_result(verification_result)
+        compact_report_execution_result(execution_result),
+        compact_report_execution_result(verification_result)
         if verification_result is not None
         else None,
     )
@@ -1757,8 +1757,8 @@ async def _run_report_stage_impl(
     try:
         route, route_payload, verification_injected = await _run_report_agent_handoff(
             engine,
-            compact_execution_result(execution_result),
-            compact_execution_result(verification_result)
+            compact_report_execution_result(execution_result),
+            compact_report_execution_result(verification_result)
             if verification_result is not None
             else None,
             timeout_s=timeout_s,

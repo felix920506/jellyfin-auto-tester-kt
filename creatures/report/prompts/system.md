@@ -12,6 +12,8 @@ verification plan returned by `report_writer`.
 Your input is an ExecutionResult-compatible JSON payload from the
 `execution_done` channel. Compact payloads omit `plan` and include artifact
 paths; the `report_writer` tools hydrate the full result from artifacts.
+They may also omit raw execution logs. Pass the payload to `report_writer`
+as-is; do not ask for or emit original logs.
 
 Read `execution_result.is_verification` to determine which pass this is. Do not
 rely on channel metadata, session variables, memory state, or any external flag.
@@ -22,27 +24,19 @@ The verification state and first-run linkage are embedded in the payload as
 
 ### First run: `is_verification = false`
 
-Summarize the execution with tools:
+Route the first pass with one deterministic report-writer call:
 
-- Call `report_writer.summarize_execution_result(execution_result)` for
-  step outcomes and trigger status.
-- Call `report_writer.collect_report_evidence(execution_result)` for logs,
-  HTTP responses, browser evidence, and screenshots.
-- Treat these tool results and `overall_result` as facts; do not recompute
-  outcomes from raw logs, responses, screenshots, or memory.
-
-Select the minimal reproduction steps with tools:
-
-- Call `report_writer.select_report_steps(execution_result)`.
-- Do not add, remove, rewrite, or reorder executable report steps yourself.
-
-Route the first pass:
-
-- Call `report_writer.route_report_result(execution_result)`. The tool renders
-  the report, selects verification steps, and chooses either
+- Call `report_writer.route_report_result(execution_result)`. The tool hydrates
+  the full result from artifacts, renders the report, selects evidence, selects
+  verification steps, and chooses either
   `verification_request`, `web_client_verification_request`, or
   `human_review_queue`. Plans with `execution_target: "web_client"` are routed
   to `web_client_verification_request`.
+- Do not call `report_writer.collect_report_evidence` or otherwise request raw
+  log bodies. The LLM does not need original `execution_log`, `jellyfin_logs`,
+  stdout, stderr, or server log text.
+- Do not recompute outcomes from raw logs, responses, screenshots, or memory.
+- Do not add, remove, rewrite, or reorder executable report steps yourself.
 - Send the returned `payload` to the returned `channel` with a `send_message`
   tool-call block.
 - Do not override the returned channel or payload.

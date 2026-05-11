@@ -5,6 +5,7 @@ from pathlib import Path
 
 from tools.execution_result_handoff import (
     compact_execution_result,
+    compact_report_execution_result,
     hydrate_execution_result,
 )
 
@@ -37,6 +38,26 @@ class ExecutionResultHandoffTests(unittest.TestCase):
 
             self.assertEqual(hydrated["plan"], result["plan"])
             self.assertEqual(hydrated["overall_result"], "reproduced")
+
+    def test_compact_report_execution_result_omits_raw_logs_but_hydrates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifacts_dir = Path(temp_dir) / "run-1"
+            artifacts_dir.mkdir()
+            result = _execution_result(artifacts_dir)
+            result["execution_log"] = [
+                {"step_id": 1, "stdout": "original command output"}
+            ]
+            result["jellyfin_logs"] = "original server log\n"
+            result_path = artifacts_dir / "result.json"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+
+            compact = compact_report_execution_result(result)
+
+            self.assertNotIn("plan", compact)
+            self.assertNotIn("execution_log", compact)
+            self.assertNotIn("jellyfin_logs", compact)
+            self.assertEqual(compact["result_path"], str(result_path))
+            self.assertEqual(hydrate_execution_result(compact), result)
 
     def test_hydrate_execution_result_uses_fallback_plan(self):
         plan = {"reproduction_steps": []}

@@ -2635,6 +2635,14 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 result.metadata["transcript_metadata"],
                 TRANSCRIPT_METADATA_FILE,
             )
+            transcript_text = json.dumps(transcript_payload)
+            self.assertNotIn("execution_log", transcript_text)
+            self.assertNotIn("jellyfin_logs", transcript_text)
+            self.assertNotIn("server log", transcript_text)
+            self.assertIn(
+                "result_path",
+                transcript_payload["messages"][0]["content"],
+            )
             self.assertIn("raw report llm output", _assistant_text(transcript_payload))
             self.assertEqual(engine.report_default_output.streamed, [])
             self.assertTrue(engine.stopped)
@@ -2722,6 +2730,11 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             [message["role"] for message in transcript_payload["messages"]],
             ["user", "assistant"],
         )
+        transcript_text = json.dumps(transcript_payload)
+        self.assertNotIn("execution_log", transcript_text)
+        self.assertNotIn("jellyfin_logs", transcript_text)
+        self.assertNotIn("server log", transcript_text)
+        self.assertIn("result_path", transcript_payload["messages"][0]["content"])
         self.assertEqual(
             transcript_payload["messages"][1]["content"],
             "partial report response\n",
