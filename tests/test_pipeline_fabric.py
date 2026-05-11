@@ -25,6 +25,7 @@ from main import (
     _assert_stage1_model_allowed_for_recipe,
     _assert_stage1_model_config_allowed,
     _analysis_plan_retry_prompt,
+    _assert_agent_tool_available,
     _default_log_level,
     _default_log_stderr,
     _normalize_stage_argv,
@@ -2671,6 +2672,17 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("raw report llm output", assistant_text)
             self.assertEqual(engine.report_default_output.streamed, [])
             self.assertTrue(engine.stopped)
+
+    def test_report_stage_preflight_fails_when_report_writer_missing(self):
+        registry = types.SimpleNamespace(list_tools=lambda: ["send_message"])
+        agent = types.SimpleNamespace(agent=types.SimpleNamespace(registry=registry))
+
+        with self.assertRaisesRegex(RuntimeError, "missing required tool `report_writer`"):
+            _assert_agent_tool_available(
+                agent,
+                "report_writer",
+                "Stage 3 report agent",
+            )
 
     def test_run_report_stage_injects_supplied_verification_after_request(self):
         plan = _sample_plan()

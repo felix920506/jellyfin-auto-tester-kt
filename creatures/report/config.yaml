@@ -16,6 +16,7 @@ tools:
   - name: "report_writer"
     type: "package"
     module: "tools.report_writer"
+    class: "ReportWriterTool"
 
 triggers:
   - type: "channel"

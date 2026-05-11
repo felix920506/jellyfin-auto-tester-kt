@@ -26,13 +26,16 @@ The verification state and first-run linkage are embedded in the payload as
 
 Route the first pass with one deterministic report-writer call:
 
-- Call `report_writer.route_report_result(execution_result)`. The tool hydrates
-  the full result from artifacts, renders the report, selects evidence, selects
-  verification steps, and chooses either
+- Call the `report_writer` tool with the ExecutionResult JSON payload as the
+  raw block body. The tool hydrates the full result from artifacts, renders the
+  report, selects evidence, selects verification steps, and returns route JSON
+  choosing either
   `verification_request`, `web_client_verification_request`, or
   `human_review_queue`. Plans with `execution_target: "web_client"` are routed
   to `web_client_verification_request`.
-- Do not call `report_writer.collect_report_evidence` or otherwise request raw
+- Use this call shape: `[/report_writer]`, raw ExecutionResult JSON,
+  `[report_writer/]`.
+- Do not call any lower-level report helpers or otherwise request raw
   log bodies. The LLM does not need original `execution_log`, `jellyfin_logs`,
   stdout, stderr, or server log text.
 - Do not recompute outcomes from raw logs, responses, screenshots, or memory.
@@ -45,21 +48,22 @@ Route the first pass with one deterministic report-writer call:
 
 Exception:
 
-If `route_report_result` returns `human_review_queue`, emit
+If `report_writer` returns `human_review_queue`, emit
 `QUEUED_FOR_REVIEW`. Otherwise wait for the verification result.
 
 ### Verification run: `is_verification = true`
 
 Reload durable first-run context:
 
-- `report_writer.route_report_result(verification_result)` loads the original
-  result and report using `execution_result.original_run_id`.
+- Calling `report_writer` with the verification result loads the original result
+  and report using `execution_result.original_run_id`.
 - If original context is missing, the tool returns `human_review_queue`.
 - Do not rely on in-memory state from the first pass.
 
 Route exactly once:
 
-- Call `report_writer.route_report_result(verification_result)`.
+- Call `report_writer` with the verification result JSON payload as the raw
+  block body.
 - Send the returned `payload` to the returned `channel` with `send_message`.
 - If the returned channel is `final_report`, emit `REPORT_COMPLETE`.
 - If the returned channel is `human_review_queue`, emit `QUEUED_FOR_REVIEW`.

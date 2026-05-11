@@ -120,8 +120,21 @@ class TerrariumRecipeTests(unittest.TestCase):
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
         tools = {tool["name"] for tool in config.get("tools", [])}
+        package_tools = {
+            tool["name"]: tool
+            for tool in config.get("tools", [])
+            if tool.get("type") == "package"
+        }
 
         self.assertEqual(tools, {"send_message", "report_writer"})
+        self.assertEqual(
+            package_tools["report_writer"]["module"],
+            "tools.report_writer",
+        )
+        self.assertEqual(
+            package_tools["report_writer"]["class"],
+            "ReportWriterTool",
+        )
 
     def test_pure_web_recipe_can_omit_execution_agent(self):
         repo_root = Path(__file__).resolve().parents[1]

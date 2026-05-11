@@ -10,6 +10,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+try:
+    from kohakuterrarium.modules.tool.base import BaseTool, ExecutionMode, ToolResult
+except Exception:
+    class _FallbackExecutionMode:
+        DIRECT = "direct"
+
+    class BaseTool:
+        def __init__(self, config: Any | None = None, **_unused: Any) -> None:
+            self.config = config
+
+    class ToolResult:
+        def __init__(
+            self,
+            output: str = "",
+            exit_code: int | None = None,
+            error: str | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            self.output = output
+            self.exit_code = exit_code
+            self.error = error
+            self.metadata = metadata or {}
+
+    ExecutionMode = _FallbackExecutionMode()
+
 from tools.execution_result_handoff import hydrate_execution_result
 
 
@@ -34,6 +59,163 @@ HUMAN_REVIEW_REASON_MESSAGES = {
     "http_body_indicator_mismatch": "Verification trigger HTTP body indicators differed from the original run.",
     "log_indicator_mismatch": "Verification log indicators differed from the original run.",
 }
+
+
+class ReportWriterTool(BaseTool):
+    """KT tool wrapper for deterministic Stage 3 report routing."""
+
+    @property
+    def tool_name(self) -> str:
+        return "report_writer"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Route a compact or full ExecutionResult through deterministic "
+            "report generation, verification planning, and final-report "
+            "comparison."
+        )
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        return ExecutionMode.DIRECT
+
+    def get_parameters_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": True,
+            "anyOf": [
+                {"required": ["execution_result"]},
+                {"required": ["content"]},
+            ],
+            "properties": {
+                "execution_result": {
+                    "type": "object",
+                    "description": (
+                        "Compact or full ExecutionResult-compatible object."
+                    ),
+                },
+                "verification_result": {
+                    "type": "object",
+                    "description": (
+                        "Optional separate verification result for direct "
+                        "comparison."
+                    ),
+                },
+                "artifacts_base": {
+                    "type": "string",
+                    "description": "Optional artifacts base override.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "Raw JSON body containing either an ExecutionResult or "
+                        "an object with execution_result."
+                    ),
+                },
+            },
+        }
+
+    def prompt_contribution(self) -> str | None:
+        return (
+            "Call `report_writer` with the compact/full ExecutionResult JSON as "
+            "the block body. It returns route JSON with `channel` and `payload`; "
+            "send that payload unchanged to that channel with `send_message`."
+        )
+
+    async def _execute(self, args: dict[str, Any], **_kwargs: Any) -> ToolResult:
+        execution_result, verification_result, artifacts_base, error = (
+            _report_writer_tool_args(args)
+        )
+        if error:
+            return ToolResult(error=error)
+        try:
+            route = route_report_result(
+                execution_result,
+                verification_result=verification_result,
+                artifacts_base=artifacts_base,
+            )
+        except Exception as exc:
+            return ToolResult(error=f"report_writer failed: {exc}")
+        return ToolResult(
+            output=json.dumps(route, ensure_ascii=False, sort_keys=True),
+            exit_code=0,
+        )
+
+
+def _report_writer_tool_args(
+    args: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None, str | Path, str | None]:
+    if not isinstance(args, dict):
+        return (
+            {},
+            None,
+            DEFAULT_ARTIFACTS_BASE,
+            "report_writer arguments must be an object",
+        )
+
+    payload: Any = args
+    if "content" in args and not args.get("execution_result"):
+        content = str(args.get("content") or "").strip()
+        if not content:
+            return {}, None, DEFAULT_ARTIFACTS_BASE, "report_writer JSON body is empty"
+        payload, error = _json_object_value(content, "report_writer JSON body")
+        if error:
+            return {}, None, DEFAULT_ARTIFACTS_BASE, error
+
+    artifacts_base = (
+        payload.get("artifacts_base")
+        if isinstance(payload, dict) and payload.get("artifacts_base") is not None
+        else args.get("artifacts_base", DEFAULT_ARTIFACTS_BASE)
+    )
+
+    if isinstance(payload, dict) and "execution_result" in payload:
+        execution_result = payload.get("execution_result")
+        verification_result = payload.get("verification_result")
+    elif "execution_result" in args:
+        execution_result = args.get("execution_result")
+        verification_result = args.get("verification_result")
+    else:
+        execution_result = payload
+        verification_result = None
+
+    execution_result, error = _coerce_json_object_value(
+        execution_result,
+        "execution_result",
+    )
+    if error:
+        return {}, None, artifacts_base, error
+
+    if verification_result is not None:
+        verification_result, error = _coerce_json_object_value(
+            verification_result,
+            "verification_result",
+        )
+        if error:
+            return {}, None, artifacts_base, error
+
+    return execution_result, verification_result, artifacts_base, None
+
+
+def _coerce_json_object_value(
+    value: Any,
+    label: str,
+) -> tuple[dict[str, Any], str | None]:
+    if isinstance(value, dict):
+        return value, None
+    if isinstance(value, str):
+        return _json_object_value(value, label)
+    return {}, f"{label} must be a JSON object"
+
+
+def _json_object_value(text: str, label: str) -> tuple[dict[str, Any], str | None]:
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return {}, f"{label} is invalid JSON: {exc.msg}"
+    if not isinstance(decoded, dict):
+        return {}, f"{label} must be a JSON object"
+    return decoded, None
 
 
 def summarize_execution_result(execution_result: dict[str, Any]) -> dict[str, Any]:

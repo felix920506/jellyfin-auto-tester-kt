@@ -502,6 +502,26 @@ class BrowserContractTests(unittest.TestCase):
         self.assertNotIn("web_client_runner.run_task", prompt)
         self.assertNotIn("session_id", prompt)
 
+    def test_report_tool_contract_uses_registered_tool_name(self):
+        config = yaml.safe_load(
+            (REPO_ROOT / "creatures" / "report" / "config.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        package_tools = {
+            tool["name"]: tool
+            for tool in config.get("tools", [])
+            if tool.get("type") == "package"
+        }
+        prompt = (
+            REPO_ROOT / "creatures" / "report" / "prompts" / "system.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(package_tools["report_writer"]["class"], "ReportWriterTool")
+        self.assertIn("Call the `report_writer` tool", prompt)
+        self.assertNotIn("report_writer.route_report_result", prompt)
+        self.assertNotIn("[/report_writer.route_report_result]", prompt)
+
     def test_plan_normalization_defaults_browser_criteria_to_action_run(self):
         plan = minimal_plan()
         plan["reproduction_steps"][0].pop("success_criteria")

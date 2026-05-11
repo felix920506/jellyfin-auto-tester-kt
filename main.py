@@ -1715,6 +1715,7 @@ async def _run_report_stage_impl(
         include_verification_agents=verification_result is None,
     )
     report_agent = _optional_agent(engine, "report_agent")
+    _assert_agent_tool_available(report_agent, "report_writer", "Stage 3 report agent")
     _suppress_agent_outputs(
         engine,
         ("execution_agent", "web_client_agent"),
@@ -3600,6 +3601,41 @@ def _agent_system_prompt_text(creature_or_agent: Any) -> str | None:
         return None
     text = _message_content_text(getattr(message, "content", ""))
     return text or None
+
+
+def _assert_agent_tool_available(
+    creature_or_agent: Any | None,
+    tool_name: str,
+    label: str,
+) -> None:
+    if creature_or_agent is None:
+        return
+    tool_names = _agent_tool_names(creature_or_agent)
+    if tool_names is None or tool_name in tool_names:
+        return
+    raise RuntimeError(
+        f"{label} is missing required tool `{tool_name}`; check the creature "
+        "tool configuration."
+    )
+
+
+def _agent_tool_names(creature_or_agent: Any) -> set[str] | None:
+    agent = getattr(creature_or_agent, "agent", creature_or_agent)
+    registry = getattr(agent, "registry", None)
+    if registry is None:
+        return None
+
+    list_tools = getattr(registry, "list_tools", None)
+    if callable(list_tools):
+        try:
+            return set(str(name) for name in list_tools())
+        except Exception:
+            return None
+
+    tools = getattr(registry, "_tools", None)
+    if isinstance(tools, Mapping):
+        return set(str(name) for name in tools)
+    return None
 
 
 def _agent_conversation(creature_or_agent: Any) -> Any | None:
