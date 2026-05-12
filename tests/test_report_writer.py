@@ -338,7 +338,14 @@ class ReportWriterTests(unittest.TestCase):
 
             self.assertEqual(summary["steps"][0]["status"], "pass")
             self.assertIn("runner advanced after browser recovery", report)
-            self.assertIn("Step 1 browser `recovered`", report)
+            self.assertIn("companion artifact", report)
+            self.assertNotIn("Step 1 browser `recovered`", report)
+
+            metadata = report_writer.generate(result, artifacts_base=temp_dir)
+            browser_evidence = Path(metadata["browser_evidence_path"]).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("Step 1 browser `recovered`", browser_evidence)
 
     def test_generate_writes_report_with_filtered_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -347,7 +354,12 @@ class ReportWriterTests(unittest.TestCase):
             metadata = report_writer.generate(result, artifacts_base=temp_dir)
 
             report_path = Path(temp_dir) / "run-1" / "report.md"
+            browser_evidence_path = Path(temp_dir) / "run-1" / "browser_evidence.md"
             self.assertEqual(Path(metadata["path"]).resolve(), report_path.resolve())
+            self.assertEqual(
+                Path(metadata["browser_evidence_path"]).resolve(),
+                browser_evidence_path.resolve(),
+            )
             self.assertGreater(metadata["word_count"], 50)
             self.assertIsNone(metadata["verified"])
 
@@ -359,7 +371,9 @@ class ReportWriterTests(unittest.TestCase):
             self.assertIn("ERROR Transcoding failed in FFmpeg", report)
             self.assertIn("WARN playback pipeline warning", report)
             self.assertNotIn("DEBUG noisy line", report)
+            self.assertNotIn("### Browser Evidence", report)
             self.assertIn("![Step 3 screenshot](screenshots/playback_error.png)", report)
+            self.assertTrue(browser_evidence_path.is_file())
 
     def test_render_report_markdown_assembles_report_without_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -440,7 +454,7 @@ class ReportWriterTests(unittest.TestCase):
             self.assertIn("# Reproduction Report: PlaybackInfo returns 500", report)
             self.assertIn("**Result:** Reproduced", report)
 
-    def test_generate_includes_browser_evidence(self):
+    def test_generate_writes_browser_evidence_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             result = sample_result(temp_dir)
             browser_path = Path(temp_dir) / "run-1" / "screenshots" / "web_flow.png"
@@ -516,12 +530,25 @@ class ReportWriterTests(unittest.TestCase):
 
             report = Path(metadata["path"]).read_text(encoding="utf-8")
             self.assertIn("Run browser flow at `/web/index.html`", report)
-            self.assertIn("### Browser Evidence", report)
-            self.assertIn("click .play-button", report)
-            self.assertIn("Media state: `errored`", report)
-            self.assertIn("Playback exploded", report)
-            self.assertIn("stream", report)
             self.assertIn("![Step 4 screenshot](screenshots/web_flow.png)", report)
+            self.assertNotIn("### Browser Evidence", report)
+            self.assertNotIn("click .play-button", report)
+            self.assertNotIn("Media state: `errored`", report)
+            self.assertNotIn("Playback exploded", report)
+            self.assertNotIn("stream", report)
+
+            browser_evidence_path = Path(metadata["browser_evidence_path"])
+            browser_evidence = browser_evidence_path.read_text(encoding="utf-8")
+            self.assertIn("# Browser Evidence", browser_evidence)
+            self.assertIn("Step 4 browser `pass`", browser_evidence)
+            self.assertIn("click .play-button", browser_evidence)
+            self.assertIn("Media state: `errored`", browser_evidence)
+            self.assertIn("Playback exploded", browser_evidence)
+            self.assertIn("stream", browser_evidence)
+            self.assertIn(
+                "![Step 4 screenshot](screenshots/web_flow.png)",
+                browser_evidence,
+            )
 
     def test_generate_describes_demo_server_without_log_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:

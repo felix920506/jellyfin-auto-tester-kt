@@ -43,6 +43,7 @@ DEFAULT_ARTIFACTS_ROOT = Path(
     os.environ.get("JF_AUTO_TESTER_ARTIFACTS_ROOT", REPO_ROOT / "artifacts")
 ).resolve()
 DEFAULT_ARTIFACTS_BASE = "/artifacts"
+BROWSER_EVIDENCE_FILENAME = "browser_evidence.md"
 MAX_LOG_EXCERPT_LINES = 50
 MAX_BODY_CHARS = 2000
 MAX_STREAM_CHARS = 1200
@@ -534,12 +535,13 @@ def generate(
     artifacts_base: str | Path = DEFAULT_ARTIFACTS_BASE,
     written_steps: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Generate ``report.md`` for an ExecutionResult.
+    """Generate Stage 3 report artifacts for an ExecutionResult.
 
-    The report is written under the original run's artifact directory. When
-    called for a verification result, ``execution_result["original_run_id"]`` is
-    used as the output directory. When called with a first-run result plus a
-    separate ``verification_result``, the first-run ``run_id`` is used.
+    The main report and browser evidence file are written under the original
+    run's artifact directory. When called for a verification result,
+    ``execution_result["original_run_id"]`` is used as the output directory.
+    When called with a first-run result plus a separate
+    ``verification_result``, the first-run ``run_id`` is used.
     """
 
     if not isinstance(execution_result, dict):
@@ -570,10 +572,20 @@ def generate(
     path = output_dir / "report.md"
     path.write_text(report, encoding="utf-8")
 
+    browser_evidence = _browser_evidence_document(
+        execution_result,
+        output_dir,
+        artifacts_root,
+    )
+    browser_evidence_path = output_dir / BROWSER_EVIDENCE_FILENAME
+    browser_evidence_path.write_text(browser_evidence, encoding="utf-8")
+
     verified = _verification_passed(execution_result, verification_result)
     return {
         "path": str(path),
+        "browser_evidence_path": str(browser_evidence_path),
         "word_count": len(report.split()),
+        "browser_evidence_word_count": len(browser_evidence.split()),
         "verified": verified,
         "verification_status": _verification_status(verified),
     }
@@ -974,7 +986,7 @@ def _observed_step_summary(
     if recovered_setup and entry.get("outcome") == "fail":
         return (
             "pass; runner advanced after browser recovery "
-            "(failed exploratory actions are retained in Browser Evidence)"
+            "(failed exploratory actions are retained in the companion artifact)"
         )
     parts = [str(entry.get("outcome", "unknown"))]
     if entry.get("reason"):
@@ -1002,10 +1014,6 @@ def _evidence(
         "",
         _format_http_evidence(evidence["http_responses"]),
     ]
-
-    browser = _format_browser_evidence(evidence["browser"])
-    if browser:
-        parts.extend(["", "### Browser Evidence", "", browser])
 
     screenshots = _format_screenshot_evidence(evidence["screenshots"])
     if screenshots:
@@ -1167,6 +1175,33 @@ def _browser_evidence(execution_result: dict[str, Any]) -> str:
     return _format_browser_evidence(_browser_evidence_items(execution_result))
 
 
+def _browser_evidence_document(
+    execution_result: dict[str, Any],
+    output_dir: Path,
+    artifacts_root: Path,
+) -> str:
+    plan = _plan(execution_result)
+    run_id = _text(execution_result.get("run_id"), "unknown")
+    browser = _format_browser_evidence(_browser_evidence_items(execution_result))
+    screenshots = _format_screenshot_evidence(
+        _browser_screenshot_evidence(execution_result, output_dir, artifacts_root)
+    )
+    parts = [
+        "# Browser Evidence",
+        "",
+        f"**Issue:** {_text(plan.get('issue_url'), 'Unknown')}",
+        f"**Run ID:** {run_id}",
+        f"**Date:** {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "## Browser Timeline",
+        "",
+        browser or "No browser evidence was captured for this run.",
+    ]
+    if screenshots:
+        parts.extend(["", "## Browser Screenshots", "", screenshots])
+    return "\n".join(parts).rstrip() + "\n"
+
+
 def _browser_evidence_items(execution_result: dict[str, Any]) -> list[dict[str, Any]]:
     entries = [
         entry
@@ -1270,6 +1305,20 @@ def _browser_action_summary(actions: list[Any]) -> str:
     if len(actions) > 12:
         parts.append("...")
     return ", ".join(parts)
+
+
+def _browser_screenshot_evidence(
+    execution_result: dict[str, Any],
+    output_dir: Path,
+    artifacts_root: Path,
+) -> list[dict[str, Any]]:
+    browser_result = dict(execution_result)
+    browser_result["execution_log"] = [
+        entry
+        for entry in execution_result.get("execution_log", [])
+        if isinstance(entry, dict) and isinstance(entry.get("browser"), dict)
+    ]
+    return _screenshot_evidence(browser_result, output_dir, artifacts_root)
 
 
 def _screenshots(
@@ -1490,9 +1539,11 @@ def _report_route_payload(
 ) -> dict[str, Any]:
     plan = _plan(original_result)
     path = metadata.get("path")
+    browser_evidence_path = metadata.get("browser_evidence_path")
     payload = {
         "path": path,
         "report_path": path,
+        "browser_evidence_path": browser_evidence_path,
         "run_id": original_result.get("run_id"),
         "verification_run_id": (verification_result or {}).get("run_id"),
         "overall_result": original_result.get("overall_result"),

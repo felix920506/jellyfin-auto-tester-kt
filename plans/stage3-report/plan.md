@@ -143,6 +143,9 @@ Await the result (Stage 2 will re-run and emit to `execution_done`).
 
 The `report_writer` tool generates a Markdown file with this structure:
 
+Browser interaction timelines are written separately as
+`browser_evidence.md`; they are not included in the main report.
+
 ```markdown
 # Reproduction Report: <issue_title>
 
