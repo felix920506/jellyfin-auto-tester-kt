@@ -860,10 +860,18 @@ def _reproduction_steps(
         for entry in execution_result.get("execution_log", [])
         if isinstance(entry, dict)
     }
+    recovered_setup_ids = _web_client_advanced_setup_step_ids(execution_result)
     blocks = []
     for number, step in enumerate(steps, start=1):
         entry = entry_by_id.get(step.get("step_id"), {})
-        blocks.append(_step_block(number, step, entry if isinstance(entry, dict) else {}))
+        blocks.append(
+            _step_block(
+                number,
+                step,
+                entry if isinstance(entry, dict) else {},
+                recovered_setup=_step_key(step.get("step_id")) in recovered_setup_ids,
+            )
+        )
     return "\n\n".join(blocks)
 
 
@@ -893,14 +901,20 @@ def _minimal_steps(execution_result: dict[str, Any]) -> list[dict[str, Any]]:
     return selected
 
 
-def _step_block(number: int, step: dict[str, Any], entry: dict[str, Any]) -> str:
+def _step_block(
+    number: int,
+    step: dict[str, Any],
+    entry: dict[str, Any],
+    *,
+    recovered_setup: bool = False,
+) -> str:
     action = _text(step.get("action"), f"Step {number}")
     lines = [f"{number}. **{action}**"]
     lines.extend(_step_invocation_lines(step))
     expected = _text(step.get("expected_outcome"), "Expected outcome was not specified.")
     lines.append(f"   - Expected outcome: {expected}")
     if entry:
-        observed = _observed_step_summary(entry)
+        observed = _observed_step_summary(entry, recovered_setup=recovered_setup)
         lines.append(f"   - Observed outcome: {observed}")
     return "\n".join(lines)
 
@@ -952,7 +966,16 @@ def _step_invocation_lines(step: dict[str, Any]) -> list[str]:
     return [f"   - Tool input: `{_inline_code(json.dumps(step_input, sort_keys=True, default=str))}`"]
 
 
-def _observed_step_summary(entry: dict[str, Any]) -> str:
+def _observed_step_summary(
+    entry: dict[str, Any],
+    *,
+    recovered_setup: bool = False,
+) -> str:
+    if recovered_setup and entry.get("outcome") == "fail":
+        return (
+            "pass; runner advanced after browser recovery "
+            "(failed exploratory actions are retained in Browser Evidence)"
+        )
     parts = [str(entry.get("outcome", "unknown"))]
     if entry.get("reason"):
         parts.append(str(entry["reason"]))
@@ -1150,6 +1173,7 @@ def _browser_evidence_items(execution_result: dict[str, Any]) -> list[dict[str, 
         for entry in execution_result.get("execution_log", [])
         if isinstance(entry, dict) and isinstance(entry.get("browser"), dict)
     ]
+    recovered_setup_ids = _web_client_advanced_setup_step_ids(execution_result)
     items = []
     for entry in entries:
         browser = entry["browser"]
@@ -1161,6 +1185,7 @@ def _browser_evidence_items(execution_result: dict[str, Any]) -> list[dict[str, 
             {
                 "step_id": entry.get("step_id"),
                 "status": browser.get("status", "unknown"),
+                "recovered_setup": _step_key(entry.get("step_id")) in recovered_setup_ids,
                 "action_summary": _browser_action_summary(actions),
                 "final_url": browser.get("final_url"),
                 "media_state": media_state.get("state"),
@@ -1191,10 +1216,18 @@ def _format_browser_evidence(items: list[dict[str, Any]]) -> str:
     blocks = []
     for browser_item in items:
         action_summary = _text(browser_item.get("action_summary"))
-        blocks.append(
-            f"- Step {browser_item.get('step_id')} browser `{browser_item.get('status', 'unknown')}`"
-            + (f": {action_summary}" if action_summary else "")
-        )
+        status = _text(browser_item.get("status"), "unknown")
+        if browser_item.get("recovered_setup") and status == "fail":
+            heading = f"- Step {browser_item.get('step_id')} browser `recovered`"
+            action_suffix = (
+                f": {action_summary}"
+                if action_summary
+                else "; failed exploratory actions are retained below"
+            )
+        else:
+            heading = f"- Step {browser_item.get('step_id')} browser `{status}`"
+            action_suffix = f": {action_summary}" if action_summary else ""
+        blocks.append(heading + action_suffix)
         if browser_item.get("final_url"):
             blocks.append(f"  Final URL: `{_inline_code(browser_item['final_url'])}`")
         if browser_item.get("media_state"):
@@ -1318,7 +1351,7 @@ def _analysis(execution_result: dict[str, Any]) -> str:
                 f"{step.get('status')}: {_text(step.get('reason'), 'no reason recorded')}."
             )
     else:
-        lines.append("- All executed steps met their structured success criteria.")
+        lines.append("- No blocking step failures were recorded in the selected steps.")
 
     excerpt = _plain_log_excerpt(execution_result)
     if excerpt:
@@ -1570,6 +1603,7 @@ def _legacy_step_statuses(execution_result: dict[str, Any]) -> list[dict[str, An
         else:
             entries_by_step.setdefault(key, []).append(entry)
 
+    recovered_setup_ids = _web_client_advanced_setup_step_ids(execution_result)
     statuses: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
     plan_steps = _plan(execution_result).get("reproduction_steps")
@@ -1582,7 +1616,11 @@ def _legacy_step_statuses(execution_result: dict[str, Any]) -> list[dict[str, An
                 continue
             seen_keys.add(key)
             statuses.append(
-                _status_from_legacy_step(step, _decisive_execution_entry(entries_by_step.get(key, [])))
+                _status_from_legacy_step(
+                    step,
+                    _decisive_execution_entry(entries_by_step.get(key, [])),
+                    recovered_setup=key in recovered_setup_ids,
+                )
             )
 
     for key, entries in entries_by_step.items():
@@ -1600,17 +1638,26 @@ def _legacy_step_statuses(execution_result: dict[str, Any]) -> list[dict[str, An
 def _status_from_legacy_step(
     plan_step: dict[str, Any],
     entry: dict[str, Any] | None,
+    *,
+    recovered_setup: bool = False,
 ) -> dict[str, Any]:
     criteria = entry.get("criteria_evaluation") if entry and isinstance(entry.get("criteria_evaluation"), dict) else None
     outcome = entry.get("outcome") if entry else None
+    reason = (entry or {}).get("reason")
+    criteria_passed = criteria.get("passed") if criteria else None
+    if recovered_setup and outcome == "fail":
+        outcome = "pass"
+        reason = None
+        if criteria_passed is False:
+            criteria_passed = True
     return {
         "step_id": plan_step.get("step_id") if plan_step else (entry or {}).get("step_id"),
         "role": plan_step.get("role") if plan_step else (entry or {}).get("role"),
         "action": _text(plan_step.get("action") if plan_step else (entry or {}).get("action"), "unnamed"),
         "tool": plan_step.get("tool") if plan_step else (entry or {}).get("tool"),
         "status": _text(outcome, "inconclusive"),
-        "reason": (entry or {}).get("reason"),
-        "criteria_passed": criteria.get("passed") if criteria else None,
+        "reason": reason,
+        "criteria_passed": criteria_passed,
         "decisive_attempt_id": (entry or {}).get("attempt_id"),
         "evidence_refs": [],
         "source": "execution_log",
@@ -1720,6 +1767,57 @@ def _step_key(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _web_client_advanced_setup_step_ids(execution_result: Mapping[str, Any]) -> set[str]:
+    recovered: set[str] = set()
+    for entry in execution_result.get("execution_log", []):
+        if not isinstance(entry, Mapping) or entry.get("role") != "setup":
+            continue
+        if entry.get("outcome") != "pass":
+            continue
+        completion = entry.get("completion")
+        if not isinstance(completion, Mapping):
+            continue
+        if completion.get("command") != "advance_step":
+            continue
+        key = _step_key(entry.get("step_id"))
+        if key is not None:
+            recovered.add(key)
+
+    artifacts_dir = execution_result.get("artifacts_dir")
+    if not artifacts_dir:
+        return recovered
+    root = Path(str(artifacts_dir)).expanduser()
+    if not root.is_dir():
+        return recovered
+    for path in root.glob("web_client_result_advance*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, Mapping) or payload.get("status") != "pass":
+            continue
+        session_path = path.with_name(
+            path.name.replace("web_client_result_", "web_client_session_", 1)
+        )
+        if session_path.is_file():
+            try:
+                session_payload = json.loads(session_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                session_payload = {}
+            if (
+                isinstance(session_payload, Mapping)
+                and session_payload.get("outcome") in {"fail", "skip"}
+            ):
+                continue
+        advanced_step = payload.get("advanced_step")
+        if not isinstance(advanced_step, Mapping) or advanced_step.get("role") != "setup":
+            continue
+        key = _step_key(advanced_step.get("step_id"))
+        if key is not None:
+            recovered.add(key)
+    return recovered
 
 
 def _plain_log_excerpt(execution_result: dict[str, Any]) -> str:

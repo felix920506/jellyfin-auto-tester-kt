@@ -239,6 +239,107 @@ class ReportWriterTests(unittest.TestCase):
                 "status_code expected 500 got 200",
             )
 
+    def test_web_client_advanced_setup_failures_render_as_recovered(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = demo_result(temp_dir)
+            result["plan"]["reproduction_steps"] = [
+                {
+                    "step_id": 1,
+                    "role": "setup",
+                    "action": "Open the home screen",
+                    "tool": "browser",
+                    "input": {},
+                    "expected_outcome": "The home screen is visible.",
+                    "success_criteria": {"all_of": [{"type": "browser_action_run"}]},
+                },
+                {
+                    "step_id": 2,
+                    "role": "trigger",
+                    "action": "Observe the reported symptom",
+                    "tool": "browser",
+                    "input": {},
+                    "expected_outcome": "The reported symptom appears.",
+                    "success_criteria": {"all_of": [{"type": "browser_action_run"}]},
+                },
+            ]
+            result["execution_log"] = [
+                {
+                    "step_id": 1,
+                    "role": "setup",
+                    "action": "Open the home screen",
+                    "tool": "browser",
+                    "stdout": "",
+                    "stderr": "",
+                    "exit_code": None,
+                    "http": None,
+                    "browser": {
+                        "status": "fail",
+                        "actions": [
+                            {
+                                "type": "wait_for_url",
+                                "status": "fail",
+                                "error": "navigation wait timed out",
+                            }
+                        ],
+                        "final_url": "https://demo.jellyfin.org/stable/web/#/home",
+                        "dom_summary": "title='Stable Demo'; text='Home'",
+                        "media_state": {"state": "none"},
+                    },
+                    "screenshot_path": None,
+                    "outcome": "fail",
+                    "reason": "navigation wait timed out",
+                    "criteria_evaluation": {"passed": False, "assertions": []},
+                    "duration_ms": 30000,
+                },
+                {
+                    "step_id": 2,
+                    "role": "trigger",
+                    "action": "Observe the reported symptom",
+                    "tool": "browser",
+                    "stdout": "",
+                    "stderr": "",
+                    "exit_code": None,
+                    "http": None,
+                    "browser": {
+                        "status": "pass",
+                        "actions": [{"type": "click", "status": "pass"}],
+                        "final_url": "https://demo.jellyfin.org/stable/web/#/home",
+                        "dom_summary": "title='Stable Demo'; text='Home'",
+                        "media_state": {"state": "none"},
+                    },
+                    "screenshot_path": None,
+                    "outcome": "pass",
+                    "reason": None,
+                    "criteria_evaluation": {"passed": True, "assertions": []},
+                    "duration_ms": 100,
+                },
+            ]
+            artifacts_dir = Path(result["artifacts_dir"])
+            (artifacts_dir / "web_client_session_advance-1.json").write_text(
+                json.dumps({"command": "advance_step", "request_id": "advance-1"}),
+                encoding="utf-8",
+            )
+            (artifacts_dir / "web_client_result_advance-1.json").write_text(
+                json.dumps(
+                    {
+                        "request_id": "advance-1",
+                        "status": "pass",
+                        "advanced_step": {"step_id": 1, "role": "setup"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = report_writer.summarize_execution_result(result)
+            report = report_writer.render_report_markdown(
+                result,
+                artifacts_base=temp_dir,
+            )
+
+            self.assertEqual(summary["steps"][0]["status"], "pass")
+            self.assertIn("runner advanced after browser recovery", report)
+            self.assertIn("Step 1 browser `recovered`", report)
+
     def test_generate_writes_report_with_filtered_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             result = sample_result(temp_dir)

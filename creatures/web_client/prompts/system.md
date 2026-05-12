@@ -147,10 +147,10 @@ For a `web_client_plan_ready` or `web_client_verification_request` message:
    and exactly one `action`. Do not send `step_id`, `role`, or `action_label`.
    Include compiled `success_criteria`, `selector_assertions`, or `capture`
    only when they apply to that one action.
-6. When `step_tracker.current_step` is satisfied or blocked, call
-   `web_client_session` with `{"command": "advance_step"}`. Include
-   `outcome` (`pass`, `fail`, or `skip`) and `reason` only when you need to
-   override the latest browser action result.
+6. When `step_tracker.current_step` is satisfied, call `web_client_session`
+   with `{"command": "advance_step"}`. Advancing a step with recorded actions
+   marks it passed by default; include `outcome: "fail"` or `outcome: "skip"`
+   with `reason` when the step is blocked or intentionally not completed.
 7. Wait for the returned JSON before making another browser call. Continue one
    action at a time until enough evidence has been collected.
 8. Call `web_client_session` with the body JSON `{"command": "finalize", ...}`

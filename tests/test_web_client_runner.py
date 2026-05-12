@@ -1369,6 +1369,78 @@ class WebClientRunnerTests(unittest.TestCase):
                 Path(temp_dir, "retry-run", "browser_action_history.json").is_file()
             )
 
+    def test_session_advance_step_defaults_to_pass_with_recorded_actions(self):
+        failed_browser = {
+            "status": "fail",
+            "actions": [
+                {
+                    "type": "wait_for",
+                    "status": "fail",
+                    "error": "wait timed out after target appeared",
+                }
+            ],
+            "screenshot_paths": [],
+            "final_url": "http://localhost:8097/web/#/home",
+            "title": "Jellyfin",
+            "console": [],
+            "failed_network": [],
+            "dom_summary": "title='Jellyfin'; text='Home'",
+            "dom_path": None,
+            "page_text": "Home",
+            "visible_controls": [],
+            "media_state": {"state": "none", "elements": []},
+            "error": "wait timed out after target appeared",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            browser_driver = FakeBrowserDriver(temp_dir, results=[failed_browser])
+            plan_path = Path(temp_dir) / "plan.json"
+            plan_path.write_text(json.dumps(browser_plan()), encoding="utf-8")
+            runner = WebClientRunner(
+                artifacts_root=temp_dir,
+                docker=FakeDocker(),
+                api=FakeAPI(),
+                screenshotter=FakeScreenshotter(temp_dir),
+                browser_driver=browser_driver,
+            )
+
+            runner.session(
+                {
+                    "command": "start",
+                    "request_id": "start-1",
+                    "run_id": "default-pass-run",
+                    "artifacts_root": temp_dir,
+                    "plan_path": str(plan_path),
+                }
+            )
+            first = runner.session(
+                {
+                    "command": "action",
+                    "request_id": "wait-1",
+                    "action": {"type": "wait_for", "selector": ".home"},
+                }
+            )
+            advanced = runner.session(
+                {
+                    "command": "advance_step",
+                    "request_id": "advance-1",
+                }
+            )
+
+            self.assertEqual(first["status"], "fail")
+            self.assertEqual(advanced["advanced_step"]["outcome"], "pass")
+            raw_advance = json.loads(
+                Path(
+                    temp_dir,
+                    "default-pass-run",
+                    "web_client_result_advance-1.json",
+                ).read_text(encoding="utf-8")
+            )
+            entry = raw_advance["execution_entry"]
+            self.assertEqual(entry["outcome"], "pass")
+            self.assertTrue(entry["criteria_evaluation"]["passed"])
+            self.assertFalse(entry["completion"]["outcome_supplied"])
+
     def test_session_finalize_auto_closes_active_step_and_skips_remaining(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             browser_driver = FakeBrowserDriver(temp_dir)

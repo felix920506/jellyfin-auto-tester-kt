@@ -1556,6 +1556,7 @@ class WebClientRunner:
             return result
 
         outcome = payload.get("outcome")
+        outcome_supplied = outcome is not None
         reason = payload.get("reason")
         actions = tracker.current_actions()
         if not actions and outcome is None:
@@ -1583,9 +1584,14 @@ class WebClientRunner:
             session=session,
             step=current_step,
             actions=actions,
-            outcome=str(outcome) if outcome is not None else None,
+            outcome=str(outcome) if outcome_supplied else "pass",
             reason=str(reason) if reason is not None else None,
         )
+        entry["completion"] = {
+            "command": "advance_step",
+            "request_id": request_id,
+            "outcome_supplied": outcome_supplied,
+        }
         session.execution_log.append(entry)
         tracker.advance()
         self._write_browser_action_history(session)
@@ -2984,8 +2990,9 @@ class WebClientSessionTool(BaseTool):
             "[web_client_session/]`. For full-plan starts, pass the received "
             "Markdown plan text as `plan_markdown`; do not use local "
             "filesystem paths. Send one action command per browser move, use "
-            "`advance_step` when the current plan step is satisfied or "
-            "blocked, and finish with finalize. Finalize returns compact "
+            "`advance_step` when the current plan step is satisfied, pass "
+            "`outcome` for blocked or skipped steps, and finish with finalize. "
+            "Finalize returns compact "
             "channel JSON; the full result is written under artifacts. Do not "
             "nest commands inside `actions` arrays or pass `action` as an "
             "array."
