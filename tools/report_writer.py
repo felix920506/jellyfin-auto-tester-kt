@@ -1732,6 +1732,12 @@ def _normalize_step(step: dict[str, Any], index: int) -> dict[str, Any]:
         raise ValueError("each written step must be an object")
     normalized = deepcopy(step)
     normalized.setdefault("step_id", index)
+    if not isinstance(normalized.get("input"), dict):
+        normalized["input"] = {}
+    if not isinstance(normalized.get("success_criteria"), dict):
+        normalized["success_criteria"] = _default_success_criteria(
+            normalized.get("tool")
+        )
     missing = [
         key
         for key in ("step_id", "role", "action", "tool", "input", "expected_outcome", "success_criteria")
@@ -1739,9 +1745,17 @@ def _normalize_step(step: dict[str, Any], index: int) -> dict[str, Any]:
     ]
     if missing:
         raise ValueError(f"written step {index} is missing required keys: {', '.join(missing)}")
-    if not isinstance(normalized.get("input"), dict):
-        raise ValueError(f"written step {index}.input must be an object")
     return normalized
+
+
+def _default_success_criteria(tool: Any) -> dict[str, Any]:
+    if tool == "http_request":
+        return {"all_of": [{"type": "status_code", "in": [200, 204]}]}
+    if tool == "screenshot":
+        return {"all_of": [{"type": "screenshot_present", "label": "screenshot"}]}
+    if tool == "browser":
+        return {"all_of": [{"type": "browser_action_run"}]}
+    return {"all_of": [{"type": "exit_code", "equals": 0}]}
 
 
 def _resolve_artifacts_root(

@@ -735,6 +735,48 @@ class ReportWriterTests(unittest.TestCase):
             )
             self.assertEqual(verification_plan["execution_target"], "web_client")
 
+    def test_build_verification_plan_defaults_minimal_web_client_steps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = demo_result(temp_dir)
+            written_steps = [copy.deepcopy(original["plan"]["reproduction_steps"][0])]
+            written_steps[0]["role"] = "trigger"
+            written_steps[0]["tool"] = "browser"
+            written_steps[0].pop("input", None)
+            written_steps[0].pop("success_criteria", None)
+
+            verification_plan = report_writer.build_verification_plan(
+                original,
+                written_steps,
+            )
+
+            self.assertEqual(verification_plan["execution_target"], "web_client")
+            self.assertEqual(len(verification_plan["reproduction_steps"]), 1)
+            step = verification_plan["reproduction_steps"][0]
+            self.assertEqual(step["input"], {})
+            self.assertEqual(
+                step["success_criteria"],
+                {"all_of": [{"type": "browser_action_run"}]},
+            )
+
+    def test_route_report_result_handles_minimal_web_client_steps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = demo_result(temp_dir)
+            for step in original["plan"]["reproduction_steps"]:
+                step["tool"] = "browser"
+                step.pop("input", None)
+                step.pop("success_criteria", None)
+
+            route = report_writer.route_report_result(original, artifacts_base=temp_dir)
+
+            self.assertEqual(route["channel"], "web_client_verification_request")
+            self.assertFalse(route["terminal"])
+            first_step = route["payload"]["reproduction_steps"][0]
+            self.assertEqual(first_step["input"], {})
+            self.assertEqual(
+                first_step["success_criteria"],
+                {"all_of": [{"type": "browser_action_run"}]},
+            )
+
     def test_build_verification_plan_requires_exactly_one_trigger(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original = sample_result(temp_dir, run_id="run-1")
