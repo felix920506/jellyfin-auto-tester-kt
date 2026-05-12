@@ -34,6 +34,7 @@ from main import (
     _stage1_config_path_from_recipe,
     _stage1_model_identifier_from_config,
     _receive_channel_message,
+    _write_report_stage_failure_artifacts,
     apply_execution_turn_budget,
     configure_runtime_logging,
     execution_turn_budget,
@@ -2600,9 +2601,9 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(engine.run_thread)
             self.assertNotEqual(engine.run_thread, main_thread)
 
-    def test_run_report_stage_routes_report_and_verification_through_agents(self):
+    def test_run_report_stage_returns_first_pass_when_no_verification_result(self):
         plan = _sample_plan()
-        engine = FakeReportStageEngine()
+        engine = FakeReportStageEngine(auto_execute_verification=False)
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             execution_dir = temp_path / "execution"
@@ -2619,15 +2620,9 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 engine_factory=lambda stage: engine,
             )
 
-            route_payload = json.loads(
-                (temp_path / "report" / "final_report.json").read_text(
-                    encoding="utf-8",
-                )
-            )
-            self.assertEqual(result.status, "final_report")
-            self.assertEqual(result.output_file, "final_report.json")
+            self.assertEqual(result.status, "verification_request")
+            self.assertEqual(result.output_file, "verification_request.json")
             self.assertTrue((temp_path / "report" / "report.md").is_file())
-            self.assertTrue((temp_path / "report" / "result.json").is_file())
             self.assertEqual(
                 json.loads(
                     (temp_path / "report" / "execution_result.json").read_text(
@@ -2639,21 +2634,51 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(engine.first_execution_result, execution_result)
             self.assertTrue(engine.verification_request["is_verification"])
             self.assertEqual(engine.verification_request["original_run_id"], "run-1")
-            self.assertEqual(engine.verification_result["run_id"], "verify-run")
+            self.assertIsNone(engine.verification_result)
+
+            result_payload = json.loads(
+                (temp_path / "report" / "result.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(result_payload["verification_status"], "skipped")
+            self.assertIsNone(result_payload["verified"])
+            self.assertEqual(result_payload["run_id"], "run-1")
             self.assertEqual(
-                route_payload["path"],
+                result_payload["path"],
                 str((temp_path / "report" / "report.md").resolve()),
             )
             self.assertEqual(
-                route_payload["summary"],
+                result_payload["summary"],
                 "Stage 3 summary without raw logs.",
             )
+            self.assertEqual(
+                result_payload,
+                json.loads(
+                    (temp_path / "report" / "report_metadata.json").read_text(
+                        encoding="utf-8",
+                    )
+                ),
+            )
+
+            verification_request_payload = json.loads(
+                (temp_path / "report" / "verification_request.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+            self.assertTrue(verification_request_payload["is_verification"])
+            self.assertEqual(
+                verification_request_payload["original_run_id"], "run-1"
+            )
+
+            self.assertFalse(result.metadata["verification_injected"])
+            self.assertEqual(result.metadata["verification_status"], "skipped")
+            self.assertIsNone(result.metadata["verified"])
+
             transcript_payload = _read_stage_transcript(temp_path / "report")
             transcript_metadata = _read_stage_transcript_metadata(
                 temp_path / "report"
             )
             self.assertEqual(transcript_metadata["stage"], "report")
-            self.assertEqual(transcript_metadata["status"], "final_report")
+            self.assertEqual(transcript_metadata["status"], "verification_request")
             self.assertEqual(result.metadata["transcript"], ANALYSIS_TRANSCRIPT_FILE)
             self.assertEqual(
                 result.metadata["transcript_metadata"],
@@ -2668,7 +2693,10 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
                 transcript_payload["messages"][0]["content"],
             )
             assistant_text = _assistant_text(transcript_payload)
-            self.assertIn("Stage 3 completed with `final_report`", assistant_text)
+            self.assertIn(
+                "Stage 3 first-pass report ready (verification skipped)",
+                assistant_text,
+            )
             self.assertIn("Stage 3 summary without raw logs.", assistant_text)
             self.assertNotIn("raw report llm output", assistant_text)
             self.assertEqual(engine.report_default_output.streamed, [])
@@ -2734,68 +2762,75 @@ class PipelineFabricTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(engine.verification_result["run_id"], "verify-supplied")
 
-    def test_run_report_stage_timeout_writes_pending_route_artifacts(self):
+    def test_write_report_stage_failure_artifacts_persists_pending_route(self):
         plan = _sample_plan()
-        engine = FakeReportStageEngine(auto_execute_verification=False)
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            execution_dir = temp_path / "execution"
-            artifacts_dir = execution_dir / "run-1"
-            execution_result = _sample_execution_result(plan, artifacts_dir)
-            (execution_dir / "result.json").write_text(
-                json.dumps(execution_result),
+            artifacts_dir = temp_path / "run-1"
+            artifacts_dir.mkdir()
+            (artifacts_dir / "report.md").write_text(
+                "# Report\n\n## Summary\n\nTimeout body.\n",
                 encoding="utf-8",
             )
+            execution_result = _sample_execution_result(plan, artifacts_dir)
+            output_dir = temp_path / "report"
+            output_dir.mkdir()
 
-            with self.assertRaisesRegex(PipelineTimeoutError, "Stage 3 report"):
-                run_report_stage(
-                    execution_dir,
-                    temp_path / "report",
-                    timeout_s=0.1,
-                    engine_factory=lambda stage: engine,
-                )
+            diagnostics = {
+                "pending_route": "verification_request",
+                "pending_payload": {
+                    "path": str(artifacts_dir / "report.md"),
+                    "is_verification": True,
+                    "original_run_id": "run-1",
+                },
+                "verification_injected": True,
+            }
+            exc = PipelineTimeoutError(
+                "timed out waiting for Stage 3 report handoff within 0.1 seconds",
+                diagnostics=diagnostics,
+            )
+
+            failure_payload = _write_report_stage_failure_artifacts(
+                exc, output_dir, execution_result
+            )
+
+            self.assertEqual(failure_payload["pending_route"], "verification_request")
+            self.assertEqual(failure_payload["error_type"], "PipelineTimeoutError")
+            self.assertTrue(failure_payload["verification_injected"])
 
             pending_route = json.loads(
-                (temp_path / "report" / "pending_route.json").read_text(
-                    encoding="utf-8",
-                )
+                (output_dir / "pending_route.json").read_text(encoding="utf-8")
             )
-            verification_request = json.loads(
-                (temp_path / "report" / "verification_request.json").read_text(
-                    encoding="utf-8",
-                )
-            )
-            failure_diagnostics = json.loads(
-                (temp_path / "report" / "failure_diagnostics.json").read_text(
-                    encoding="utf-8",
-                )
-            )
-            report_file_exists = (temp_path / "report" / "report.md").is_file()
-            transcript_payload = _read_stage_transcript(temp_path / "report")
+            self.assertEqual(pending_route["channel"], "verification_request")
+            self.assertTrue(pending_route["payload"]["is_verification"])
+            self.assertTrue(pending_route["verification_injected"])
 
-        self.assertTrue(engine.stopped)
-        self.assertEqual(pending_route["channel"], "verification_request")
-        self.assertTrue(verification_request["is_verification"])
-        self.assertEqual(verification_request["original_run_id"], "run-1")
-        self.assertEqual(failure_diagnostics["pending_route"], "verification_request")
-        self.assertEqual(
-            failure_diagnostics["files"]["pending_payload"],
-            "verification_request.json",
-        )
-        self.assertEqual(
-            failure_diagnostics["files"]["pending_route"],
-            "pending_route.json",
-        )
-        self.assertEqual(
-            failure_diagnostics["files"]["failure_diagnostics"],
-            "failure_diagnostics.json",
-        )
-        self.assertEqual(failure_diagnostics["files"]["report"], "report.md")
-        self.assertTrue(report_file_exists)
-        assistant_text = transcript_payload["messages"][-1]["content"]
-        self.assertIn("Pending route: `verification_request`", assistant_text)
-        self.assertIn("failure_diagnostics.json", assistant_text)
-        self.assertIn("verification_request.json", assistant_text)
+            verification_request = json.loads(
+                (output_dir / "verification_request.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(verification_request["is_verification"])
+            self.assertEqual(verification_request["original_run_id"], "run-1")
+
+            failure_diagnostics = json.loads(
+                (output_dir / "failure_diagnostics.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                failure_diagnostics["pending_route"], "verification_request"
+            )
+            self.assertEqual(
+                failure_diagnostics["files"]["pending_payload"],
+                "verification_request.json",
+            )
+            self.assertEqual(
+                failure_diagnostics["files"]["pending_route"],
+                "pending_route.json",
+            )
+            self.assertEqual(
+                failure_diagnostics["files"]["failure_diagnostics"],
+                "failure_diagnostics.json",
+            )
+            self.assertEqual(failure_diagnostics["files"]["report"], "report.md")
+            self.assertTrue((output_dir / "report.md").is_file())
 
     def test_run_report_stage_flushes_transcript_while_provider_times_out(self):
         plan = _sample_plan()
