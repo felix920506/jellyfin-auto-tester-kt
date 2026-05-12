@@ -122,6 +122,15 @@ class PipelineResult:
 class PipelineTimeoutError(TimeoutError):
     """Raised when the pipeline does not reach a terminal channel in time."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
+
 
 class AnalysisAgentProtocolError(AssertionError):
     """Raised when Stage 1 finishes without following the output protocol."""
@@ -1790,7 +1799,16 @@ async def _run_report_stage_impl(
             timeout_s=timeout_s,
         )
     except Exception as exc:
-        assistant_output = _report_stage_failure_summary(exc, execution_result)
+        failure_artifacts = _write_report_stage_failure_artifacts(
+            exc,
+            output_dir,
+            execution_result,
+        )
+        assistant_output = _report_stage_failure_summary(
+            exc,
+            execution_result,
+            failure_artifacts=failure_artifacts,
+        )
         output_sources = _transcript_sources(("stage3_summary", assistant_output))
         transcript_writer.write_snapshot(
             assistant_output=assistant_output,
@@ -1868,26 +1886,31 @@ async def _run_report_agent_handoff(
     loop = asyncio.get_running_loop()
     deadline = None if timeout_s is None else loop.time() + timeout_s
     verification_injected = False
+    verification_observed = False
+    diagnostics: dict[str, Any] = {
+        "pending_route": None,
+        "pending_payload": None,
+        "verification_injected": False,
+    }
     try:
         await _wait_for_engine_channel(engine, EXECUTION_DONE_CHANNEL, engine_task)
         for channel in TERMINAL_CHANNELS:
             await _wait_for_engine_channel(engine, channel, engine_task)
-        if verification_result is not None:
-            verification_task = _create_first_channel_observer_task(
+        verification_task = _create_first_channel_observer_task(
+            engine,
+            REPORT_VERIFICATION_CHANNELS,
+        )
+        if verification_task is None and verification_result is not None:
+            verification_channels = _available_channels(
                 engine,
                 REPORT_VERIFICATION_CHANNELS,
             )
-            if verification_task is None:
-                verification_channels = _available_channels(
-                    engine,
-                    REPORT_VERIFICATION_CHANNELS,
-                )
-                if not verification_channels:
-                    verification_channels = ("verification_request",)
-                verification_task = _create_first_channel_receive_task(
-                    engine,
-                    verification_channels,
-                )
+            if not verification_channels:
+                verification_channels = ("verification_request",)
+            verification_task = _create_first_channel_receive_task(
+                engine,
+                verification_channels,
+            )
 
         terminal_task = asyncio.create_task(_wait_for_terminal_message(engine))
         await _send_channel_message(
@@ -1900,7 +1923,11 @@ async def _run_report_agent_handoff(
 
         while True:
             tasks: set[asyncio.Task[Any]] = {terminal_task, engine_task}
-            if verification_task is not None and not verification_injected:
+            if (
+                verification_task is not None
+                and not verification_observed
+                and not verification_injected
+            ):
                 tasks.add(verification_task)
             done, _pending = await asyncio.wait(
                 tasks,
@@ -1914,17 +1941,22 @@ async def _run_report_agent_handoff(
             if (
                 verification_task is not None
                 and verification_task in done
+                and not verification_observed
                 and not verification_injected
             ):
                 route_channel, request_payload = verification_task.result()
+                verification_observed = True
+                diagnostics["pending_route"] = route_channel
+                diagnostics["pending_payload"] = request_payload
                 logger.debug(
-                    "Observed %s from report agent; injecting supplied "
-                    "verification result run_id=%s",
+                    "Observed %s from report agent while waiting for Stage 3 "
+                    "terminal handoff",
                     route_channel,
-                    verification_result.get("run_id"),
                 )
                 if isinstance(request_payload, dict):
                     _apply_execution_turn_budget_if_available(engine, request_payload)
+                if verification_result is None:
+                    continue
                 await _send_channel_message(
                     engine,
                     EXECUTION_DONE_CHANNEL,
@@ -1932,6 +1964,7 @@ async def _run_report_agent_handoff(
                     sender="report_stage_debug_verification",
                 )
                 verification_injected = True
+                diagnostics["verification_injected"] = True
                 continue
 
             if engine_task in done:
@@ -1955,7 +1988,8 @@ async def _run_report_agent_handoff(
             )
             raise PipelineTimeoutError(
                 "timed out waiting for Stage 3 report handoff "
-                f"{timeout_text}"
+                f"{timeout_text}",
+                diagnostics=diagnostics,
             )
     finally:
         if verification_task is not None and not verification_task.done():
@@ -2047,6 +2081,71 @@ def _mirror_report_from_route(
     return _mirror_report(source_path, output_dir)
 
 
+def _write_report_stage_failure_artifacts(
+    exc: Exception,
+    output_dir: Path,
+    execution_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist partial Stage 3 state for timeout/debug failures."""
+
+    diagnostics = getattr(exc, "diagnostics", None)
+    if not isinstance(diagnostics, Mapping):
+        diagnostics = {}
+
+    files: dict[str, str] = {}
+    route = _optional_text(diagnostics.get("pending_route"))
+    pending_payload = diagnostics.get("pending_payload")
+    normalized_payload = (
+        _normalize_route_payload(pending_payload) if route else None
+    )
+
+    if route:
+        pending_file = _write_json_file(
+            output_dir / f"{route}.json",
+            normalized_payload,
+        )
+        files["pending_payload"] = pending_file.name
+        pending_route_file = _write_json_file(
+            output_dir / "pending_route.json",
+            {
+                "channel": route,
+                "payload": normalized_payload,
+                "verification_injected": bool(
+                    diagnostics.get("verification_injected")
+                ),
+            },
+        )
+        files["pending_route"] = pending_route_file.name
+
+    try:
+        report_file = _mirror_report_from_route(
+            normalized_payload if isinstance(normalized_payload, dict) else {},
+            output_dir,
+            execution_result,
+        )
+    except Exception as report_exc:
+        _logger().debug("Could not mirror partial Stage 3 report: %s", report_exc)
+        report_file = None
+    if report_file is not None:
+        files["report"] = report_file.name
+
+    files["failure_diagnostics"] = "failure_diagnostics.json"
+    failure_payload = {
+        "error_type": exc.__class__.__name__,
+        "error": _optional_text(str(exc)) or "No error detail was provided.",
+        "run_id": _optional_text(execution_result.get("run_id")),
+        "artifacts_dir": _optional_text(execution_result.get("artifacts_dir")),
+        "pending_route": route,
+        "verification_injected": bool(diagnostics.get("verification_injected")),
+        "files": dict(files),
+    }
+    _write_json_file(
+        output_dir / "failure_diagnostics.json",
+        failure_payload,
+    )
+    return failure_payload
+
+
 def _report_stage_summary(
     route: str,
     route_payload: Any,
@@ -2069,14 +2168,30 @@ def _report_stage_summary(
 def _report_stage_failure_summary(
     exc: Exception,
     execution_result: dict[str, Any],
+    *,
+    failure_artifacts: Mapping[str, Any] | None = None,
 ) -> str:
     run_id = _optional_text(execution_result.get("run_id")) or "unknown"
-    return (
-        f"Stage 3 failed with `{exc.__class__.__name__}`.\n\n"
-        "Details:\n"
-        f"- Run ID: `{run_id}`\n"
-        f"- Error: {_optional_text(str(exc)) or 'No error detail was provided.'}\n"
-    )
+    lines = [
+        f"Stage 3 failed with `{exc.__class__.__name__}`.",
+        "",
+        "Details:",
+        f"- Run ID: `{run_id}`",
+        f"- Error: {_optional_text(str(exc)) or 'No error detail was provided.'}",
+    ]
+    if failure_artifacts:
+        route = _optional_text(failure_artifacts.get("pending_route"))
+        if route:
+            lines.append(f"- Pending route: `{route}`")
+        files = failure_artifacts.get("files")
+        if isinstance(files, Mapping) and files:
+            lines.append("- Debug artifacts:")
+            for label, filename in sorted(files.items()):
+                value = _optional_text(filename)
+                if value:
+                    lines.append(f"  - {label}: `{value}`")
+    return "\n".join(lines).rstrip() + "\n"
+
 
 
 def _report_stage_summary_details(
